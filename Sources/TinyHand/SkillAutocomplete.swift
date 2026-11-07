@@ -134,46 +134,50 @@ struct SkillSuggestionList: View {
     var onSelect: (AgentSkill) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(controller.matches.enumerated()), id: \.element.id) { index, skill in
-                Button {
-                    onSelect(skill)
-                } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "hexagon.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 18, height: 18)
-                            .padding(.top, 1)
-                        VStack(alignment: .leading, spacing: 2) {
-                            highlightedName(skill.name, query: query)
-                                .font(.system(size: 13, weight: .semibold))
-                            if !skill.description.isEmpty {
-                                Text(skill.description)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(controller.matches.enumerated()), id: \.element.id) { index, skill in
+                    Button {
+                        onSelect(skill)
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "hexagon.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 18, height: 18)
+                                .padding(.top, 1)
+                            VStack(alignment: .leading, spacing: 2) {
+                                highlightedName(skill.name, query: query)
+                                    .font(.system(size: 13, weight: .semibold))
+                                if !skill.description.isEmpty {
+                                    Text(skill.description)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
                             }
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
+                        )
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
-                    )
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
+        .frame(maxHeight: 260)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(4)
-        .frame(minWidth: 280, maxWidth: 420, alignment: .leading)
+        .frame(minWidth: 280, maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
+                .shadow(color: .black.opacity(0.28), radius: 16, y: 4)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)

@@ -33,17 +33,22 @@ struct SessionChatView: View {
                 queueSection
                 Divider()
             }
-            if skillAC.isActive {
-                SkillSuggestionList(
-                    controller: skillAC,
-                    query: SkillCatalog.slashQuery(in: draft)?.query ?? ""
-                ) { skill in
-                    applySkill(skill)
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-            }
             composer
+                .overlay(alignment: .top) {
+                    if skillAC.isActive {
+                        SkillSuggestionList(
+                            controller: skillAC,
+                            query: SkillCatalog.slashQuery(in: draft)?.query ?? ""
+                        ) { skill in
+                            applySkill(skill)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 6)
+                        // Anchor the list's bottom to the composer's top so it floats upward.
+                        .alignmentGuide(.top) { $0[.bottom] }
+                    }
+                }
+                .zIndex(1)
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))

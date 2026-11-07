@@ -245,7 +245,9 @@ enum Preferences {
         set { defaults.set(Double(newValue), forKey: "sessionsPanelHeight") }
     }
 
-    /// User-dragged sessions panel origin (AppKit coords). `nil` = default trailing dock.
+    /// Origin of the sessions *list* with chat closed (AppKit coords).
+    /// Expanded chat frames keep this origin and grow to the right.
+    /// `nil` = default trailing dock.
     static var sessionsPanelOrigin: CGPoint? {
         get {
             guard let x = defaults.object(forKey: "sessionsPanelOriginX") as? Double,
