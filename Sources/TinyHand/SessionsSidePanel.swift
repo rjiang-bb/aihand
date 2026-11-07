@@ -694,19 +694,16 @@ private struct SessionsSidePanelView: View {
                 onManage: onManageWorkspaces
             )
             if store.sessions.isEmpty {
-                VStack {
-                    Spacer()
-                    Text(store.currentWorkspace.isEmpty
-                         ? "Add a working folder to start sessions here."
-                         : "Tap New to start a prompt, or draw on screen to annotate.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.primary.opacity(0.72))
-                        .multilineTextAlignment(.center)
-                        .padding(20)
-                        .frame(maxWidth: .infinity)
-                        .background(SolidCardBackground(cornerRadius: 22, selected: false))
-                    Spacer()
-                }
+                Text(store.currentWorkspace.isEmpty
+                     ? "Add a working folder to start sessions here."
+                     : "Tap New to start a prompt, or draw on screen to annotate.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .padding(20)
+                    .frame(maxWidth: .infinity)
+                    .background(SolidCardBackground(cornerRadius: 22, selected: false))
+                Spacer(minLength: 0)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
