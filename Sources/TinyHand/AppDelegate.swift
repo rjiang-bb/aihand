@@ -17,14 +17,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sessionsItem: NSMenuItem?
     private var toggleHotKey: UInt32?
     private var clearHotKey: UInt32?
+    private var sessionsHotKey: UInt32?
 
     private let sessionStore = SessionStore()
     private lazy var sessionManager = AgentSessionManager(store: sessionStore)
     private lazy var sessionsPanel = SessionsSidePanel(store: sessionStore)
     private let annotatePanel = AnnotatePromptPanel()
     private var pendingStrokes: [StrokeResult] = []
-    /// True when the prompt panel was opened via Sessions → New (no screenshot).
-    private var textOnlyPrompt = false
     private var sessionIconBag: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -86,7 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.sessionManager.stop(sessionID: id)
         }
         sessionsPanel.onNew = { [weak self] in
-            self?.startTextOnlySession()
+            self?.startBlankSession()
         }
 
         annotatePanel.onOpenChanged = { [weak self] open in
@@ -95,7 +94,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         annotatePanel.onCancel = { [weak self] in
             // Keep drawings — Esc only closes the comment box.
-            self?.textOnlyPrompt = false
             self?.overlay.setAnnotationHintsVisible(true)
         }
         annotatePanel.onSubmit = { [weak self] prompt in
@@ -115,26 +113,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         overlay.onInkCleared = { [weak self] in
             self?.pendingStrokes = []
-            self?.textOnlyPrompt = false
             self?.annotatePanel.hide()
         }
     }
 
-    private func startTextOnlySession() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
-        textOnlyPrompt = true
-        let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        annotatePanel.show(on: screen, near: nil, workspaceMissing: missing, requirePrompt: true)
+    private func startBlankSession() {
+        let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !workspace.isEmpty else {
+            settings.show(.agent)
+            return
+        }
+        if !sessionsPanel.isVisible {
+            sessionsPanel.show()
+        }
+        if let session = sessionManager.createBlankSession() {
+            sessionsPanel.openChat(for: session.id)
+        }
     }
 
     private func openAnnotationComment() {
         guard !annotatePanel.isVisible, !pendingStrokes.isEmpty else { return }
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
                 ?? NSScreen.main else { return }
-        textOnlyPrompt = false
         let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let near = inkScreenBounds()
-        annotatePanel.show(on: screen, near: near, workspaceMissing: missing, requirePrompt: false)
+        if let near = inkScreenBounds() {
+            annotatePanel.show(on: screen, placement: .near(near), workspaceMissing: missing, requirePrompt: false)
+        } else {
+            annotatePanel.show(on: screen, placement: .bottom, workspaceMissing: missing, requirePrompt: false)
+        }
     }
 
     private func inkScreenBounds() -> CGRect? {
@@ -157,19 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // Text-only "New" session — no screenshot.
-        if textOnlyPrompt || pendingStrokes.isEmpty {
-            textOnlyPrompt = false
-            annotatePanel.hide()
-            if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: nil) {
-                sessionsPanel.openChat(for: session.id)
-            }
-            return
-        }
+        guard !pendingStrokes.isEmpty else { return }
 
         let strokes = pendingStrokes
         pendingStrokes = []
-        textOnlyPrompt = false
 
         guard let overlayFrame = overlay.overlayFrame else {
             overlay.exit()
@@ -270,10 +267,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func setupSettings() {
         settings.applyToggleShortcut = { [weak self] s in
-            self?.apply(s, isToggle: true) ?? false
+            self?.apply(s, kind: .toggle) ?? false
         }
         settings.applyClearShortcut = { [weak self] s in
-            self?.apply(s, isToggle: false) ?? false
+            self?.apply(s, kind: .clear) ?? false
+        }
+        settings.applySessionsShortcut = { [weak self] s in
+            self?.apply(s, kind: .sessions) ?? false
         }
         settings.updater = Updater.isAvailable ? updater : nil
         settings.onRecording = { [weak self] recording in
@@ -310,27 +310,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let on = overlay.isActive
         toggleItem?.title = "\(on ? "Turn Pointer Off" : "Turn Pointer On")    \(Preferences.toggleShortcut.display)"
         clearItem?.title = "Clear Drawing    \(Preferences.clearShortcut.display)"
+        sessionsItem?.title = "Tinyhand sessions    \(Preferences.sessionsShortcut.display)"
         soundItem?.state = overlay.soundOn ? .on : .off
         permissionItem?.isHidden = AXIsProcessTrusted()
     }
 
-    private func apply(_ s: Shortcut, isToggle: Bool) -> Bool {
+    private enum HotKeyKind {
+        case toggle, clear, sessions
+    }
+
+    private func apply(_ s: Shortcut, kind: HotKeyKind) -> Bool {
         unregisterHotKeys()
-        let old = isToggle ? Preferences.toggleShortcut : Preferences.clearShortcut
-        if isToggle {
+        let old: Shortcut
+        switch kind {
+        case .toggle:
+            old = Preferences.toggleShortcut
             Preferences.toggleShortcut = s
-        } else {
+        case .clear:
+            old = Preferences.clearShortcut
             Preferences.clearShortcut = s
+        case .sessions:
+            old = Preferences.sessionsShortcut
+            Preferences.sessionsShortcut = s
         }
         let ok = registerHotKeys()
         if ok {
             return true
         }
         unregisterHotKeys()
-        if isToggle {
-            Preferences.toggleShortcut = old
-        } else {
-            Preferences.clearShortcut = old
+        switch kind {
+        case .toggle: Preferences.toggleShortcut = old
+        case .clear: Preferences.clearShortcut = old
+        case .sessions: Preferences.sessionsShortcut = old
         }
         registerHotKeys()
         return false
@@ -338,18 +349,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @discardableResult
     private func registerHotKeys() -> Bool {
-        guard toggleHotKey == nil, clearHotKey == nil else {
+        guard toggleHotKey == nil, clearHotKey == nil, sessionsHotKey == nil else {
             return true
         }
         let t = Preferences.toggleShortcut
         let c = Preferences.clearShortcut
+        let s = Preferences.sessionsShortcut
         toggleHotKey = HotKeyCenter.shared.register(keyCode: t.keyCode, modifiers: t.modifiers) { [weak self] in
             self?.togglePointerWithSessions()
         }
         clearHotKey = HotKeyCenter.shared.register(keyCode: c.keyCode, modifiers: c.modifiers) { [weak self] in
             self?.overlay.clearInk()
         }
-        return toggleHotKey != nil && clearHotKey != nil
+        sessionsHotKey = HotKeyCenter.shared.register(keyCode: s.keyCode, modifiers: s.modifiers) { [weak self] in
+            self?.showSessions()
+        }
+        return toggleHotKey != nil && clearHotKey != nil && sessionsHotKey != nil
     }
 
     private func unregisterHotKeys() {
@@ -359,8 +374,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let id = clearHotKey {
             HotKeyCenter.shared.unregister(id)
         }
+        if let id = sessionsHotKey {
+            HotKeyCenter.shared.unregister(id)
+        }
         toggleHotKey = nil
         clearHotKey = nil
+        sessionsHotKey = nil
     }
 
     /// Menu bar click / toggle shortcut: turn the pointer on/off and show Sessions when starting.
@@ -395,7 +414,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openSettings() {
         pendingStrokes = []
-        textOnlyPrompt = false
         annotatePanel.hide()
         overlay.exit()
         settings.show()

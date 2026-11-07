@@ -47,9 +47,16 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         panel.contentView = host
     }
 
+    enum Placement {
+        /// Pin to the bottom-center of the screen (Sessions → New).
+        case bottom
+        /// Near a stroke / ink bounds when available.
+        case near(CGRect)
+    }
+
     func show(
         on screen: NSScreen,
-        near screenBounds: CGRect? = nil,
+        placement: Placement = .bottom,
         workspaceMissing: Bool,
         requirePrompt: Bool = false
     ) {
@@ -60,11 +67,41 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         model.agentSummary = "\(kind.title) · \(kind.defaultModelTitle)"
         model.focusTick += 1
 
+        position(on: screen, placement: placement)
+        panel.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        onOpenChanged?(true)
+
+        // SwiftUI needs a turn to apply requirePrompt / focus before fitting size is accurate.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.panel.isVisible else { return }
+            self.position(on: screen, placement: placement)
+            self.panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func position(on screen: NSScreen, placement: Placement) {
+        if let host = hosting {
+            host.layoutSubtreeIfNeeded()
+            let fitting = host.fittingSize
+            if fitting.width > 10, fitting.height > 10 {
+                panel.setContentSize(NSSize(width: max(360, fitting.width), height: fitting.height))
+            }
+        }
+
         let margin: CGFloat = 12
+        let bottomPad: CGFloat = 28
         let size = panel.frame.size
         let visible = screen.visibleFrame
         var origin: CGPoint
-        if let screenBounds {
+        switch placement {
+        case .bottom:
+            origin = CGPoint(
+                x: visible.midX - size.width / 2,
+                y: visible.minY + bottomPad
+            )
+        case .near(let screenBounds):
             origin = CGPoint(
                 x: screenBounds.midX - size.width / 2,
                 y: screenBounds.minY - size.height - margin
@@ -72,20 +109,21 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             if origin.y < visible.minY + margin {
                 origin.y = min(screenBounds.maxY + margin, visible.maxY - size.height - margin)
             }
-        } else {
-            origin = CGPoint(
-                x: visible.midX - size.width / 2,
-                y: visible.minY + 72
-            )
         }
         origin.x = min(max(origin.x, visible.minX + margin), visible.maxX - size.width - margin)
         origin.y = min(max(origin.y, visible.minY + margin), visible.maxY - size.height - margin)
-
         panel.setFrameOrigin(origin)
-        panel.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        onOpenChanged?(true)
+    }
+
+    /// Compatibility wrapper for older call sites.
+    func show(
+        on screen: NSScreen,
+        near screenBounds: CGRect?,
+        workspaceMissing: Bool,
+        requirePrompt: Bool = false
+    ) {
+        let placement: Placement = screenBounds.map { .near($0) } ?? .bottom
+        show(on: screen, placement: placement, workspaceMissing: workspaceMissing, requirePrompt: requirePrompt)
     }
 
     func hide() {

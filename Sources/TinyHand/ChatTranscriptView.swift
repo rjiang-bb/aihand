@@ -179,64 +179,66 @@ struct ChatTranscriptView: NSViewRepresentable {
         color: var(--text);
       }
       .msg.assistant { align-self: stretch; padding: 2px 0; color: var(--text); }
-      .msg.tool {
+      .msg.tool-group {
         align-self: stretch;
         max-width: 100%;
-        background: var(--tool-bg);
-        border: 1px solid var(--tool-border);
-        border-radius: 8px;
-        padding: 5px 8px;
-        font-size: 12px;
-        color: var(--text);
-        font-family: var(--mono);
-        display: flex;
-        gap: 6px;
+        font: 12.5px/1.45 var(--sans);
+        color: var(--muted);
+      }
+      .msg.tool-group .tool-summary {
+        display: inline-flex;
+        gap: 5px;
         align-items: center;
+        max-width: 100%;
+        padding: 1px 0;
         cursor: pointer;
         user-select: none;
         -webkit-user-select: none;
+        border-radius: 4px;
       }
-      .msg.tool:hover { border-color: var(--link); }
-      .msg.tool .chev {
+      .msg.tool-group .tool-summary:hover { color: var(--text); }
+      .msg.tool-group .chev {
         flex: none;
-        width: 10px;
-        color: var(--muted);
-        font-size: 9px;
+        width: 9px;
+        font-size: 8px;
         line-height: 1;
+        opacity: 0.7;
         transition: transform 0.12s ease;
       }
-      .msg.tool.expanded .chev { transform: rotate(90deg); }
-      .msg.tool .glyph {
-        flex: none;
-        opacity: 0.85;
-        color: var(--muted);
-      }
-      .msg.tool .tool-body {
-        flex: 1;
+      .msg.tool-group.expanded .chev { transform: rotate(90deg); }
+      .msg.tool-group .tool-body {
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        line-height: 1.35;
       }
-      .msg.tool.expanded {
+      .msg.tool-group .tool-details {
+        display: none;
+        margin: 4px 0 2px 14px;
+        padding: 0;
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .msg.tool-group.expanded .tool-details { display: block; }
+      .msg.tool-group .tool-detail {
+        display: flex;
+        gap: 6px;
         align-items: flex-start;
-        cursor: default;
-        user-select: text;
-        -webkit-user-select: text;
+        padding: 2px 0;
       }
-      .msg.tool.expanded .tool-body {
+      .msg.tool-group .tool-detail .glyph {
+        flex: none;
+        opacity: 0.75;
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      .msg.tool-group .tool-detail .tool-body {
         white-space: pre-wrap;
         overflow-wrap: anywhere;
         word-break: break-word;
         text-overflow: clip;
-      }
-      .msg.tool-group {
-        align-self: stretch;
-        max-width: 100%;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
+        color: var(--muted);
       }
       .msg.system {
         align-self: stretch;
@@ -449,29 +451,61 @@ struct ChatTranscriptView: NSViewRepresentable {
     function toolGlyph(text) {
       const t = text.toLowerCase();
       if (t.startsWith('reading') || t.startsWith('read ')) return '📄';
-      if (t.startsWith('writing') || t.startsWith('wrote') || t.startsWith('edit')) return '✏️';
-      if (t.startsWith('ran') || t.startsWith('shell') || t.startsWith('command')) return '⌘';
-      if (t.startsWith('search') || t.startsWith('grep') || t.startsWith('glob')) return '⌕';
+      if (t.startsWith('writing') || t.startsWith('wrote') || t.startsWith('edit') || t.startsWith('deleting')) return '✏️';
+      if (t.startsWith('ran') || t.startsWith('running') || t.startsWith('shell') || t.startsWith('command')) return '⌘';
+      if (t.startsWith('search') || t.startsWith('grep') || t.startsWith('glob') || t.startsWith('listed')) return '⌕';
       return '•';
+    }
+
+    function toolCategory(text) {
+      const t = (text || '').toLowerCase();
+      if (t.startsWith('reading') || t.startsWith('read ')) return 'read';
+      if (t.startsWith('editing') || t.startsWith('writing') || t.startsWith('wrote') || t.startsWith('deleting')) return 'edit';
+      if (t.startsWith('ran') || t.startsWith('running')) return 'run';
+      if (t.startsWith('search') || t.startsWith('grep') || t.startsWith('glob') || t.startsWith('listed')) return 'search';
+      return 'other';
+    }
+
+    function summarizeTools(items) {
+      if (items.length === 1) return items[0].text || 'Tool';
+      const counts = { read: 0, edit: 0, run: 0, search: 0, other: 0 };
+      items.forEach(function(m) { counts[toolCategory(m.text)]++; });
+      const parts = [];
+      if (counts.read) parts.push(counts.read === 1 ? 'Read 1 file' : 'Read ' + counts.read + ' files');
+      if (counts.edit) parts.push(counts.edit === 1 ? 'Edited 1 file' : 'Edited ' + counts.edit + ' files');
+      if (counts.run) parts.push(counts.run === 1 ? 'Ran 1 command' : 'Ran ' + counts.run + ' commands');
+      if (counts.search) parts.push(counts.search === 1 ? 'Searched once' : 'Searched ' + counts.search + ' times');
+      if (counts.other) parts.push(counts.other === 1 ? '1 other tool' : counts.other + ' other tools');
+      return parts.join(', ') || (items.length + ' tools');
     }
 
     function askButton(id) {
       return '<button class="ask" data-id="' + esc(id) + '">Ask about this</button>';
     }
 
-    function toolRow(m, expanded) {
-      const text = m.text || 'Tool';
+    function toolGroupHTML(items, groupId, expanded) {
+      items.forEach(function(m) { window.__texts[m.id] = m.text || ''; });
+      const summary = summarizeTools(items);
       const open = expanded ? ' expanded' : '';
-      return '<div class="msg tool' + open + '" data-id="' + esc(m.id) + '" data-kind="tool" role="button" aria-expanded="' + (expanded ? 'true' : 'false') + '">'
+      const details = items.map(function(m) {
+        const text = m.text || 'Tool';
+        return '<div class="tool-detail">'
+          + '<span class="glyph">' + toolGlyph(text) + '</span>'
+          + '<span class="tool-body">' + esc(text) + '</span>'
+          + '</div>';
+      }).join('');
+      return '<div class="msg tool-group' + open + '" data-group-id="' + esc(groupId) + '" aria-expanded="' + (expanded ? 'true' : 'false') + '">'
+        + '<div class="tool-summary" role="button">'
         + '<span class="chev">▶</span>'
-        + '<span class="glyph">' + toolGlyph(text) + '</span>'
-        + '<span class="tool-body" title="' + esc(text) + '">' + esc(text) + '</span>'
+        + '<span class="tool-body" title="' + esc(summary) + '">' + esc(summary) + '</span>'
+        + '</div>'
+        + '<div class="tool-details">' + details + '</div>'
         + '</div>';
     }
 
     window.__texts = {};
     window.__images = window.__images || {};
-    window.__expandedTools = window.__expandedTools || {};
+    window.__expandedGroups = window.__expandedGroups || {};
     window.cacheImages = function(items) {
       (items || []).forEach(function(item) {
         if (item && item.key && item.url) window.__images[item.key] = item.url;
@@ -481,11 +515,11 @@ struct ChatTranscriptView: NSViewRepresentable {
       const root = document.getElementById('root');
       window.__texts = {};
       if (!messages || !messages.length) {
-        root.innerHTML = '<div class="empty">Agent replies show up here.</div>';
+        root.innerHTML = '<div class="empty">Send a message to start.</div>';
         return;
       }
 
-      // Group consecutive tool calls into a compact stack (Cursor-style).
+      // Collapse consecutive tool calls into one Cursor-style summary.
       const blocks = [];
       for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
@@ -501,13 +535,10 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
       }
 
-      const html = blocks.map(function(block) {
+      const html = blocks.map(function(block, bi) {
         if (block.type === 'tools') {
-          const rows = block.items.map(function(m) {
-            window.__texts[m.id] = m.text || '';
-            return toolRow(m, !!window.__expandedTools[m.id]);
-          }).join('');
-          return '<div class="msg tool-group">' + rows + '</div>';
+          const groupId = 'g-' + bi + '-' + (block.items[0] && block.items[0].id ? block.items[0].id : bi);
+          return toolGroupHTML(block.items, groupId, !!window.__expandedGroups[groupId]);
         }
         const m = block.item;
         const kind = m.kind || 'assistant';
@@ -543,14 +574,16 @@ struct ChatTranscriptView: NSViewRepresentable {
           });
         });
       });
-      root.querySelectorAll('.msg.tool').forEach(function(el) {
-        el.addEventListener('click', function(e) {
+      root.querySelectorAll('.msg.tool-group .tool-summary').forEach(function(summary) {
+        summary.addEventListener('click', function(e) {
           e.preventDefault();
-          const id = el.getAttribute('data-id');
+          const el = summary.parentElement;
+          if (!el) return;
+          const id = el.getAttribute('data-group-id');
           const next = !el.classList.contains('expanded');
           el.classList.toggle('expanded', next);
           el.setAttribute('aria-expanded', next ? 'true' : 'false');
-          if (id) window.__expandedTools[id] = next;
+          if (id) window.__expandedGroups[id] = next;
         });
       });
       if (nearBottom) {

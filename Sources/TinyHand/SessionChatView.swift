@@ -12,6 +12,7 @@ struct SessionChatView: View {
     @State private var draft = ""
     @State private var quotedSelection: String?
     @State private var selectionOffer: String?
+    @FocusState private var composerFocused: Bool
 
     private var solidBG: Color { colorScheme == .dark ? .black : .white }
     private var solidFG: Color { colorScheme == .dark ? .white : .black }
@@ -32,6 +33,16 @@ struct SessionChatView: View {
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
+        .onAppear { focusComposer() }
+        .onChange(of: session.id) { _ in
+            focusComposer()
+        }
+    }
+
+    private func focusComposer() {
+        DispatchQueue.main.async {
+            composerFocused = true
+        }
     }
 
     private var header: some View {
@@ -65,6 +76,9 @@ struct SessionChatView: View {
     }
 
     private var statusLabel: String {
+        if session.messages.isEmpty, session.status == .waiting {
+            return "Type a message to start"
+        }
         switch session.status {
         case .working: return "Working…"
         case .finished: return "Finished"
@@ -76,15 +90,19 @@ struct SessionChatView: View {
 
     @ViewBuilder
     private var statusBadge: some View {
-        switch session.status {
-        case .working:
-            ProgressView().controlSize(.small)
-        case .finished:
-            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
-        case .waiting, .failed:
-            Image(systemName: "exclamationmark.circle.fill").foregroundColor(.orange)
-        case .stopped:
-            Image(systemName: "stop.circle.fill").foregroundColor(.secondary)
+        if session.messages.isEmpty, session.status == .waiting {
+            Image(systemName: "plus.circle.fill").foregroundColor(.accentColor)
+        } else {
+            switch session.status {
+            case .working:
+                ProgressView().controlSize(.small)
+            case .finished:
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+            case .waiting, .failed:
+                Image(systemName: "exclamationmark.circle.fill").foregroundColor(.orange)
+            case .stopped:
+                Image(systemName: "stop.circle.fill").foregroundColor(.secondary)
+            }
         }
     }
 
@@ -103,6 +121,7 @@ struct SessionChatView: View {
                     draft = "About this: "
                 }
                 selectionOffer = nil
+                focusComposer()
             }
             .controlSize(.small)
             Button("Dismiss") {
@@ -140,6 +159,7 @@ struct SessionChatView: View {
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
                     .foregroundStyle(.primary)
+                    .focused($composerFocused)
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)

@@ -112,6 +112,48 @@ struct CursorAgentCLI: AgentCLI {
     }
 }
 
+/// Claude Code CLI via `claude -p` (print / Agent SDK mode).
+/// Docs: https://code.claude.com/docs/en/cli-reference
+struct ClaudeAgentCLI: AgentCLI {
+    var kind: AgentCLIKind { .claude }
+    var displayName: String { AgentCLIKind.claude.title }
+
+    func resolveExecutable() -> String? {
+        AgentPathLookup.resolve("claude")
+    }
+
+    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
+        // Workspace is the process cwd (set by AgentSessionRunner). Claude has no --workspace
+        // flag; --dangerously-skip-permissions matches Cursor `--force` for unattended runs.
+        // --verbose is required for useful stream-json assistant/tool events.
+        var args = [
+            "-p",
+            "--verbose",
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions"
+        ]
+        // No native --image; include the path in the prompt text.
+        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        return args
+    }
+
+    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
+        var args = [
+            "-p",
+            "--verbose",
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+            "--resume", chatId
+        ]
+        if let imagePath {
+            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        } else {
+            args.append(prompt)
+        }
+        return args
+    }
+}
+
 /// OpenAI Codex CLI via `codex exec` (non-interactive JSONL).
 /// Docs: https://learn.chatgpt.com/docs/codex/cli · https://learn.chatgpt.com/docs/non-interactive-mode
 struct CodexAgentCLI: AgentCLI {
@@ -162,6 +204,7 @@ enum AgentCLIFactory {
     static func make(_ kind: AgentCLIKind = Preferences.agentCLI) -> AgentCLI {
         switch kind {
         case .cursor: return CursorAgentCLI()
+        case .claude: return ClaudeAgentCLI()
         case .codex: return CodexAgentCLI()
         }
     }

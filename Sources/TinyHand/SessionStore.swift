@@ -54,7 +54,8 @@ final class AgentSession: ObservableObject, Identifiable {
         prompt: String,
         screenshotPath: String?,
         cliKind: AgentCLIKind = Preferences.agentCLI,
-        status: AgentSessionStatus = .working
+        status: AgentSessionStatus = .working,
+        blank: Bool = false
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -63,10 +64,15 @@ final class AgentSession: ObservableObject, Identifiable {
         self.screenshotPath = screenshotPath
         self.cliKind = cliKind
         self.status = status
-        self.preview = prompt.isEmpty ? "Annotation" : prompt
-        var msgs: [AgentMessage] = []
-        msgs.append(AgentMessage(kind: .user, text: prompt.isEmpty ? "(annotation)" : prompt, imagePath: screenshotPath))
-        self.messages = msgs
+        if blank {
+            self.preview = ""
+            self.messages = []
+        } else {
+            self.preview = prompt.isEmpty ? "Annotation" : prompt
+            self.messages = [
+                AgentMessage(kind: .user, text: prompt.isEmpty ? "(annotation)" : prompt, imagePath: screenshotPath)
+            ]
+        }
     }
 
     fileprivate init(snapshot: SessionStore.SessionSnapshot) {

@@ -9,6 +9,7 @@ struct Shortcut: Equatable {
 
     static let toggleDefault = Shortcut(keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(controlKey | optionKey), display: "⌃⌥H")
     static let clearDefault = Shortcut(keyCode: UInt32(kVK_ANSI_X), modifiers: UInt32(controlKey | optionKey), display: "⌃⌥X")
+    static let sessionsDefault = Shortcut(keyCode: UInt32(kVK_ANSI_G), modifiers: UInt32(cmdKey | shiftKey), display: "⌘⇧G")
 }
 
 enum InteractKey: String, CaseIterable {
@@ -44,6 +45,7 @@ enum InteractKey: String, CaseIterable {
 
 enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     case cursor
+    case claude
     case codex
 
     var id: String { rawValue }
@@ -51,6 +53,7 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     var title: String {
         switch self {
         case .cursor: return "Cursor Agent"
+        case .claude: return "Claude Code"
         case .codex: return "Codex"
         }
     }
@@ -58,6 +61,7 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     var commandName: String {
         switch self {
         case .cursor: return "agent"
+        case .claude: return "claude"
         case .codex: return "codex"
         }
     }
@@ -65,6 +69,7 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     var installHint: String {
         switch self {
         case .cursor: return "Install the Cursor CLI (`agent`)."
+        case .claude: return "Install Claude Code (`claude`) — https://code.claude.com/docs/en/cli-reference"
         case .codex: return "Install Codex (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`)."
         }
     }
@@ -73,7 +78,16 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     var defaultModelTitle: String {
         switch self {
         case .cursor: return "Auto"
+        case .claude: return "Default"
         case .codex: return "Default"
+        }
+    }
+
+    var loginHint: String {
+        switch self {
+        case .cursor: return "`agent login`"
+        case .claude: return "`claude auth login`"
+        case .codex: return "`codex` (sign in with ChatGPT)"
         }
     }
 }
@@ -126,6 +140,11 @@ enum Preferences {
     static var clearShortcut: Shortcut {
         get { loadShortcut("shortcut.clear") ?? .clearDefault }
         set { saveShortcut(newValue, "shortcut.clear") }
+    }
+
+    static var sessionsShortcut: Shortcut {
+        get { loadShortcut("shortcut.sessions") ?? .sessionsDefault }
+        set { saveShortcut(newValue, "shortcut.sessions") }
     }
 
     static let pointerSizeRange: ClosedRange<CGFloat> = 0.08...0.20
@@ -245,7 +264,7 @@ enum Preferences {
     }
 
     static func resetAll() {
-        for key in ["shortcut.toggle", "shortcut.clear", "pointerSize", "showShadow", "fadeSeconds",
+        for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
                     "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder"] {
             defaults.removeObject(forKey: key)

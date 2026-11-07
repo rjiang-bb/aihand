@@ -51,6 +51,7 @@ final class SettingsModel: ObservableObject {
 
     var applyToggleShortcut: ((Shortcut) -> Bool)?
     var applyClearShortcut: ((Shortcut) -> Bool)?
+    var applySessionsShortcut: ((Shortcut) -> Bool)?
     var onRecording: ((Bool) -> Void)?
     var updater: Updater?
     @Published var shortcutError: String?
@@ -253,6 +254,7 @@ final class SettingsModel: ObservableObject {
         Preferences.resetAll()
         _ = applyToggleShortcut?(.toggleDefault)
         _ = applyClearShortcut?(.clearDefault)
+        _ = applySessionsShortcut?(.sessionsDefault)
         shortcutError = nil
         pinMessage = nil
         revision += 1
@@ -423,6 +425,9 @@ private struct GeneralPage: View {
                 Row("Clear the drawing") {
                     ShortcutField(shortcut: Preferences.clearShortcut, model: model) { model.applyClearShortcut?($0) ?? false }
                 }
+                Row("Open Tinyhand sessions", detail: "Shows the sessions panel without turning the pointer on.") {
+                    ShortcutField(shortcut: Preferences.sessionsShortcut, model: model) { model.applySessionsShortcut?($0) ?? false }
+                }
             }
             if let error = model.shortcutError {
                 Text(error).font(.system(size: 12)).foregroundColor(.red)
@@ -493,7 +498,7 @@ private struct AgentPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             Card(title: "CLI") {
-                Row("Agent CLI", detail: "Cursor Agent or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
+                Row("Agent CLI", detail: "Cursor Agent, Claude Code, or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
                     Picker("", selection: model.binding({ Preferences.agentCLI }, { Preferences.agentCLI = $0 })) {
                         ForEach(AgentCLIKind.allCases) { kind in
                             Text(kind.title).tag(kind)

@@ -8,6 +8,8 @@ final class AgentSessionRunner {
     private var stdoutBuffer = Data()
     private let bufferLock = NSLock()
     private var currentAssistantID: UUID?
+    /// Claude stream-json re-emits full assistant snapshots that include prior `tool_use` blocks.
+    private var seenToolUseIDs: Set<String> = []
     private weak var session: AgentSession?
     private var onFinished: (() -> Void)?
 
@@ -91,6 +93,7 @@ final class AgentSessionRunner {
         stdoutBuffer = Data()
         bufferLock.unlock()
         currentAssistantID = nil
+        seenToolUseIDs.removeAll()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
@@ -210,18 +213,22 @@ final class AgentSessionRunner {
                 session.chatId = sid
             }
         case "assistant":
+            // Cursor: stream deltas via timestamp_ms. Claude: full message snapshots in
+            // message.content (text + tool_use). Same envelope shape for text extraction.
             let hasTS = json["timestamp_ms"] != nil
             let hasMC = json["model_call_id"] != nil
-            // Streaming deltas: timestamp present, model_call_id absent.
-            // Also accept complete assistant messages without those fields when not streaming.
             let text = extractAssistantText(json)
-            guard !text.isEmpty else { return }
             if hasTS && hasMC {
                 return
             }
-            if hasTS || (!hasTS && !hasMC) {
-                appendAssistant(text, replace: hasTS)
+            if !text.isEmpty {
+                if hasTS {
+                    appendAssistant(text, replace: true)
+                } else {
+                    upsertAssistantSnapshot(text)
+                }
             }
+            ingestEmbeddedToolUses(json)
         case "tool_call":
             let subtype = json["subtype"] as? String ?? ""
             if subtype == "started" {
@@ -240,6 +247,9 @@ final class AgentSessionRunner {
                 let msg = (json["result"] as? String) ?? "Agent failed"
                 session.errorMessage = msg
                 session.preview = msg
+                if session.messages.last?.kind != .system || session.messages.last?.text != msg {
+                    session.messages.append(AgentMessage(kind: .system, text: msg))
+                }
             } else {
                 session.status = .finished
                 if let result = json["result"] as? String, !result.isEmpty {
@@ -382,6 +392,74 @@ final class AgentSessionRunner {
         session.preview = String(text.prefix(120))
     }
 
+    /// Claude (and similar) re-send the full assistant text each event — replace, don't append.
+    private func upsertAssistantSnapshot(_ text: String) {
+        guard let session else { return }
+        if let id = currentAssistantID,
+           let idx = session.messages.firstIndex(where: { $0.id == id }) {
+            if session.messages[idx].text != text {
+                session.messages[idx].text = text
+                session.preview = String(text.prefix(120))
+            }
+            return
+        }
+        let msg = AgentMessage(kind: .assistant, text: text)
+        currentAssistantID = msg.id
+        session.messages.append(msg)
+        session.preview = String(text.prefix(120))
+    }
+
+    /// Claude embeds `tool_use` blocks inside assistant messages rather than Cursor's `tool_call`.
+    private func ingestEmbeddedToolUses(_ json: [String: Any]) {
+        guard let session,
+              let message = json["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else { return }
+        for item in content {
+            guard (item["type"] as? String) == "tool_use" else { continue }
+            let toolID = (item["id"] as? String) ?? UUID().uuidString
+            if seenToolUseIDs.contains(toolID) { continue }
+            seenToolUseIDs.insert(toolID)
+            let name = item["name"] as? String ?? "Tool"
+            let input = item["input"] as? [String: Any] ?? [:]
+            let label = claudeToolLabel(name: name, input: input)
+            session.messages.append(AgentMessage(kind: .tool, text: label))
+            session.preview = label
+            currentAssistantID = nil
+        }
+    }
+
+    private func claudeToolLabel(name: String, input: [String: Any]) -> String {
+        let path = (input["file_path"] as? String)
+            ?? (input["path"] as? String)
+            ?? (input["filePath"] as? String)
+        switch name {
+        case "Read":
+            return "Reading \(shortPath(path ?? "file"))"
+        case "Write":
+            return "Writing \(shortPath(path ?? "file"))"
+        case "Edit", "NotebookEdit":
+            return "Editing \(shortPath(path ?? "file"))"
+        case "Bash":
+            let cmd = input["command"] as? String ?? "command"
+            return "Ran \(shortCommand(cmd))"
+        case "Grep":
+            let pattern = input["pattern"] as? String ?? "…"
+            return "Searched \(pattern)"
+        case "Glob":
+            let pattern = input["pattern"] as? String ?? input["globPattern"] as? String ?? "…"
+            return "Glob \(pattern)"
+        case "WebSearch":
+            let q = input["query"] as? String ?? "web"
+            return "Search \(q)"
+        case "WebFetch":
+            let url = input["url"] as? String ?? "url"
+            return "Fetch \(url)"
+        default:
+            if let path { return "\(name) \(shortPath(path))" }
+            return name
+        }
+    }
+
     private func extractAssistantText(_ json: [String: Any]) -> String {
         guard let message = json["message"] as? [String: Any],
               let content = message["content"] as? [[String: Any]] else {
@@ -445,8 +523,10 @@ final class AgentSessionRunner {
            let name = fn["name"] as? String {
             return name
         }
-        if let key = tool.keys.first {
-            return key.replacingOccurrences(of: "ToolCall", with: "")
+        // Prefer a *ToolCall key over opaque ids like toolCallId.
+        if let key = tool.keys.first(where: { $0.hasSuffix("ToolCall") }) {
+            let name = key.replacingOccurrences(of: "ToolCall", with: "")
+            return name.isEmpty ? "Tool" : name.prefix(1).uppercased() + name.dropFirst()
         }
         return "Tool"
     }
@@ -479,8 +559,7 @@ final class AgentSessionRunner {
                 if session.preview.isEmpty { session.preview = "Finished" }
             } else {
                 session.status = .waiting
-                let login = session.cliKind == .codex ? "`codex` (sign in with ChatGPT)" : "`agent login`"
-                let msg = "Agent exited (\(status)). Check that you’re logged in (\(login))."
+                let msg = "Agent exited (\(status)). Check that you’re logged in (\(session.cliKind.loginHint))."
                 session.errorMessage = msg
                 session.preview = msg
                 session.messages.append(AgentMessage(kind: .system, text: msg))
@@ -524,14 +603,51 @@ final class AgentSessionManager {
         return session
     }
 
+    /// Empty session titled "New session" — first follow-up starts the agent.
+    func createBlankSession() -> AgentSession? {
+        let workspace = Preferences.agentWorkspace
+        guard !workspace.isEmpty else { return nil }
+        let session = AgentSession(
+            title: "New session",
+            prompt: "",
+            screenshotPath: nil,
+            cliKind: Preferences.agentCLI,
+            status: .waiting,
+            blank: true
+        )
+        store.prepend(session)
+        return session
+    }
+
     func followUp(sessionID: UUID, text: String) {
         guard let session = store.session(id: sessionID) else { return }
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
         let runner = runners[sessionID] ?? AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
         runners[sessionID] = runner
         runner.interruptQuietly()
-        runner.followUp(session: session, workspace: workspace, prompt: text)
+
+        // First message in a blank "New session" starts a fresh agent turn.
+        let needsStart = (session.chatId == nil || session.chatId?.isEmpty == true) && session.messages.isEmpty
+        if needsStart {
+            let apply = {
+                session.messages.append(AgentMessage(kind: .user, text: trimmed))
+                if session.title == "New session" {
+                    session.title = String(trimmed.prefix(48))
+                }
+                session.preview = trimmed
+                session.errorMessage = nil
+                session.status = .working
+            }
+            if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
+            runner.start(session: session, workspace: workspace, prompt: trimmed, imagePath: nil)
+            return
+        }
+
+        runner.followUp(session: session, workspace: workspace, prompt: trimmed)
     }
 
     func stop(sessionID: UUID) {

@@ -25,6 +25,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private let maxShortcutSlots = 9
 
     var isVisible: Bool { panel.isVisible }
+    var screen: NSScreen? { panel.screen ?? NSScreen.main }
+
+    /// Collapse the open chat so a New prompt can take focus cleanly.
+    func collapseChat() {
+        closeChat()
+    }
 
     init(store: SessionStore) {
         self.store = store
@@ -187,10 +193,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         guard isVisible else { return event }
 
-        if Int(event.keyCode) == kVK_Escape,
-           selection.selectedID != nil,
-           panel.isKeyWindow {
-            closeChat()
+        if Int(event.keyCode) == kVK_Escape, panel.isKeyWindow {
+            if selection.selectedID != nil {
+                closeChat()
+            } else {
+                hide()
+            }
             return nil
         }
 
@@ -269,7 +277,7 @@ private struct SessionsSidePanelView: View {
             }
         }
         .padding(.horizontal, 14)
-        .padding(.top, 52)
+        .padding(.top, 68)
         .padding(.bottom, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.clear)
@@ -280,15 +288,18 @@ private struct SessionsSidePanelView: View {
 
     private var floatingHeader: some View {
         HStack(alignment: .center) {
-            Text("Sessions")
+            Text("Tinyhand sessions")
                 .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(headerFG)
+                .foregroundStyle(.white)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(
                     Capsule(style: .continuous)
-                        .fill(headerBG)
-                        .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+                        .fill(Color.clear)
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Color.black, lineWidth: 1.25)
+                        )
                 )
             Spacer(minLength: 8)
             Button(action: onNew) {
@@ -323,7 +334,7 @@ private struct SessionsSidePanelView: View {
         }
         .padding(.horizontal, 22)
         .padding(.top, 16)
-        .padding(.bottom, 8)
+        .padding(.bottom, 14)
     }
 
     private var sessionsColumn: some View {
@@ -377,29 +388,20 @@ private struct SolidCardBackground: View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(Color.accentColor.opacity(selected ? (dark ? 0.22 : 0.12) : 0))
             )
-            .overlay(alignment: .leading) {
-                if selected {
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(Color.accentColor)
-                        .frame(width: 4)
-                        .padding(.vertical, 10)
-                        .padding(.leading, 5)
-                }
-            }
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(
                         selected
                             ? Color.accentColor
                             : (dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)),
-                        lineWidth: selected ? 2.5 : 0.5
+                        lineWidth: selected ? 2 : 0.5
                     )
             )
             .shadow(
                 color: selected
-                    ? Color.accentColor.opacity(dark ? 0.45 : 0.28)
+                    ? Color.accentColor.opacity(dark ? 0.4 : 0.22)
                     : .black.opacity(dark ? 0.5 : 0.16),
-                radius: selected ? 18 : 12,
+                radius: selected ? 16 : 12,
                 y: 6
             )
     }
@@ -438,9 +440,9 @@ private struct SessionCardView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(fg.opacity(0.55))
                     }
-                    Text(session.preview)
+                    Text(session.preview.isEmpty ? "Type a message to start" : session.preview)
                         .font(.system(size: 13))
-                        .foregroundStyle(fg.opacity(0.82))
+                        .foregroundStyle(fg.opacity(session.preview.isEmpty ? 0.45 : 0.82))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                 }
@@ -457,22 +459,28 @@ private struct SessionCardView: View {
     @ViewBuilder
     private var statusIcon: some View {
         let icon = Group {
-            switch session.status {
-            case .working:
-                ProgressView()
-                    .controlSize(.small)
-            case .finished:
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+            if session.messages.isEmpty, session.status == .waiting {
+                Image(systemName: "plus.circle.fill")
+                    .foregroundStyle(Color.accentColor)
                     .font(.system(size: 20))
-            case .waiting, .failed:
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundStyle(.orange)
-                    .font(.system(size: 20))
-            case .stopped:
-                Image(systemName: "stop.circle.fill")
-                    .foregroundStyle(.secondary)
-                    .font(.system(size: 20))
+            } else {
+                switch session.status {
+                case .working:
+                    ProgressView()
+                        .controlSize(.small)
+                case .finished:
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 20))
+                case .waiting, .failed:
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.system(size: 20))
+                case .stopped:
+                    Image(systemName: "stop.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 20))
+                }
             }
         }
         icon.opacity(showShortcutBadge ? 0 : 1)
