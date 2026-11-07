@@ -110,25 +110,19 @@ private struct AnnotatePromptView: View {
             Text("Ask the agent")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.secondary)
-            ZStack(alignment: .topLeading) {
-                if model.text.isEmpty {
-                    Text("Optional prompt…")
-                        .foregroundColor(Color.secondary.opacity(0.7))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 8)
+            TextField("Optional prompt…", text: $model.text, axis: .vertical)
+                .font(.system(size: 14))
+                .lineLimit(2...4)
+                .textFieldStyle(.plain)
+                .focused($focused)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .frame(minHeight: 52, maxHeight: 72, alignment: .topLeading)
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.55)))
+                .onChange(of: model.focusTick) { _ in
+                    focused = true
                 }
-                TextEditor(text: $model.text)
-                    .font(.system(size: 14))
-                    .scrollContentBackground(.hidden)
-                    .focused($focused)
-                    .frame(minHeight: 52, maxHeight: 72)
-                    .onChange(of: model.focusTick) { _ in
-                        focused = true
-                    }
-            }
-            .padding(4)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor).opacity(0.55)))
             HStack {
                 if model.workspaceMissing {
                     Text("Set an agent workspace in Settings")

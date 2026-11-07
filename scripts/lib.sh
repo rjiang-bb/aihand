@@ -93,6 +93,24 @@ sign_app() {
     codesign --verify --deep --strict "$app"
 }
 
+# Prefer a stable Apple Development identity so TCC (Accessibility / Screen Recording)
+# survives rebuilds. Ad-hoc ("-") gets a new CDHash every build and macOS re-prompts.
+debug_codesign_identity() {
+    if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+        echo "$CODESIGN_IDENTITY"
+        return
+    fi
+    local id
+    id="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' \
+        | head -1)"
+    if [[ -n "$id" ]]; then
+        echo "$id"
+        return
+    fi
+    echo "-"
+}
+
 sparkle_tools() {
     local dir="$ROOT/.build/sparkle-tools-$SPARKLE_VERSION"
     if [[ ! -x "$dir/bin/sign_update" ]]; then

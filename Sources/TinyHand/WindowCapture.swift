@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import ImageIO
+import ScreenCaptureKit
 import UniformTypeIdentifiers
 
 enum WindowCapture {
@@ -9,16 +10,41 @@ enum WindowCapture {
         let windowName: String?
     }
 
-    enum CaptureError: LocalizedError {
+    enum CaptureError: Error, Equatable, LocalizedError {
         case noScreen
         case captureFailed
+        case permissionDenied
         case writeFailed(String)
 
         var errorDescription: String? {
             switch self {
             case .noScreen: return "Couldn’t find the screen that contains the drawing."
-            case .captureFailed: return "Screen capture failed. Allow Screen Recording for TinyHand in System Settings."
+            case .captureFailed: return "Screen capture failed."
+            case .permissionDenied:
+                return "Allow Screen Recording for TinyHand in System Settings, then try again."
             case .writeFailed(let msg): return "Couldn’t save screenshot: \(msg)"
+            }
+        }
+    }
+
+    /// Registers TinyHand with TCC and prompts if needed so it appears under
+    /// System Settings → Privacy & Security → Screen Recording.
+    @discardableResult
+    static func ensureScreenRecordingAccess() -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+        return CGRequestScreenCaptureAccess()
+    }
+
+    static func openScreenRecordingSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.Settings.PrivacySecurity.extension?Privacy_ScreenCapture"
+        ]
+        for raw in candidates {
+            if let url = URL(string: raw), NSWorkspace.shared.open(url) {
+                return
             }
         }
     }
@@ -27,15 +53,27 @@ enum WindowCapture {
         stroke: StrokeResult,
         strokeScreenBounds: CGRect,
         overlayFrame: CGRect
-    ) throws -> Outcome {
+    ) async throws -> Outcome {
+        if !ensureScreenRecordingAccess() {
+            throw CaptureError.permissionDenied
+        }
+
         let folder = Preferences.ensureScreenshotsFolder()
         guard let screen = screenContaining(strokeScreenBounds) else {
             throw CaptureError.noScreen
         }
 
         let screenBounds = screen.frame
-        let cgBounds = appKitToCG(screenBounds)
-        guard let image = captureScreen(bounds: cgBounds) else {
+        let image: CGImage
+        do {
+            image = try await captureScreen(screen: screen)
+        } catch let error as CaptureError {
+            throw error
+        } catch {
+            if !CGPreflightScreenCaptureAccess() {
+                throw CaptureError.permissionDenied
+            }
+            Log.write("ScreenCaptureKit failed: \(error.localizedDescription)")
             throw CaptureError.captureFailed
         }
 
@@ -50,15 +88,25 @@ enum WindowCapture {
         return Outcome(path: path, windowName: findWindow(intersecting: strokeScreenBounds)?.name)
     }
 
-    /// Full-screen capture of `bounds`, excluding TinyHand’s own windows (overlay, prompt, etc.).
-    private static func captureScreen(bounds: CGRect) -> CGImage? {
+    /// Full-screen capture excluding TinyHand’s own windows.
+    /// Uses ScreenCaptureKit on macOS 14+ (required on current OS); CG fallback on 13.
+    private static func captureScreen(screen: NSScreen) async throws -> CGImage {
+        if #available(macOS 14.0, *) {
+            return try await captureWithScreenshotManager(screen: screen)
+        }
+        guard let image = captureScreenLegacy(screen: screen) else {
+            throw CaptureError.captureFailed
+        }
+        return image
+    }
+
+    /// Pre–ScreenCaptureKit path for macOS 13. Obsolete on newer OS (returns nil).
+    private static func captureScreenLegacy(screen: NSScreen) -> CGImage? {
         let ourPID = ProcessInfo.processInfo.processIdentifier
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
                 as? [[String: Any]] else {
             return nil
         }
-
-        // List is front-to-back; CGWindowListCreateImageFromArray composites back-to-front.
         var ids: [CGWindowID] = []
         for info in list.reversed() {
             guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID != ourPID,
@@ -68,12 +116,59 @@ enum WindowCapture {
             ids.append(number)
         }
         guard !ids.isEmpty else { return nil }
-
+        let bounds = appKitToCG(screen.frame)
         return CGImage(
             windowListFromArrayScreenBounds: bounds,
             windowArray: ids as CFArray,
             imageOption: [.bestResolution]
         )
+    }
+
+    @available(macOS 14.0, *)
+    private static func captureWithScreenshotManager(screen: NSScreen) async throws -> CGImage {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = matchingDisplay(screen: screen, in: content.displays) else {
+            throw CaptureError.noScreen
+        }
+
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        let ourBundle = Bundle.main.bundleIdentifier
+        let excludedApps = content.applications.filter { app in
+            app.processID == ourPID || (ourBundle != nil && app.bundleIdentifier == ourBundle)
+        }
+
+        let filter = SCContentFilter(
+            display: display,
+            excludingApplications: excludedApps,
+            exceptingWindows: []
+        )
+
+        let config = SCStreamConfiguration()
+        let scale = CGFloat(filter.pointPixelScale)
+        let rect = filter.contentRect
+        config.width = max(1, Int((rect.width * scale).rounded()))
+        config.height = max(1, Int((rect.height * scale).rounded()))
+        config.showsCursor = false
+
+        return try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
+
+    @available(macOS 14.0, *)
+    private static func matchingDisplay(screen: NSScreen, in displays: [SCDisplay]) -> SCDisplay? {
+        let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        if let number, let match = displays.first(where: { $0.displayID == number }) {
+            return match
+        }
+        // Fall back to largest overlap with the NSScreen frame.
+        return displays
+            .map { display -> (SCDisplay, CGFloat) in
+                let overlap = cgToAppKit(display.frame).intersection(screen.frame)
+                let area = overlap.isNull ? 0 : overlap.width * overlap.height
+                return (display, area)
+            }
+            .max(by: { $0.1 < $1.1 })?
+            .0
+            ?? displays.first
     }
 
     private static func screenContaining(_ rect: CGRect) -> NSScreen? {
@@ -123,7 +218,6 @@ enum WindowCapture {
             if overlap.isNull || overlap.width < 2 || overlap.height < 2 { continue }
             let name = info[kCGWindowName as String] as? String
                 ?? info[kCGWindowOwnerName as String] as? String
-            // First matching normal window in z-order is usually correct.
             return TargetWindow(windowID: number, bounds: appKitRect, name: name)
         }
         return nil
@@ -143,7 +237,7 @@ enum WindowCapture {
             data: nil,
             width: width,
             height: height,
-            bitsPerComponent: image.bitsPerComponent,
+            bitsPerComponent: max(8, image.bitsPerComponent),
             bytesPerRow: 0,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
@@ -153,8 +247,6 @@ enum WindowCapture {
 
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // Map overlay-local stroke points → capture image pixels.
-        // AppKit Y grows up; CGContext Y grows up from bottom of bitmap.
         let scaleX = CGFloat(width) / captureBounds.width
         let scaleY = CGFloat(height) / captureBounds.height
 

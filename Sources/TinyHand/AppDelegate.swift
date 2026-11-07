@@ -122,31 +122,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             height: stroke.bounds.height + pad * 2
         )
 
-        do {
-            let outcome = try WindowCapture.captureAnnotated(
-                stroke: stroke,
-                strokeScreenBounds: strokeScreen,
-                overlayFrame: overlayFrame
-            )
-            overlay.exit()
-            if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
-                sessionsPanel.openChat(for: session.id)
-            }
-        } catch {
-            overlay.exit()
-            Log.write("capture failed: \(error.localizedDescription)")
-            let alert = NSAlert()
-            alert.messageText = "Couldn’t capture screenshot"
-            alert.informativeText = error.localizedDescription
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            if error.localizedDescription.contains("Screen Recording") {
-                alert.addButton(withTitle: "Open Settings")
-            }
-            let response = alert.runModal()
-            if response == .alertSecondButtonReturn,
-               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
-                NSWorkspace.shared.open(url)
+        // Keep stroke geometry; hide interactive UI so ScreenCaptureKit exclusion is clean.
+        annotatePanel.hide()
+        overlay.releaseStrokeHold(stroke, fadeNow: false)
+
+        Task { @MainActor in
+            do {
+                let outcome = try await WindowCapture.captureAnnotated(
+                    stroke: stroke,
+                    strokeScreenBounds: strokeScreen,
+                    overlayFrame: overlayFrame
+                )
+                self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                self.overlay.exit()
+                if let session = self.sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
+                    self.sessionsPanel.openChat(for: session.id)
+                }
+            } catch {
+                self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                self.overlay.exit()
+                Log.write("capture failed: \(error.localizedDescription)")
+                let needsScreenRecording = (error as? WindowCapture.CaptureError) == .permissionDenied
+                    || error.localizedDescription.localizedCaseInsensitiveContains("Screen Recording")
+                if needsScreenRecording {
+                    _ = WindowCapture.ensureScreenRecordingAccess()
+                }
+                let alert = NSAlert()
+                alert.messageText = "Couldn’t capture screenshot"
+                alert.informativeText = needsScreenRecording
+                    ? "Turn on TinyHand under Privacy & Security → Screen Recording, then draw again."
+                    : error.localizedDescription
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                if needsScreenRecording {
+                    alert.addButton(withTitle: "Open Settings")
+                }
+                let response = alert.runModal()
+                if needsScreenRecording, response == .alertSecondButtonReturn {
+                    WindowCapture.openScreenRecordingSettings()
+                }
             }
         }
     }
