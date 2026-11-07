@@ -129,18 +129,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         host.autoresizingMask = [.width, .height]
         host.layer?.backgroundColor = NSColor.clear.cgColor
         hosting = host
-
-        // Glass sits behind SwiftUI; soft mask fades the blur out at the panel edges.
-        let container = NSView(frame: panel.contentView?.bounds ?? .zero)
-        container.wantsLayer = true
-        container.autoresizingMask = [.width, .height]
-        let glass = SoftGlassEffectView(fadeWidth: 64, cornerRadius: 32)
-        glass.frame = container.bounds
-        glass.autoresizingMask = [.width, .height]
-        host.frame = container.bounds
-        container.addSubview(glass)
-        container.addSubview(host)
-        panel.contentView = container
+        panel.contentView = host
     }
 
     func show(on screen: NSScreen? = nil) {
@@ -213,15 +202,23 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let expanded = selection.selectedID != nil
         updateSizeLimits(visible: visible, expanded: expanded)
 
+        let previous = panel.frame
         let size = preferredSize(visible: visible, expanded: expanded)
         let frame: NSRect
         if hasCustomPlacement {
-            let saved = Preferences.sessionsPanelOrigin ?? panel.frame.origin
-            frame = clampFrame(
-                NSRect(origin: saved, size: size),
-                to: visible
-            )
+            var origin = Preferences.sessionsPanelOrigin ?? previous.origin
+            // Keep the trailing edge fixed when expanding/collapsing the chat so the
+            // sessions list slides into where the chat's right edge was.
+            if isVisible, previous.width > 1, abs(previous.width - size.width) > 0.5 {
+                origin.x = previous.maxX - size.width
+            }
+            if isVisible, previous.height > 1, abs(previous.height - size.height) > 0.5 {
+                origin.y = previous.maxY - size.height
+            }
+            frame = clampFrame(NSRect(origin: origin, size: size), to: visible)
+            Preferences.sessionsPanelOrigin = frame.origin
         } else {
+            // Default: pin to the screen's trailing edge (list lands where chat ended).
             frame = NSRect(
                 x: visible.maxX - size.width - 12,
                 y: visible.minY + (visible.height - size.height) / 2,
@@ -538,9 +535,9 @@ private struct SessionsSidePanelView: View {
                 .layoutPriority(1)
             }
         }
-        .padding(.horizontal, 22)
-        .padding(.top, 72)
-        .padding(.bottom, 22)
+        .padding(.horizontal, 14)
+        .padding(.top, 68)
+        .padding(.bottom, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.clear)
         .overlay(alignment: .top) {
