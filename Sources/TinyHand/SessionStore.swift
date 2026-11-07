@@ -75,6 +75,11 @@ final class AgentSession: ObservableObject, Identifiable {
         }
     }
 
+    /// Untouched New-session draft — no user message yet.
+    var isBlankDraft: Bool {
+        messages.isEmpty && status == .waiting
+    }
+
     fileprivate init(snapshot: SessionStore.SessionSnapshot) {
         self.id = snapshot.id
         self.createdAt = snapshot.createdAt

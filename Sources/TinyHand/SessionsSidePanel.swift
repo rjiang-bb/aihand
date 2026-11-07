@@ -32,6 +32,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         closeChat()
     }
 
+    private func archive(_ id: UUID) {
+        if selection.selectedID == id {
+            closeChat()
+        }
+        store.remove(id)
+    }
+
     init(store: SessionStore) {
         self.store = store
         panel = Panel(
@@ -69,6 +76,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onNew: { [weak self] in
                 self?.onNew?()
             },
+            onArchive: { [weak self] id in
+                self?.archive(id)
+            },
             onSend: { [weak self] id, text in
                 self?.onFollowUp?(id, text)
             },
@@ -90,6 +100,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     func hide() {
+        discardBlankDraftIfLeaving()
         removeShortcutMonitors()
         selection.showShortcutBadges = false
         selection.selectedID = nil
@@ -106,6 +117,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     func openChat(for id: UUID) {
+        if selection.selectedID != id {
+            discardBlankDraftIfLeaving(except: id)
+        }
         selection.selectedID = id
         if isVisible {
             layout()
@@ -127,8 +141,19 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private func closeChat() {
         guard selection.selectedID != nil else { return }
+        discardBlankDraftIfLeaving()
         selection.selectedID = nil
         layout()
+    }
+
+    /// Drop an untouched "New session" when leaving it (switch, Esc, click away, hide).
+    private func discardBlankDraftIfLeaving(except keepID: UUID? = nil) {
+        guard let id = selection.selectedID,
+              id != keepID,
+              let session = store.session(id: id),
+              session.isBlankDraft else { return }
+        selection.selectedID = nil
+        store.remove(id)
     }
 
     private func layout(on screen: NSScreen? = nil) {
@@ -209,6 +234,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
               !flags.contains(.control) else {
             return event
         }
+
+        if Int(event.keyCode) == kVK_ANSI_N, panel.isKeyWindow {
+            onNew?()
+            return nil
+        }
+
         guard let index = shortcutIndex(for: event) else { return event }
         let sessions = store.sessions
         guard index >= 0, index < sessions.count, index < maxShortcutSlots else { return event }
@@ -249,6 +280,7 @@ private struct SessionsSidePanelView: View {
     var onCloseChat: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
+    var onArchive: (UUID) -> Void
     var onSend: (UUID, String) -> Void
     var onStop: (UUID) -> Void
 
@@ -364,10 +396,10 @@ private struct SessionsSidePanelView: View {
                                 session: session,
                                 isSelected: selection.selectedID == session.id,
                                 shortcutNumber: index < 9 ? index + 1 : nil,
-                                showShortcutBadge: selection.showShortcutBadges && index < 9
-                            ) {
-                                onSelect(session.id)
-                            }
+                                showShortcutBadge: selection.showShortcutBadges && index < 9,
+                                onTap: { onSelect(session.id) },
+                                onArchive: { onArchive(session.id) }
+                            )
                         }
                     }
                     .padding(.bottom, 8)
@@ -418,47 +450,71 @@ private struct SessionCardView: View {
     var shortcutNumber: Int?
     var showShortcutBadge: Bool
     var onTap: () -> Void
+    var onArchive: () -> Void
     @Environment(\.colorScheme) private var colorScheme
+    @State private var hovering = false
 
     private var fg: Color { colorScheme == .dark ? .white : .black }
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(alignment: .top, spacing: 12) {
-                ZStack {
-                    statusIcon
-                        .frame(width: 30, height: 30)
-                    if showShortcutBadge, let shortcutNumber {
-                        ShortcutBadge(number: shortcutNumber)
-                            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+        ZStack(alignment: .trailing) {
+            Button(action: onTap) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        statusIcon
+                            .frame(width: 30, height: 30)
+                        if showShortcutBadge, let shortcutNumber {
+                            ShortcutBadge(number: shortcutNumber)
+                                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                        }
+                    }
+                    .frame(width: 30, height: 30)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(session.title)
+                                .font(.system(size: 14, weight: isSelected ? .bold : .semibold))
+                                .foregroundStyle(fg)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(relativeTime(session.createdAt))
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(fg.opacity(hovering ? 0 : 0.55))
+                        }
+                        Text(session.preview.isEmpty ? "Type a message to start" : session.preview)
+                            .font(.system(size: 13))
+                            .foregroundStyle(fg.opacity(session.preview.isEmpty ? 0.45 : 0.82))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .padding(.trailing, hovering ? 36 : 0)
                     }
                 }
-                .frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(session.title)
-                            .font(.system(size: 14, weight: isSelected ? .bold : .semibold))
-                            .foregroundStyle(fg)
-                            .lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(relativeTime(session.createdAt))
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(fg.opacity(0.55))
-                    }
-                    Text(session.preview.isEmpty ? "Type a message to start" : session.preview)
-                        .font(.system(size: 13))
-                        .foregroundStyle(fg.opacity(session.preview.isEmpty ? 0.45 : 0.82))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 13)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(SolidCardBackground(cornerRadius: 22, selected: isSelected))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 13)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(SolidCardBackground(cornerRadius: 22, selected: isSelected))
+            .buttonStyle(.plain)
+
+            if hovering {
+                Button(action: onArchive) {
+                    Image(systemName: "archivebox")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(fg)
+                        .frame(width: 28, height: 28)
+                        .background(
+                            Circle()
+                                .fill(fg.opacity(0.1))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Archive session")
+                .padding(.trailing, 10)
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            }
         }
-        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: showShortcutBadge)
+        .animation(.easeOut(duration: 0.12), value: hovering)
     }
 
     @ViewBuilder
