@@ -20,12 +20,27 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var keyMonitor: Any?
     private var flagsMonitor: Any?
     private var applyingLayout = false
+    private var chatResizeStartFrame: NSRect?
+    private var panelMoveStartOrigin: CGPoint?
+    private var hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
 
     private let listWidth: CGFloat = 360
-    /// Floor at the default panel size — users can only grow from here.
+    /// Fixed outer height for the sessions list alone — only the chat pane is user-resizable.
+    private let listHeight: CGFloat = 640
+    /// Top + bottom padding around the HStack in `SessionsSidePanelView`.
+    private let listChromeVertical: CGFloat = 68 + 14
+    /// Floor at the default expanded size — users can only grow the chat from here.
     private var minExpandedWidth: CGFloat { Preferences.sessionsPanelDefaultWidth }
-    private var minHeight: CGFloat { Preferences.sessionsPanelDefaultHeight }
+    private var minExpandedHeight: CGFloat { Preferences.sessionsPanelDefaultHeight }
     private let maxShortcutSlots = SessionStore.maxSessions
+
+    fileprivate struct ChatResizeEdges: OptionSet {
+        let rawValue: Int
+        static let leading = ChatResizeEdges(rawValue: 1 << 0)
+        static let trailing = ChatResizeEdges(rawValue: 1 << 1)
+        static let top = ChatResizeEdges(rawValue: 1 << 2)
+        static let bottom = ChatResizeEdges(rawValue: 1 << 3)
+    }
 
     var isVisible: Bool { panel.isVisible }
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
@@ -51,7 +66,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
                 width: Preferences.sessionsPanelDefaultWidth,
                 height: Preferences.sessionsPanelDefaultHeight
             ),
-            styleMask: [.borderless, .nonactivatingPanel, .resizable],
+            // Resize via chat-card grips only — not the outer window chrome.
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -93,14 +109,38 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             },
             onStop: { [weak self] id in
                 self?.onStop?(id)
-            }
+            },
+            onChatResizeBegan: { [weak self] in
+                self?.chatResizeBegan()
+            },
+            onChatResizeChanged: { [weak self] translation, edges in
+                self?.chatResizeChanged(translation: translation, edges: edges)
+            },
+            onChatResizeEnded: { [weak self] in
+                self?.chatResizeEnded()
+            },
+            onPanelDragEnded: { [weak self] in
+                self?.panelMoveEnded()
+            },
+            listContentHeight: max(1, listHeight - listChromeVertical)
         )
         let host = NSHostingView(rootView: root)
         host.wantsLayer = true
         host.autoresizingMask = [.width, .height]
         host.layer?.backgroundColor = NSColor.clear.cgColor
         hosting = host
-        panel.contentView = host
+
+        // Glass sits behind SwiftUI; soft mask fades the blur out at the panel edges.
+        let container = NSView(frame: panel.contentView?.bounds ?? .zero)
+        container.wantsLayer = true
+        container.autoresizingMask = [.width, .height]
+        let glass = SoftGlassEffectView(fadeWidth: 64, cornerRadius: 32)
+        glass.frame = container.bounds
+        glass.autoresizingMask = [.width, .height]
+        host.frame = container.bounds
+        container.addSubview(glass)
+        container.addSubview(host)
+        panel.contentView = container
     }
 
     func show(on screen: NSScreen? = nil) {
@@ -174,12 +214,21 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         updateSizeLimits(visible: visible, expanded: expanded)
 
         let size = preferredSize(visible: visible, expanded: expanded)
-        let frame = NSRect(
-            x: visible.maxX - size.width - 12,
-            y: visible.minY + (visible.height - size.height) / 2,
-            width: size.width,
-            height: size.height
-        )
+        let frame: NSRect
+        if hasCustomPlacement {
+            let saved = Preferences.sessionsPanelOrigin ?? panel.frame.origin
+            frame = clampFrame(
+                NSRect(origin: saved, size: size),
+                to: visible
+            )
+        } else {
+            frame = NSRect(
+                x: visible.maxX - size.width - 12,
+                y: visible.minY + (visible.height - size.height) / 2,
+                width: size.width,
+                height: size.height
+            )
+        }
         applyingLayout = true
         panel.setFrame(frame, display: true, animate: isVisible)
         applyingLayout = false
@@ -188,55 +237,139 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private func preferredSize(visible: NSRect, expanded: Bool) -> NSSize {
         let maxW = floor(visible.width * 0.5)
         let maxH = floor(visible.height * 0.9)
-        let height = min(max(Preferences.sessionsPanelHeight, min(minHeight, maxH)), maxH)
         if expanded {
             let minW = min(minExpandedWidth, maxW)
+            let minH = min(minExpandedHeight, maxH)
             let width = min(max(Preferences.sessionsPanelWidth, minW), maxW)
+            let height = min(max(Preferences.sessionsPanelHeight, minH), maxH)
             return NSSize(width: width, height: height)
         }
-        let width = min(listWidth, maxW)
-        return NSSize(width: width, height: height)
+        // Sessions list alone stays a fixed size — only the chat pane resizes.
+        return NSSize(
+            width: min(listWidth, maxW),
+            height: min(listHeight, maxH)
+        )
     }
 
     private func updateSizeLimits(visible: NSRect, expanded: Bool) {
         let maxW = max(1, floor(visible.width * 0.5))
         let maxH = max(1, floor(visible.height * 0.9))
-        let minH = min(minHeight, maxH)
         if expanded {
             let minW = min(minExpandedWidth, maxW)
+            let minH = min(minExpandedHeight, maxH)
             panel.minSize = NSSize(width: minW, height: minH)
             panel.maxSize = NSSize(width: maxW, height: maxH)
         } else {
             let width = min(listWidth, maxW)
-            panel.minSize = NSSize(width: width, height: minH)
-            panel.maxSize = NSSize(width: width, height: maxH)
+            let height = min(listHeight, maxH)
+            panel.minSize = NSSize(width: width, height: height)
+            panel.maxSize = NSSize(width: width, height: height)
         }
     }
 
     private func persistSizeIfNeeded() {
         guard !applyingLayout else { return }
+        guard selection.selectedID != nil else { return }
         let size = panel.frame.size
         guard size.width > 0, size.height > 0 else { return }
-        if selection.selectedID != nil {
-            Preferences.sessionsPanelWidth = size.width
-        }
+        Preferences.sessionsPanelWidth = size.width
         Preferences.sessionsPanelHeight = size.height
     }
 
-    private func dockToTrailingEdge() {
-        guard let screen = panel.screen ?? NSScreen.main else { return }
-        let visible = screen.visibleFrame
-        var frame = panel.frame
+    private func clampFrame(_ frame: NSRect, to visible: NSRect) -> NSRect {
+        var frame = frame
         frame.size.width = min(frame.width, floor(visible.width * 0.5))
         frame.size.height = min(frame.height, floor(visible.height * 0.9))
-        frame.origin.x = visible.maxX - frame.width - 12
-        frame.origin.y = min(
-            max(frame.origin.y, visible.minY),
-            visible.maxY - frame.height
-        )
+        frame.origin.x = min(max(frame.origin.x, visible.minX + 8), visible.maxX - frame.width - 8)
+        frame.origin.y = min(max(frame.origin.y, visible.minY + 8), visible.maxY - frame.height - 8)
+        return frame
+    }
+
+    private func clampToVisibleFrame() {
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        let clamped = clampFrame(panel.frame, to: screen.visibleFrame)
+        applyingLayout = true
+        panel.setFrame(clamped, display: true)
+        applyingLayout = false
+        if hasCustomPlacement {
+            Preferences.sessionsPanelOrigin = clamped.origin
+        }
+    }
+
+    private func panelMoveEnded() {
+        hasCustomPlacement = true
+        clampToVisibleFrame()
+        Preferences.sessionsPanelOrigin = panel.frame.origin
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard !applyingLayout else { return }
+        hasCustomPlacement = true
+    }
+
+    private func chatResizeBegan() {
+        guard selection.selectedID != nil else { return }
+        chatResizeStartFrame = panel.frame
+    }
+
+    private func chatResizeChanged(translation: CGSize, edges: ChatResizeEdges) {
+        guard selection.selectedID != nil,
+              let start = chatResizeStartFrame,
+              let screen = panel.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let maxW = floor(visible.width * 0.5)
+        let maxH = floor(visible.height * 0.9)
+        let minW = min(minExpandedWidth, maxW)
+        let minH = min(minExpandedHeight, maxH)
+
+        var width = start.width
+        var height = start.height
+        if edges.contains(.leading) {
+            width = start.width - translation.width
+        }
+        if edges.contains(.trailing) {
+            width = start.width + translation.width
+        }
+        // SwiftUI +y is down; AppKit +y is up.
+        if edges.contains(.bottom) {
+            height = start.height + translation.height
+        }
+        if edges.contains(.top) {
+            height = start.height - translation.height
+        }
+
+        width = min(max(width, minW), maxW)
+        height = min(max(height, minH), maxH)
+
+        var frame = start
+        frame.size = NSSize(width: width, height: height)
+        // Keep the opposite edge fixed while the dragged edge moves.
+        if edges.contains(.leading), !edges.contains(.trailing) {
+            frame.origin.x = start.maxX - width
+        } else if edges.contains(.trailing), !edges.contains(.leading) {
+            frame.origin.x = start.origin.x
+        } else {
+            frame.origin.x = start.midX - width / 2
+        }
+        if edges.contains(.bottom), !edges.contains(.top) {
+            frame.origin.y = start.maxY - height
+        } else if edges.contains(.top), !edges.contains(.bottom) {
+            frame.origin.y = start.origin.y
+        } else {
+            frame.origin.y = start.midY - height / 2
+        }
+        frame = clampFrame(frame, to: visible)
+
         applyingLayout = true
         panel.setFrame(frame, display: true)
         applyingLayout = false
+        hasCustomPlacement = true
+    }
+
+    private func chatResizeEnded() {
+        persistSizeIfNeeded()
+        clampToVisibleFrame()
+        chatResizeStartFrame = nil
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -246,32 +379,6 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         selection.showShortcutBadges = false
         closeChat()
-    }
-
-    func windowDidEndLiveResize(_ notification: Notification) {
-        persistSizeIfNeeded()
-        dockToTrailingEdge()
-    }
-
-    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        guard let screen = sender.screen ?? NSScreen.main else { return frameSize }
-        let visible = screen.visibleFrame
-        let expanded = selection.selectedID != nil
-        let maxW = floor(visible.width * 0.5)
-        let maxH = floor(visible.height * 0.9)
-        let minH = min(minHeight, maxH)
-        if expanded {
-            let minW = min(minExpandedWidth, maxW)
-            return NSSize(
-                width: min(max(frameSize.width, minW), maxW),
-                height: min(max(frameSize.height, minH), maxH)
-            )
-        }
-        let width = min(listWidth, maxW)
-        return NSSize(
-            width: width,
-            height: min(max(frameSize.height, minH), maxH)
-        )
     }
 
     private func installShortcutMonitors() {
@@ -321,6 +428,20 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         }
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        // ⌃C stops the open chat (same as the Stop button).
+        if panel.isKeyWindow,
+           Int(event.keyCode) == kVK_ANSI_C,
+           flags.contains(.control),
+           !flags.contains(.command),
+           !flags.contains(.option),
+           !flags.contains(.shift),
+           let id = selection.selectedID,
+           store.session(id: id)?.status == .working {
+            onStop?(id)
+            return nil
+        }
+
         guard flags.contains(.command),
               !flags.contains(.shift),
               !flags.contains(.option),
@@ -376,6 +497,12 @@ private struct SessionsSidePanelView: View {
     var onArchive: (UUID) -> Void
     var onSend: (UUID, String, FollowUpSubmit) -> Void
     var onStop: (UUID) -> Void
+    var onChatResizeBegan: () -> Void
+    var onChatResizeChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
+    var onChatResizeEnded: () -> Void
+    var onPanelDragEnded: () -> Void
+    /// Height of the sessions list column (panel height minus vertical chrome).
+    var listContentHeight: CGFloat
 
     private let listColumnWidth: CGFloat = 344
 
@@ -387,24 +514,34 @@ private struct SessionsSidePanelView: View {
     var body: some View {
         // Clear panel chrome; cards use solid white/black for readable contrast.
         HStack(alignment: .top, spacing: 12) {
+            // List stays fixed size; only the chat card grows with panel resize.
             sessionsColumn
-                .frame(width: listColumnWidth)
+                .frame(width: listColumnWidth, height: listContentHeight, alignment: .top)
             if let id = selection.selectedID, let session = store.session(id: id) {
                 SessionChatView(
                     session: session,
                     onSend: { text, submit in onSend(id, text, submit) },
                     onStop: { onStop(id) },
                     onClose: onCloseChat,
-                    compact: true
+                    compact: true,
+                    onPanelDragEnded: onPanelDragEnded
                 )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                 .background(SolidCardBackground(cornerRadius: 22, selected: false))
+                .overlay {
+                    ChatCardResizeHandles(
+                        onBegan: onChatResizeBegan,
+                        onChanged: onChatResizeChanged,
+                        onEnded: onChatResizeEnded
+                    )
+                }
+                .layoutPriority(1)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 68)
-        .padding(.bottom, 14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 22)
+        .padding(.top, 72)
+        .padding(.bottom, 22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Color.clear)
         .overlay(alignment: .top) {
             floatingHeader
@@ -431,6 +568,8 @@ private struct SessionsSidePanelView: View {
                                 .strokeBorder(Color.black, lineWidth: 1.25)
                         )
                 )
+                .panelDragHandle(onEnded: onPanelDragEnded)
+                .help("Drag to move")
             Spacer(minLength: 8)
             Button(action: onNew) {
                 Text("New")
@@ -501,6 +640,154 @@ private struct SessionsSidePanelView: View {
                 .background(Color.clear)
             }
         }
+    }
+}
+
+extension View {
+    /// Native AppKit window drag — avoids SwiftUI translation fighting a moving window.
+    func panelDragHandle(
+        enabled: Bool = true,
+        onEnded: @escaping () -> Void
+    ) -> some View {
+        overlay {
+            if enabled {
+                WindowDragHandle(onDragEnded: onEnded)
+            }
+        }
+    }
+}
+
+/// Transparent AppKit region that calls `NSWindow.performDrag` for smooth moving.
+private struct WindowDragHandle: NSViewRepresentable {
+    var onDragEnded: () -> Void
+
+    func makeNSView(context: Context) -> WindowDragNSView {
+        let view = WindowDragNSView()
+        view.onDragEnded = onDragEnded
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowDragNSView, context: Context) {
+        nsView.onDragEnded = onDragEnded
+    }
+}
+
+private final class WindowDragNSView: NSView {
+    var onDragEnded: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        window.performDrag(with: event)
+        onDragEnded?()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+/// Invisible hit targets on the chat card edges — drives panel resize without
+/// AppKit's outer-window resize chrome (which sat in empty transparent space).
+private struct ChatCardResizeHandles: View {
+    var onBegan: () -> Void
+    var onChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
+    var onEnded: () -> Void
+
+    private let edge: CGFloat = 8
+    private let corner: CGFloat = 16
+
+    var body: some View {
+        ZStack {
+            handle(edges: .leading, cursor: .resizeLeftRight)
+                .frame(width: edge)
+                .frame(maxHeight: .infinity)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            handle(edges: .trailing, cursor: .resizeLeftRight)
+                .frame(width: edge)
+                .frame(maxHeight: .infinity)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            handle(edges: .top, cursor: .resizeUpDown)
+                .frame(height: edge)
+                .frame(maxWidth: .infinity)
+                .frame(maxHeight: .infinity, alignment: .top)
+            handle(edges: .bottom, cursor: .resizeUpDown)
+                .frame(height: edge)
+                .frame(maxWidth: .infinity)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            handle(edges: [.leading, .bottom], cursor: .resizeLeftRight)
+                .frame(width: corner, height: corner)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            handle(edges: [.trailing, .bottom], cursor: .resizeLeftRight)
+                .frame(width: corner, height: corner)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+            handle(edges: [.leading, .top], cursor: .resizeLeftRight)
+                .frame(width: corner, height: corner)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            handle(edges: [.trailing, .top], cursor: .resizeLeftRight)
+                .frame(width: corner, height: corner)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        }
+        .padding(1)
+        .allowsHitTesting(true)
+    }
+
+    private func handle(edges: SessionsSidePanel.ChatResizeEdges, cursor: NSCursor) -> some View {
+        ChatResizeEdgeDrag(
+            edges: edges,
+            cursor: cursor,
+            onBegan: onBegan,
+            onChanged: onChanged,
+            onEnded: onEnded
+        )
+    }
+}
+
+private struct ChatResizeEdgeDrag: View {
+    var edges: SessionsSidePanel.ChatResizeEdges
+    var cursor: NSCursor
+    var onBegan: () -> Void
+    var onChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
+    var onEnded: () -> Void
+
+    @State private var dragging = false
+
+    var body: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside || dragging {
+                    cursor.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        if !dragging {
+                            dragging = true
+                            onBegan()
+                            cursor.set()
+                        }
+                        onChanged(value.translation, edges)
+                    }
+                    .onEnded { _ in
+                        dragging = false
+                        onEnded()
+                        NSCursor.arrow.set()
+                    }
+            )
     }
 }
 

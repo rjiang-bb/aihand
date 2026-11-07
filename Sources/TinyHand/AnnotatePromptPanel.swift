@@ -191,12 +191,12 @@ private struct AnnotatePromptView: View {
             }
             TextField(model.requirePrompt ? "Prompt…" : "Optional prompt…", text: $model.text, axis: .vertical)
                 .font(.system(size: 14))
-                .lineLimit(2...4)
+                .lineLimit(2...10)
                 .textFieldStyle(.plain)
                 .focused($focused)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 7)
-                .frame(minHeight: 52, maxHeight: 72, alignment: .topLeading)
+                .frame(minHeight: 52, maxHeight: 120, alignment: .topLeading)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(fieldFill))
                 .onChange(of: model.focusTick) { _ in
                     focused = true
@@ -207,7 +207,7 @@ private struct AnnotatePromptView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.orange)
                 } else {
-                    Text("⌘↩ to send · Esc to close")
+                    Text("⇧↩ newline · ⌘↩ send · Esc to close")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }

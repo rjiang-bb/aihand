@@ -8,15 +8,19 @@ struct SessionChatView: View {
     var onStop: () -> Void
     var onClose: (() -> Void)? = nil
     var compact: Bool = false
+    var onPanelDragEnded: (() -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft = ""
     @State private var draggingQueueID: UUID?
     @FocusState private var composerFocused: Bool
+    @StateObject private var skillAC = SkillAutocompleteController()
+    @State private var newlineMonitor: Any?
 
     private var solidBG: Color { colorScheme == .dark ? .black : .white }
     private var solidFG: Color { colorScheme == .dark ? .white : .black }
     private var isWorking: Bool { session.status == .working }
+    private var workspace: String { Preferences.agentWorkspace }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,13 +33,42 @@ struct SessionChatView: View {
                 queueSection
                 Divider()
             }
+            if skillAC.isActive {
+                SkillSuggestionList(
+                    controller: skillAC,
+                    query: SkillCatalog.slashQuery(in: draft)?.query ?? ""
+                ) { skill in
+                    applySkill(skill)
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+            }
             composer
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
-        .onAppear { focusComposer() }
+        .onAppear {
+            skillAC.configure(workspace: workspace)
+            skillAC.readText = { draft }
+            skillAC.writeText = { draft = $0 }
+            focusComposer()
+        }
+        .onDisappear {
+            removeNewlineMonitor()
+            skillAC.teardown()
+        }
         .onChange(of: session.id) { _ in
             focusComposer()
+        }
+        .onChange(of: draft) { _ in
+            skillAC.update(text: draft)
+        }
+        .onChange(of: composerFocused) { focused in
+            if focused {
+                installNewlineMonitor()
+            } else {
+                removeNewlineMonitor()
+            }
         }
     }
 
@@ -45,19 +78,56 @@ struct SessionChatView: View {
         }
     }
 
+    private func installNewlineMonitor() {
+        guard newlineMonitor == nil else { return }
+        newlineMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Shift+Return → newline; plain Return still submits via onSubmit.
+            let code = Int(event.keyCode)
+            guard code == 36 || code == 76 else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard flags.contains(.shift),
+                  !flags.contains(.command),
+                  !flags.contains(.option),
+                  !flags.contains(.control) else {
+                return event
+            }
+            guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+                  textView.isEditable else {
+                return event
+            }
+            textView.insertText("\n", replacementRange: textView.selectedRange())
+            return nil
+        }
+    }
+
+    private func removeNewlineMonitor() {
+        if let newlineMonitor {
+            NSEvent.removeMonitor(newlineMonitor)
+        }
+        newlineMonitor = nil
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
-            statusBadge
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(solidFG)
-                    .lineLimit(1)
-                Text(statusLabel)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(solidFG.opacity(0.6))
+            HStack(spacing: 10) {
+                statusBadge
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(session.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(solidFG)
+                        .lineLimit(1)
+                    Text(statusLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(solidFG.opacity(0.6))
+                }
+                Spacer(minLength: 0)
             }
-            Spacer()
+            .contentShape(Rectangle())
+            .panelDragHandle(
+                enabled: compact && onPanelDragEnded != nil,
+                onEnded: { onPanelDragEnded?() }
+            )
+            .modifier(OptionalHelp(text: compact ? "Drag to move" : nil))
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -160,6 +230,15 @@ struct SessionChatView: View {
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button {
+                steerQueued(item)
+            } label: {
+                Text("Steer")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("Interrupt and send this now")
+            Button {
                 session.queuedFollowUps.removeAll { $0.id == item.id }
             } label: {
                 Image(systemName: "xmark")
@@ -188,7 +267,7 @@ struct SessionChatView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Follow up…", text: $draft, axis: .vertical)
-                    .lineLimit(1...5)
+                    .lineLimit(1...12)
                     .textFieldStyle(.plain)
                     .foregroundStyle(.primary)
                     .focused($composerFocused)
@@ -201,7 +280,14 @@ struct SessionChatView: View {
                                     .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
                             )
                     )
-                    .onSubmit { submit(.queue) }
+                    .onSubmit {
+                        if skillAC.isActive {
+                            applySelectedSkill()
+                        } else {
+                            submit(.queue)
+                        }
+                    }
+                    .help("Type / for skills · ⇧↩ for a new line")
                 if isWorking {
                     Button(action: onStop) {
                         Image(systemName: "stop.circle.fill")
@@ -210,12 +296,17 @@ struct SessionChatView: View {
                             .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Stop")
+                    .help("Stop (⌃C)")
                 }
                 Button(action: { submit(.sendNow) }) {
+                    let canSend = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 28))
-                        .symbolRenderingMode(.hierarchical)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(
+                            canSend ? Color.white : Color.secondary.opacity(0.55),
+                            canSend ? Color.accentColor : Color.secondary.opacity(0.25)
+                        )
                 }
                 .buttonStyle(.plain)
                 .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -226,7 +317,16 @@ struct SessionChatView: View {
             if isWorking {
                 HStack(spacing: 14) {
                     hintPair(key: "Enter", label: "queue")
+                    hintPair(key: "⇧↩", label: "newline")
                     hintPair(key: "⌘↩", label: "steer")
+                    hintPair(key: "⌃C", label: "stop")
+                }
+                .padding(.horizontal, 4)
+            } else if !skillAC.isActive {
+                HStack(spacing: 14) {
+                    hintPair(key: "/", label: "skills")
+                    hintPair(key: "⇧↩", label: "newline")
+                    hintPair(key: "Enter", label: "send")
                 }
                 .padding(.horizontal, 4)
             }
@@ -251,9 +351,27 @@ struct SessionChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         draft = ""
+        skillAC.clear()
         // Idle turns treat both as send-now; queue only applies while working.
         let resolved: FollowUpSubmit = (isWorking && mode == .queue) ? .queue : .sendNow
         onSend(text, resolved)
+    }
+
+    private func steerQueued(_ item: QueuedFollowUp) {
+        session.queuedFollowUps.removeAll { $0.id == item.id }
+        onSend(item.text, .sendNow)
+    }
+
+    private func applySkill(_ skill: AgentSkill) {
+        var text = draft
+        skillAC.apply(skill, to: &text)
+        draft = text
+    }
+
+    private func applySelectedSkill() {
+        var text = draft
+        skillAC.applySelected(to: &text)
+        draft = text
     }
 }
 
@@ -280,5 +398,16 @@ private struct QueueReorderDropDelegate: DropDelegate {
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         DropProposal(operation: .move)
+    }
+}
+
+private struct OptionalHelp: ViewModifier {
+    var text: String?
+    func body(content: Content) -> some View {
+        if let text {
+            content.help(text)
+        } else {
+            content
+        }
     }
 }

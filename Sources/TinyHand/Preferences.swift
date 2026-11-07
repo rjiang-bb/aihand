@@ -223,10 +223,11 @@ enum Preferences {
         NSString(string: "~/Documents/tinyhand").expandingTildeInPath
     }
 
-    /// Preferred sessions panel size (expanded width + height). Caps applied at layout time.
+    /// Preferred size when a chat is open (total panel width + height). List-only mode is fixed.
     static let sessionsPanelDefaultWidth: CGFloat = 800
     static let sessionsPanelDefaultHeight: CGFloat = 640
 
+    /// Persisted expanded (chat open) panel width. Caps applied at layout time.
     static var sessionsPanelWidth: CGFloat {
         get {
             (defaults.object(forKey: "sessionsPanelWidth") as? Double)
@@ -235,12 +236,33 @@ enum Preferences {
         set { defaults.set(Double(newValue), forKey: "sessionsPanelWidth") }
     }
 
+    /// Persisted expanded (chat open) panel height. Caps applied at layout time.
     static var sessionsPanelHeight: CGFloat {
         get {
             (defaults.object(forKey: "sessionsPanelHeight") as? Double)
                 .map { CGFloat($0) } ?? sessionsPanelDefaultHeight
         }
         set { defaults.set(Double(newValue), forKey: "sessionsPanelHeight") }
+    }
+
+    /// User-dragged sessions panel origin (AppKit coords). `nil` = default trailing dock.
+    static var sessionsPanelOrigin: CGPoint? {
+        get {
+            guard let x = defaults.object(forKey: "sessionsPanelOriginX") as? Double,
+                  let y = defaults.object(forKey: "sessionsPanelOriginY") as? Double else {
+                return nil
+            }
+            return CGPoint(x: x, y: y)
+        }
+        set {
+            if let newValue {
+                defaults.set(Double(newValue.x), forKey: "sessionsPanelOriginX")
+                defaults.set(Double(newValue.y), forKey: "sessionsPanelOriginY")
+            } else {
+                defaults.removeObject(forKey: "sessionsPanelOriginX")
+                defaults.removeObject(forKey: "sessionsPanelOriginY")
+            }
+        }
     }
 
     @discardableResult
@@ -287,7 +309,7 @@ enum Preferences {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
                     "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder",
-                    "sessionsPanelWidth", "sessionsPanelHeight"] {
+                    "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)
         }
         NotificationCenter.default.post(name: changed, object: nil)
