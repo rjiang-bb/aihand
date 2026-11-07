@@ -223,16 +223,13 @@ struct SessionChatView: View {
                 .help(isWorking ? "Send now" : "Send")
             }
 
-            HStack(spacing: 14) {
-                if isWorking {
+            if isWorking {
+                HStack(spacing: 14) {
                     hintPair(key: "Enter", label: "queue")
-                    hintPair(key: "⌘↩", label: "send now")
-                } else {
-                    hintPair(key: "Enter", label: "send")
-                    hintPair(key: "⌘↩", label: "send")
+                    hintPair(key: "⌘↩", label: "steer")
                 }
+                .padding(.horizontal, 4)
             }
-            .padding(.horizontal, 4)
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
