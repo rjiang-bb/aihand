@@ -9,6 +9,7 @@ struct Shortcut: Equatable {
 
     static let toggleDefault = Shortcut(keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(controlKey | optionKey), display: "⌃⌥H")
     static let clearDefault = Shortcut(keyCode: UInt32(kVK_ANSI_X), modifiers: UInt32(controlKey | optionKey), display: "⌃⌥X")
+    static let sessionsDefault = Shortcut(keyCode: UInt32(kVK_ANSI_G), modifiers: UInt32(cmdKey | shiftKey), display: "⌘⇧G")
 }
 
 enum InteractKey: String, CaseIterable {
@@ -38,6 +39,55 @@ enum InteractKey: String, CaseIterable {
         case .command: return .maskCommand
         case .control: return .maskControl
         case .off: return []
+        }
+    }
+}
+
+enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
+    case cursor
+    case claude
+    case codex
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cursor: return "Cursor Agent"
+        case .claude: return "Claude Code"
+        case .codex: return "Codex"
+        }
+    }
+
+    var commandName: String {
+        switch self {
+        case .cursor: return "agent"
+        case .claude: return "claude"
+        case .codex: return "codex"
+        }
+    }
+
+    var installHint: String {
+        switch self {
+        case .cursor: return "Install the Cursor CLI (`agent`)."
+        case .claude: return "Install Claude Code (`claude`) — https://code.claude.com/docs/en/cli-reference"
+        case .codex: return "Install Codex (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`)."
+        }
+    }
+
+    /// Short label for the CLI’s default model when TinyHand doesn’t pass `--model`.
+    var defaultModelTitle: String {
+        switch self {
+        case .cursor: return "Auto"
+        case .claude: return "Default"
+        case .codex: return "Default"
+        }
+    }
+
+    var loginHint: String {
+        switch self {
+        case .cursor: return "`agent login`"
+        case .claude: return "`claude auth login`"
+        case .codex: return "`codex` (sign in with ChatGPT)"
         }
     }
 }
@@ -92,6 +142,11 @@ enum Preferences {
         set { saveShortcut(newValue, "shortcut.clear") }
     }
 
+    static var sessionsShortcut: Shortcut {
+        get { loadShortcut("shortcut.sessions") ?? .sessionsDefault }
+        set { saveShortcut(newValue, "shortcut.sessions") }
+    }
+
     static let pointerSizeRange: ClosedRange<CGFloat> = 0.08...0.20
 
     static var pointerSize: CGFloat {
@@ -144,6 +199,84 @@ enum Preferences {
         set { set(newValue, "showInkButton") }
     }
 
+    static var agentCLI: AgentCLIKind {
+        get { defaults.string(forKey: "agentCLI").flatMap(AgentCLIKind.init(rawValue:)) ?? .cursor }
+        set { set(newValue.rawValue, "agentCLI") }
+    }
+
+    static var agentWorkspace: String {
+        get { defaults.string(forKey: "agentWorkspace") ?? "" }
+        set { set(newValue, "agentWorkspace") }
+    }
+
+    static var screenshotsFolder: String {
+        get {
+            if let stored = defaults.string(forKey: "screenshotsFolder"), !stored.isEmpty {
+                return stored
+            }
+            return defaultScreenshotsFolder
+        }
+        set { set(newValue, "screenshotsFolder") }
+    }
+
+    static var defaultScreenshotsFolder: String {
+        NSString(string: "~/Documents/tinyhand").expandingTildeInPath
+    }
+
+    /// Preferred size when a chat is open (total panel width + height). List-only mode is fixed.
+    static let sessionsPanelDefaultWidth: CGFloat = 800
+    static let sessionsPanelDefaultHeight: CGFloat = 640
+
+    /// Persisted expanded (chat open) panel width. Caps applied at layout time.
+    static var sessionsPanelWidth: CGFloat {
+        get {
+            (defaults.object(forKey: "sessionsPanelWidth") as? Double)
+                .map { CGFloat($0) } ?? sessionsPanelDefaultWidth
+        }
+        set { defaults.set(Double(newValue), forKey: "sessionsPanelWidth") }
+    }
+
+    /// Persisted expanded (chat open) panel height. Caps applied at layout time.
+    static var sessionsPanelHeight: CGFloat {
+        get {
+            (defaults.object(forKey: "sessionsPanelHeight") as? Double)
+                .map { CGFloat($0) } ?? sessionsPanelDefaultHeight
+        }
+        set { defaults.set(Double(newValue), forKey: "sessionsPanelHeight") }
+    }
+
+    /// Origin of the sessions *list* with chat closed (AppKit coords).
+    /// Expanded chat frames keep this origin and grow to the right.
+    /// `nil` = default trailing dock.
+    static var sessionsPanelOrigin: CGPoint? {
+        get {
+            guard let x = defaults.object(forKey: "sessionsPanelOriginX") as? Double,
+                  let y = defaults.object(forKey: "sessionsPanelOriginY") as? Double else {
+                return nil
+            }
+            return CGPoint(x: x, y: y)
+        }
+        set {
+            if let newValue {
+                defaults.set(Double(newValue.x), forKey: "sessionsPanelOriginX")
+                defaults.set(Double(newValue.y), forKey: "sessionsPanelOriginY")
+            } else {
+                defaults.removeObject(forKey: "sessionsPanelOriginX")
+                defaults.removeObject(forKey: "sessionsPanelOriginY")
+            }
+        }
+    }
+
+    @discardableResult
+    static func ensureScreenshotsFolder() -> String {
+        let path = screenshotsFolder
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: path) {
+            try? fm.createDirectory(atPath: path, withIntermediateDirectories: true)
+        }
+        return path
+    }
+
     static let maxPinned = 8
 
     static var pinnedStyles: [PointerStyle] {
@@ -175,15 +308,16 @@ enum Preferences {
     }
 
     static func resetAll() {
-        for key in ["shortcut.toggle", "shortcut.clear", "pointerSize", "showShadow", "fadeSeconds",
+        for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound"] {
+                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder",
+                    "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)
         }
         NotificationCenter.default.post(name: changed, object: nil)
     }
 
-        private static func set(_ value: Any, _ key: String) {
+    private static func set(_ value: Any, _ key: String) {
         defaults.set(value, forKey: key)
         NotificationCenter.default.post(name: changed, object: nil)
     }

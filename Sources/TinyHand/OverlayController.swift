@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import CoreVideo
 
 final class OverlayController {
     private final class OverlayWindow: NSWindow {
@@ -15,6 +16,10 @@ final class OverlayController {
     private var menuHover = false
     private var guardCursorUntil = Date.distantPast
     private var timer: Timer?
+    private var displayLink: CVDisplayLink?
+    /// Coalesces display-link → main hops; guarded by `aimLock` (callback is off-main).
+    private var aimQueued = false
+    private let aimLock = NSLock()
     private var currentFrame: CGRect?
     private var downPoint: CGPoint?
     private var buttonSeenDown = false
@@ -28,23 +33,30 @@ final class OverlayController {
     private var lastMenuScan = Date.distantPast
     private var menuOpeningUntil = Date.distantPast
     private var escHotKey: UInt32?
+    private var enterHotKey: UInt32?
+    private var sendHotKey: UInt32?
+    private let annotationHints = AnnotationHintPanel()
     private var lastPermissionCheck = Date.distantPast
 
-    private static let busyInterval: TimeInterval = 1.0 / 120.0
-    private static let idleInterval: TimeInterval = 1.0 / 20.0
-    private static let idleAfter: TimeInterval = 0.5
+    /// Zones / cursor / menus — not used for hand pose (display link + mouse events drive that).
+    private static let serviceInterval: TimeInterval = 1.0 / 30.0
     private static let menuScanFast: TimeInterval = 0.05
     private static let menuScanSlow: TimeInterval = 0.25
-    private var timerInterval: TimeInterval = 0
-    private var idleMonitors: [Any] = []
+    private var mouseAimMonitors: [Any] = []
     private var lastMouse: CGPoint?
-    private var stillSince = Date()
     private var lastButtonEvent = Date.distantPast
 
     private(set) var isActive = false
     private var activity: NSObjectProtocol?
     var onActiveChanged: (() -> Void)?
     var onNeedsPermission: (() -> Void)?
+    /// Fired after a real ink stroke ends. Coordinates are in AppKit screen space.
+    var onStrokeComplete: ((StrokeResult, CGRect, NSScreen) -> Void)?
+    /// Enter while ink is on screen — open the comment box.
+    var onRequestComment: (() -> Void)?
+    /// ⌘↩ while ink is on screen — send the annotated screenshot immediately.
+    var onRequestSend: (() -> Void)?
+    var onInkCleared: (() -> Void)?
 
     init() {
         let frame = (NSScreen.main ?? NSScreen.screens.first).map { $0.frame }
@@ -78,7 +90,7 @@ final class OverlayController {
         inputTap.onLeftDragged = { [weak self] in
             self?.dragEvents += 1
             self?.drag()
-            self?.wake()
+            self?.aimFrame()
         }
         inputTap.onMouseUp = { [weak self] in
             self?.release()
@@ -166,6 +178,8 @@ final class OverlayController {
         }
         ownMenuOpen = suspended
         inputTap.setActive(!suspended)
+        // Drop Enter / ⌘↩ while the comment box is key so the field can use them.
+        setAnnotationHotKeysEnabled(!suspended)
         if let screen = currentScreen() {
             updateZones(mouse: NSEvent.mouseLocation, screen: screen)
         }
@@ -184,7 +198,33 @@ final class OverlayController {
         buttonSeenDown = false
         armView.held = false
         downPoint = nil
-        armView.ink.end()
+        let wasDrawing = armView.ink.isDrawing
+        let result = armView.ink.end(holdFade: wasDrawing && onStrokeComplete != nil)
+        if wasDrawing, let result, let frame = currentFrame, let screen = currentScreen() {
+            let screenBounds = CGRect(
+                x: frame.origin.x + result.bounds.minX,
+                y: frame.origin.y + result.bounds.minY,
+                width: result.bounds.width,
+                height: result.bounds.height
+            )
+            onStrokeComplete?(result, screenBounds, screen)
+        }
+    }
+
+    func releaseStrokeHold(_ result: StrokeResult, fadeNow: Bool = true) {
+        armView.ink.releaseHold(result, fadeNow: fadeNow)
+    }
+
+    var overlayFrame: CGRect? { currentFrame }
+
+    func screenToLocal(_ screenPoint: CGPoint) -> CGPoint? {
+        guard let frame = currentFrame else { return nil }
+        return CGPoint(x: screenPoint.x - frame.origin.x, y: screenPoint.y - frame.origin.y)
+    }
+
+    func localToScreen(_ local: CGPoint) -> CGPoint? {
+        guard let frame = currentFrame else { return nil }
+        return CGPoint(x: frame.origin.x + local.x, y: frame.origin.y + local.y)
     }
 
     var style: PointerStyle { armView.style }
@@ -207,6 +247,20 @@ final class OverlayController {
 
     func clearInk() {
         armView.ink.clear()
+        onInkCleared?()
+    }
+
+    /// Finished strokes on the overlay (not including an in-progress drag).
+    var hasAnnotationInk: Bool {
+        !armView.ink.isDrawing && inkStrokes > 0
+    }
+
+    func setAnnotationHintsVisible(_ visible: Bool) {
+        guard visible, isActive, let screen = currentScreen() else {
+            annotationHints.hide()
+            return
+        }
+        annotationHints.show(on: screen)
     }
 
     private func drag() {
@@ -256,11 +310,13 @@ final class OverlayController {
         tapSound.warm()
 
         CursorHider.hide()
-        tick()
         window.orderFrontRegardless()
 
-        stillSince = Date()
-        runTimer(every: OverlayController.busyInterval)
+        startDisplayLink()
+        installMouseAimMonitors()
+        runServiceTimer()
+        aimFrame()
+        serviceTick()
 
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .latencyCritical], reason: "TinyHand pointer is on")
@@ -271,6 +327,7 @@ final class OverlayController {
 
         if let screen = currentScreen() {
             toolbar.place(on: screen)
+            annotationHints.show(on: screen)
         }
         toolbar.setNeedsPermission(!installed)
         toolbar.show()
@@ -289,6 +346,7 @@ final class OverlayController {
             }
         }
         setEscEnabled(true)
+        setAnnotationHotKeysEnabled(true)
         onActiveChanged?()
         return installed
     }
@@ -299,10 +357,10 @@ final class OverlayController {
         }
         isActive = false
 
+        stopDisplayLink()
         timer?.invalidate()
         timer = nil
-        timerInterval = 0
-        removeIdleMonitors()
+        removeMouseAimMonitors()
         inputTap.setActive(false)
         if let a = activity {
             ProcessInfo.processInfo.endActivity(a)
@@ -311,13 +369,16 @@ final class OverlayController {
         armView.held = false
         downPoint = nil
         armView.ink.clear()
+        onInkCleared?()
         window.ignoresMouseEvents = true
         window.orderOut(nil)
         toolbar.hide()
+        annotationHints.hide()
         normalCursor = false
         armView.pointerHidden = false
         inputTap.passThroughRects = []
         setEscEnabled(false)
+        setAnnotationHotKeysEnabled(false)
         ownMenuOpen = false
         CursorHider.show()
         onActiveChanged?()
@@ -383,6 +444,35 @@ final class OverlayController {
         }
     }
 
+    private func setAnnotationHotKeysEnabled(_ enabled: Bool) {
+        if enabled && isActive {
+            if enterHotKey == nil {
+                enterHotKey = HotKeyCenter.shared.register(keyCode: UInt32(kVK_Return), modifiers: 0) { [weak self] in
+                    guard let self, self.hasAnnotationInk else { return }
+                    self.onRequestComment?()
+                }
+            }
+            if sendHotKey == nil {
+                sendHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_Return),
+                    modifiers: UInt32(cmdKey)
+                ) { [weak self] in
+                    guard let self, self.hasAnnotationInk else { return }
+                    self.onRequestSend?()
+                }
+            }
+            return
+        }
+        if let id = enterHotKey {
+            HotKeyCenter.shared.unregister(id)
+            enterHotKey = nil
+        }
+        if let id = sendHotKey {
+            HotKeyCenter.shared.unregister(id)
+            sendHotKey = nil
+        }
+    }
+
     private static func menuBarRect(_ screen: NSScreen) -> CGRect {
         let height = max(24, screen.frame.maxY - screen.visibleFrame.maxY)
         return CGRect(x: screen.frame.minX, y: screen.frame.maxY - height, width: screen.frame.width, height: height)
@@ -436,11 +526,13 @@ final class OverlayController {
         func spin(_ seconds: Double) {
             RunLoop.main.run(until: Date().addingTimeInterval(seconds))
         }
-        tick()
-        time("tick") { tick() }
+        aimFrame()
+        serviceTick()
+        time("aimFrame") { aimFrame() }
+        time("serviceTick") { serviceTick() }
         time("mouseDown (tap callback)") { inputTap.simulate(.leftMouseDown) }
         time("mouseDown (deferred work)") { spin(0.01) }
-        time("10 ticks while held") { for _ in 0..<10 { tick() } }
+        time("10 aim frames while held") { for _ in 0..<10 { aimFrame() } }
         time("mouseUp (tap callback)") { inputTap.simulate(.leftMouseUp) }
         spin(0.01)
         spin(0.3)
@@ -455,7 +547,7 @@ final class OverlayController {
             inputTap.simulate(.leftMouseUp)
         }
         spin(0.05)
-        time("ticks after up") { for _ in 0..<20 { tick() } }
+        time("aim frames after up") { for _ in 0..<20 { aimFrame() } }
         print("held after up:", armView.held, "drawing:", armView.ink.isDrawing)
     }
 
@@ -466,80 +558,95 @@ final class OverlayController {
             ?? NSScreen.screens.first
     }
 
-    private func runTimer(every interval: TimeInterval) {
-        if timer != nil && interval == timerInterval {
-            return
-        }
+    private func runServiceTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            self?.tick()
+        let t = Timer(timeInterval: OverlayController.serviceInterval, repeats: true) { [weak self] _ in
+            self?.serviceTick()
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
-        timerInterval = interval
     }
 
     private func noteButtonEvent() {
         lastButtonEvent = Date()
-        wake()
+        aimFrame()
     }
 
-    private func wake() {
-        stillSince = Date()
-        guard isActive, timerInterval != OverlayController.busyInterval else {
+    private func startDisplayLink() {
+        stopDisplayLink()
+        var link: CVDisplayLink?
+        guard CVDisplayLinkCreateWithActiveCGDisplays(&link) == kCVReturnSuccess, let link else {
             return
         }
-        removeIdleMonitors()
-        runTimer(every: OverlayController.busyInterval)
-        tick()
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        CVDisplayLinkSetOutputCallback(link, { _, _, _, _, _, context in
+            guard let context else { return kCVReturnSuccess }
+            let overlay = Unmanaged<OverlayController>.fromOpaque(context).takeUnretainedValue()
+            overlay.queueAimFrame()
+            return kCVReturnSuccess
+        }, context)
+        if let screen = currentScreen(),
+           let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            CVDisplayLinkSetCurrentCGDisplay(link, CGDirectDisplayID(num.uint32Value))
+        }
+        CVDisplayLinkStart(link)
+        displayLink = link
     }
 
-    private func updatePace(busy: Bool) {
-        if timerInterval == OverlayController.idleInterval {
-            if busy {
-                wake()
-            }
-            return
+    private func stopDisplayLink() {
+        if let link = displayLink {
+            CVDisplayLinkStop(link)
         }
-        let still = Date().timeIntervalSince(stillSince) > OverlayController.idleAfter
-        guard still, !busy, !armView.held, !armView.isSettling, !armView.ink.isDrawing else {
-            return
-        }
-        installIdleMonitors()
-        runTimer(every: OverlayController.idleInterval)
+        displayLink = nil
+        aimLock.lock()
+        aimQueued = false
+        aimLock.unlock()
     }
 
-    private func installIdleMonitors() {
-        guard idleMonitors.isEmpty else {
-            return
+    private func queueAimFrame() {
+        // Coalesce display-link callbacks onto the main queue so we never pile frames up.
+        aimLock.lock()
+        let alreadyQueued = aimQueued
+        if !alreadyQueued { aimQueued = true }
+        aimLock.unlock()
+        guard !alreadyQueued else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.aimLock.lock()
+            self.aimQueued = false
+            self.aimLock.unlock()
+            self.aimFrame()
         }
+    }
+
+    private func installMouseAimMonitors() {
+        removeMouseAimMonitors()
         let events: NSEvent.EventTypeMask = [
             .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-            .leftMouseDown, .rightMouseDown, .otherMouseDown, .flagsChanged,
         ]
         if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { [weak self] _ in
-            self?.wake()
+            self?.aimFrame()
         }) {
-            idleMonitors.append(global)
+            mouseAimMonitors.append(global)
         }
         if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { [weak self] event in
-            self?.wake()
+            self?.aimFrame()
             return event
         }) {
-            idleMonitors.append(local)
+            mouseAimMonitors.append(local)
         }
     }
 
-    private func removeIdleMonitors() {
-        idleMonitors.forEach(NSEvent.removeMonitor)
-        idleMonitors = []
+    private func removeMouseAimMonitors() {
+        mouseAimMonitors.forEach(NSEvent.removeMonitor)
+        mouseAimMonitors = []
     }
 
-    private func tick() {
+    /// Vsync / mouse-driven: keep the hand on the cursor with minimal latency.
+    private func aimFrame() {
+        guard isActive else { return }
         let mouse = NSEvent.mouseLocation
-        guard let screen = currentScreen() else {
-            return
-        }
+        guard let screen = currentScreen() else { return }
 
         if currentFrame != screen.frame {
             let moving = currentFrame != nil
@@ -549,15 +656,38 @@ final class OverlayController {
                 revealUntil = Date().addingTimeInterval(1.5)
             }
             armView.ink.clear()
+            onInkCleared?()
             window.setFrame(screen.frame, display: false)
             armView.frame = NSRect(origin: .zero, size: screen.frame.size)
             toolbar.place(on: screen)
+            annotationHints.reposition(on: screen)
+            if let link = displayLink,
+               let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                CVDisplayLinkSetCurrentCGDisplay(link, CGDirectDisplayID(num.uint32Value))
+            }
         }
 
-        if mouse != lastMouse {
-            lastMouse = mouse
-            stillSince = Date()
+        lastMouse = mouse
+        let local = CGPoint(x: mouse.x - screen.frame.origin.x, y: mouse.y - screen.frame.origin.y)
+        armView.aim(cursor: local)
+
+        guard downPoint != nil else { return }
+        let down = CGEventSource.buttonState(.hidSystemState, button: .left)
+        if down {
+            buttonSeenDown = true
         }
+        if buttonSeenDown && !down {
+            release()
+            return
+        }
+        drag()
+    }
+
+    /// Lower-rate maintenance: menus, toolbar, system cursor fighting.
+    private func serviceTick() {
+        guard isActive else { return }
+        let mouse = NSEvent.mouseLocation
+        guard let screen = currentScreen() else { return }
 
         updateZones(mouse: mouse, screen: screen)
         let overDock = DockArea.contains(OverlayController.cgPoint(mouse))
@@ -570,22 +700,5 @@ final class OverlayController {
             CursorHider.reassert(fighting: overDock, urgent: urgent)
         }
         checkPermission()
-
-        let local = CGPoint(x: mouse.x - screen.frame.origin.x, y: mouse.y - screen.frame.origin.y)
-        armView.aim(cursor: local)
-        guard downPoint != nil else {
-            let busy = overDock || (!normalCursor && urgent) || CursorHider.isSettling
-            updatePace(busy: busy)
-            return
-        }
-        let down = CGEventSource.buttonState(.hidSystemState, button: .left)
-        if down {
-            buttonSeenDown = true
-        }
-        if buttonSeenDown && !down {
-            release()
-            return
-        }
-        drag()
     }
 }

@@ -30,19 +30,21 @@ make_bundle() {
     <key>SUEnableAutomaticChecks</key>
     <true/>"
     fi
-    rm -rf "$app"
-    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-    cp "$binary" "$app/Contents/MacOS/$APP_NAME"
-    cp "$ROOT"/assets/hand_*.png "$app/Contents/Resources/"
-    cp "$ROOT"/assets/sounds/tap_*.wav "$ROOT/assets/AppIcon.icns" "$ROOT/assets/Assets.car" "$app/Contents/Resources/"
-    cp "$ROOT"/assets/menubar_*.png "$app/Contents/Resources/"
+
+    # Stage first, then swap Contents in place so the outer .app path stays stable for TCC.
+    local stage
+    stage="$(mktemp -d)/$APP_NAME.app"
+    mkdir -p "$stage/Contents/MacOS" "$stage/Contents/Resources" "$stage/Contents/Frameworks"
+    cp "$binary" "$stage/Contents/MacOS/$APP_NAME"
+    cp "$ROOT"/assets/hand_*.png "$stage/Contents/Resources/"
+    cp "$ROOT"/assets/sounds/tap_*.wav "$ROOT/assets/AppIcon.icns" "$ROOT/assets/Assets.car" "$stage/Contents/Resources/"
+    cp "$ROOT"/assets/menubar_*.png "$stage/Contents/Resources/"
 
     local fw
     fw="$(find "$ROOT/.build/artifacts" -path "*macos-arm64_x86_64/Sparkle.framework" -maxdepth 6 | head -1)"
-    mkdir -p "$app/Contents/Frameworks"
-    ditto "$fw" "$app/Contents/Frameworks/Sparkle.framework"
+    ditto "$fw" "$stage/Contents/Frameworks/Sparkle.framework"
 
-    cat > "$app/Contents/Info.plist" <<PLIST
+    cat > "$stage/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -77,12 +79,26 @@ $update_keys
 </dict>
 </plist>
 PLIST
+
+    mkdir -p "$(dirname "$app")"
+    if [[ -d "$app/Contents" ]]; then
+        rm -rf "$app/Contents"
+        mv "$stage/Contents" "$app/Contents"
+        rm -rf "$(dirname "$stage")"
+    else
+        rm -rf "$app"
+        mv "$stage" "$app"
+        rmdir "$(dirname "$stage")" 2>/dev/null || rm -rf "$(dirname "$stage")"
+    fi
 }
 
 sign_app() {
-    local app="$1" identity="$2" ts="${3:-}"
+    local app="$1" identity="$2" ts="${3:-}" hardened="${4:-runtime}"
     local fw="$app/Contents/Frameworks/Sparkle.framework/Versions/B"
-    local sign=(codesign --force --options runtime --sign "$identity")
+    local sign=(codesign --force --sign "$identity")
+    if [[ "$hardened" == "runtime" ]]; then
+        sign+=(--options runtime)
+    fi
     [[ -n "$ts" ]] && sign+=(--timestamp)
     "${sign[@]}" "$fw/XPCServices/Installer.xpc"
     "${sign[@]}" --preserve-metadata=entitlements "$fw/XPCServices/Downloader.xpc"
@@ -91,6 +107,40 @@ sign_app() {
     "${sign[@]}" "$app/Contents/Frameworks/Sparkle.framework"
     "${sign[@]}" "$app"
     codesign --verify --deep --strict "$app"
+}
+
+# Prefer a stable Apple Development identity so TCC (Accessibility / Screen Recording)
+# survives rebuilds. Ad-hoc ("-") gets a new CDHash every build and macOS re-prompts.
+# Pin the chosen identity in .debug-codesign-identity so we never flip between certs.
+debug_codesign_identity() {
+    if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+        echo "$CODESIGN_IDENTITY"
+        return
+    fi
+    local pin="$ROOT/.debug-codesign-identity"
+    if [[ -f "$pin" ]]; then
+        local pinned
+        # Trim leading/trailing whitespace only — identity names contain spaces.
+        pinned="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$pin" | head -1)"
+        if [[ -n "$pinned" ]] && security find-identity -v -p codesigning 2>/dev/null | grep -F -q "$pinned"; then
+            echo "$pinned"
+            return
+        fi
+    fi
+    local id
+    id="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' \
+        | head -1)"
+    if [[ -n "$id" ]]; then
+        printf '%s\n' "$id" > "$pin"
+        echo "$id"
+        return
+    fi
+    echo "-"
+}
+
+debug_install_app() {
+    echo "$HOME/Applications/$APP_NAME.app"
 }
 
 sparkle_tools() {

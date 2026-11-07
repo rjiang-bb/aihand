@@ -18,7 +18,7 @@ final class WelcomeWindow: NSObject {
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
     private let button = NSButton(title: "", target: nil, action: nil)
-    private let tip = NSTextField(labelWithString: "Already on? Remove it and add it again.")
+    private let tip = NSTextField(labelWithString: "Still blocked? Remove old TinyHand rows, enable the Applications one, relaunch.")
 
     static let shownKey = "welcomeShown"
 

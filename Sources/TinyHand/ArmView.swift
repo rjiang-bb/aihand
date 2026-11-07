@@ -15,7 +15,8 @@ final class ArmView: NSView {
     private let minRodFrac: CGFloat = 0.05
     private let gripLeanFrac: CGFloat = 0.30
     private let gripDepthFrac: CGFloat = 0.12
-    private let gripFollow: CGFloat = 0.08
+    /// Ease toward the cursor when moving slowly; larger deltas snap harder (see `aim`).
+    private let gripFollow: CGFloat = 0.28
     private let liftFrac: CGFloat = 0.06
 
     let ink = Ink()
@@ -121,7 +122,18 @@ final class ArmView: NSView {
     func aim(cursor: CGPoint) {
         let screenH = bounds.height
         let targetX = min(max(cursor.x + gripLeanFrac * bounds.width, bounds.width * 0.15), bounds.width * 1.05)
-        let gx = gripX.map { $0 + (targetX - $0) * gripFollow } ?? targetX
+        let previous = gripX ?? targetX
+        let delta = abs(targetX - previous)
+        // Slow moves ease; fast flicks snap so the hand keeps up with the cursor.
+        let follow: CGFloat
+        if delta > 80 {
+            follow = 1
+        } else if delta > 28 {
+            follow = 0.55
+        } else {
+            follow = gripFollow
+        }
+        let gx = previous + (targetX - previous) * follow
         gripX = gx
         gripTarget = targetX
         let grip = CGPoint(x: gx, y: -gripDepthFrac * screenH)
