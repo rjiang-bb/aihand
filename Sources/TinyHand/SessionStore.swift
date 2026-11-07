@@ -38,6 +38,7 @@ final class AgentSession: ObservableObject, Identifiable {
     let createdAt: Date
     let screenshotPath: String?
     let initialPrompt: String
+    let cliKind: AgentCLIKind
 
     @Published var title: String
     @Published var status: AgentSessionStatus
@@ -52,6 +53,7 @@ final class AgentSession: ObservableObject, Identifiable {
         title: String,
         prompt: String,
         screenshotPath: String?,
+        cliKind: AgentCLIKind = Preferences.agentCLI,
         status: AgentSessionStatus = .working
     ) {
         self.id = id
@@ -59,6 +61,7 @@ final class AgentSession: ObservableObject, Identifiable {
         self.title = title
         self.initialPrompt = prompt
         self.screenshotPath = screenshotPath
+        self.cliKind = cliKind
         self.status = status
         self.preview = prompt.isEmpty ? "Annotation" : prompt
         var msgs: [AgentMessage] = []
@@ -71,6 +74,7 @@ final class AgentSession: ObservableObject, Identifiable {
         self.createdAt = snapshot.createdAt
         self.screenshotPath = snapshot.screenshotPath
         self.initialPrompt = snapshot.initialPrompt
+        self.cliKind = snapshot.cliKind ?? .cursor
         self.title = snapshot.title
         // In-flight processes don't survive relaunch.
         if snapshot.status == .working {
@@ -102,7 +106,8 @@ final class AgentSession: ObservableObject, Identifiable {
             messages: messages,
             preview: preview,
             chatId: chatId,
-            errorMessage: errorMessage
+            errorMessage: errorMessage,
+            cliKind: cliKind
         )
     }
 }
@@ -119,6 +124,8 @@ final class SessionStore: ObservableObject {
         var preview: String
         var chatId: String?
         var errorMessage: String?
+        /// Optional for backwards compatibility with older sessions.json files.
+        var cliKind: AgentCLIKind?
     }
 
     private struct StoreFile: Codable {

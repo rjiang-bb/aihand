@@ -42,20 +42,38 @@ enum InteractKey: String, CaseIterable {
     }
 }
 
-enum AgentCLIKind: String, CaseIterable, Identifiable {
+enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     case cursor
+    case codex
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .cursor: return "Cursor Agent"
+        case .codex: return "Codex"
         }
     }
 
     var commandName: String {
         switch self {
         case .cursor: return "agent"
+        case .codex: return "codex"
+        }
+    }
+
+    var installHint: String {
+        switch self {
+        case .cursor: return "Install the Cursor CLI (`agent`)."
+        case .codex: return "Install Codex (`curl -fsSL https://chatgpt.com/codex/install.sh | sh`)."
+        }
+    }
+
+    /// Short label for the CLI’s default model when TinyHand doesn’t pass `--model`.
+    var defaultModelTitle: String {
+        switch self {
+        case .cursor: return "Auto"
+        case .codex: return "Default"
         }
     }
 }

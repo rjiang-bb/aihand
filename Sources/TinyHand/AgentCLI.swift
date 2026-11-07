@@ -1,79 +1,47 @@
 import Foundation
 
 protocol AgentCLI {
+    var kind: AgentCLIKind { get }
     var displayName: String { get }
     func resolveExecutable() -> String?
     func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String]
     func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String]
 }
 
-struct CursorAgentCLI: AgentCLI {
-    var displayName: String { "Cursor Agent" }
+extension AgentCLI {
+    func composePrompt(_ prompt: String, imagePath: String?, includeImagePathInText: Bool) -> String {
+        var parts: [String] = []
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            parts.append(trimmed)
+        } else if imagePath != nil {
+            parts.append("Look at the annotated screenshot and figure out what needs to change.")
+        }
+        if includeImagePathInText, let imagePath {
+            parts.append("Annotated screenshot: \(imagePath)")
+        }
+        return parts.joined(separator: "\n\n")
+    }
+}
 
-    func resolveExecutable() -> String? {
-        let candidates = [
-            NSString(string: "~/.local/bin/agent").expandingTildeInPath,
-            "/usr/local/bin/agent",
-            "/opt/homebrew/bin/agent"
+enum AgentPathLookup {
+    static func resolve(_ name: String, extraCandidates: [String] = []) -> String? {
+        let home = NSHomeDirectory()
+        let candidates = extraCandidates + [
+            "\(home)/.local/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "/opt/homebrew/bin/\(name)",
+            "\(home)/.npm-global/bin/\(name)",
+            "\(home)/.nvm/current/bin/\(name)"
         ]
         let fm = FileManager.default
         for path in candidates where fm.isExecutableFile(atPath: path) {
             return path
         }
-        if let fromPath = which("agent") {
-            return fromPath
-        }
-        return nil
+        return which(name)
     }
 
-    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
-        var args = [
-            "-p",
-            "--force",
-            "--trust",
-            "--workspace", workspace,
-            "--output-format", "stream-json",
-            "--stream-partial-output"
-        ]
-        if let imagePath {
-            args += ["--image", imagePath]
-        }
-        args.append(composePrompt(prompt, imagePath: imagePath))
-        return args
-    }
-
-    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
-        var args = [
-            "-p",
-            "--force",
-            "--trust",
-            "--workspace", workspace,
-            "--resume", chatId,
-            "--output-format", "stream-json",
-            "--stream-partial-output"
-        ]
-        if let imagePath {
-            args += ["--image", imagePath]
-        }
-        args.append(prompt)
-        return args
-    }
-
-    private func composePrompt(_ prompt: String, imagePath: String?) -> String {
-        var parts: [String] = []
-        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            parts.append(trimmed)
-        } else {
-            parts.append("Look at the annotated screenshot and figure out what needs to change.")
-        }
-        if let imagePath {
-            parts.append("Annotated screenshot: \(imagePath)")
-        }
-        return parts.joined(separator: "\n\n")
-    }
-
-    private func which(_ name: String) -> String? {
+    static func which(_ name: String) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         process.arguments = [name]
@@ -82,7 +50,7 @@ struct CursorAgentCLI: AgentCLI {
         process.standardError = Pipe()
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
-        let extras = ["\(home)/.local/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+        let extras = ["\(home)/.local/bin", "/usr/local/bin", "/opt/homebrew/bin", "\(home)/.npm-global/bin"]
         let path = env["PATH"] ?? "/usr/bin:/bin"
         env["PATH"] = (extras + [path]).joined(separator: ":")
         process.environment = env
@@ -102,10 +70,99 @@ struct CursorAgentCLI: AgentCLI {
     }
 }
 
+struct CursorAgentCLI: AgentCLI {
+    var kind: AgentCLIKind { .cursor }
+    var displayName: String { AgentCLIKind.cursor.title }
+
+    func resolveExecutable() -> String? {
+        AgentPathLookup.resolve("agent")
+    }
+
+    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
+        var args = [
+            "-p",
+            "--force",
+            "--trust",
+            "--workspace", workspace,
+            "--output-format", "stream-json",
+            "--stream-partial-output"
+        ]
+        if let imagePath {
+            args += ["--image", imagePath]
+        }
+        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        return args
+    }
+
+    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
+        var args = [
+            "-p",
+            "--force",
+            "--trust",
+            "--workspace", workspace,
+            "--resume", chatId,
+            "--output-format", "stream-json",
+            "--stream-partial-output"
+        ]
+        if let imagePath {
+            args += ["--image", imagePath]
+        }
+        args.append(prompt)
+        return args
+    }
+}
+
+/// OpenAI Codex CLI via `codex exec` (non-interactive JSONL).
+/// Docs: https://learn.chatgpt.com/docs/codex/cli · https://learn.chatgpt.com/docs/non-interactive-mode
+struct CodexAgentCLI: AgentCLI {
+    var kind: AgentCLIKind { .codex }
+    var displayName: String { AgentCLIKind.codex.title }
+
+    func resolveExecutable() -> String? {
+        AgentPathLookup.resolve("codex")
+    }
+
+    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
+        // `codex exec` is the non-interactive entry point. workspace-write matches Cursor's
+        // auto-approve editing intent without full --yolo. --skip-git-repo-check allows
+        // arbitrary folders chosen in Settings.
+        var args = [
+            "exec",
+            "--json",
+            "--sandbox", "workspace-write",
+            "--skip-git-repo-check",
+            "-C", workspace
+        ]
+        if let imagePath {
+            args += ["--image", imagePath]
+        }
+        // Image is attached via --image; keep prompt text clean.
+        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
+        return args
+    }
+
+    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
+        var args = [
+            "exec",
+            "--json",
+            "--sandbox", "workspace-write",
+            "--skip-git-repo-check",
+            "-C", workspace,
+            "resume", chatId
+        ]
+        if let imagePath {
+            args += ["--image", imagePath]
+        }
+        args.append(prompt)
+        return args
+    }
+}
+
 enum AgentCLIFactory {
     static func make(_ kind: AgentCLIKind = Preferences.agentCLI) -> AgentCLI {
         switch kind {
         case .cursor: return CursorAgentCLI()
+        case .codex: return CodexAgentCLI()
         }
     }
 }

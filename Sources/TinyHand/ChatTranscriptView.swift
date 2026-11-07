@@ -123,32 +123,34 @@ struct ChatTranscriptView: NSViewRepresentable {
       :root {
         color-scheme: light dark;
         --bg: transparent;
-        --text: #e8e8e8;
-        --muted: #9a9a9a;
-        --user-bg: rgba(64, 128, 255, 0.22);
+        --text: #f5f5f7;
+        --muted: #c7c7cc;
+        --user-bg: rgba(10, 132, 255, 0.42);
+        --user-border: rgba(255,255,255,0.18);
         --assistant-bg: transparent;
-        --tool-bg: rgba(255,255,255,0.04);
-        --tool-border: rgba(255,255,255,0.08);
-        --system-bg: rgba(255, 170, 60, 0.12);
-        --code-bg: rgba(0,0,0,0.35);
-        --pre-bg: rgba(0,0,0,0.28);
-        --border: rgba(255,255,255,0.08);
-        --link: #7eb6ff;
+        --tool-bg: rgba(255,255,255,0.10);
+        --tool-border: rgba(255,255,255,0.18);
+        --system-bg: rgba(255, 170, 60, 0.22);
+        --code-bg: rgba(0,0,0,0.42);
+        --pre-bg: rgba(0,0,0,0.36);
+        --border: rgba(255,255,255,0.16);
+        --link: #8ec7ff;
         --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
       }
       @media (prefers-color-scheme: light) {
         :root {
-          --text: #1b1b1b;
-          --muted: #6b6b6b;
-          --user-bg: rgba(64, 128, 255, 0.14);
-          --tool-bg: rgba(0,0,0,0.03);
-          --tool-border: rgba(0,0,0,0.08);
-          --system-bg: rgba(255, 170, 60, 0.16);
-          --code-bg: rgba(0,0,0,0.06);
-          --pre-bg: rgba(0,0,0,0.04);
-          --border: rgba(0,0,0,0.08);
-          --link: #0060df;
+          --text: #1d1d1f;
+          --muted: #3a3a3c;
+          --user-bg: rgba(0, 122, 255, 0.16);
+          --user-border: rgba(0,0,0,0.08);
+          --tool-bg: rgba(0,0,0,0.05);
+          --tool-border: rgba(0,0,0,0.12);
+          --system-bg: rgba(255, 149, 0, 0.18);
+          --code-bg: rgba(0,0,0,0.07);
+          --pre-bg: rgba(0,0,0,0.05);
+          --border: rgba(0,0,0,0.12);
+          --link: #0071e3;
         }
       }
       * { box-sizing: border-box; }
@@ -171,27 +173,70 @@ struct ChatTranscriptView: NSViewRepresentable {
         align-self: flex-end;
         max-width: 88%;
         background: var(--user-bg);
+        border: 1px solid var(--user-border);
         border-radius: 14px;
         padding: 10px 12px;
+        color: var(--text);
       }
-      .msg.assistant { align-self: stretch; padding: 2px 0; }
+      .msg.assistant { align-self: stretch; padding: 2px 0; color: var(--text); }
       .msg.tool {
         align-self: stretch;
+        max-width: 100%;
         background: var(--tool-bg);
         border: 1px solid var(--tool-border);
-        border-radius: 10px;
-        padding: 8px 10px;
+        border-radius: 8px;
+        padding: 5px 8px;
         font-size: 12px;
-        color: var(--muted);
+        color: var(--text);
         font-family: var(--mono);
         display: flex;
-        gap: 8px;
-        align-items: flex-start;
+        gap: 6px;
+        align-items: center;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
       }
+      .msg.tool:hover { border-color: var(--link); }
+      .msg.tool .chev {
+        flex: none;
+        width: 10px;
+        color: var(--muted);
+        font-size: 9px;
+        line-height: 1;
+        transition: transform 0.12s ease;
+      }
+      .msg.tool.expanded .chev { transform: rotate(90deg); }
       .msg.tool .glyph {
         flex: none;
-        opacity: 0.7;
-        margin-top: 1px;
+        opacity: 0.85;
+        color: var(--muted);
+      }
+      .msg.tool .tool-body {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        line-height: 1.35;
+      }
+      .msg.tool.expanded {
+        align-items: flex-start;
+        cursor: default;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      .msg.tool.expanded .tool-body {
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        text-overflow: clip;
+      }
+      .msg.tool-group {
+        align-self: stretch;
+        max-width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
       .msg.system {
         align-self: stretch;
@@ -199,7 +244,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-radius: 10px;
         padding: 8px 10px;
         font-size: 12px;
-        color: var(--muted);
+        color: var(--text);
       }
       .msg img.shot {
         display: block;
@@ -414,8 +459,19 @@ struct ChatTranscriptView: NSViewRepresentable {
       return '<button class="ask" data-id="' + esc(id) + '">Ask about this</button>';
     }
 
+    function toolRow(m, expanded) {
+      const text = m.text || 'Tool';
+      const open = expanded ? ' expanded' : '';
+      return '<div class="msg tool' + open + '" data-id="' + esc(m.id) + '" data-kind="tool" role="button" aria-expanded="' + (expanded ? 'true' : 'false') + '">'
+        + '<span class="chev">▶</span>'
+        + '<span class="glyph">' + toolGlyph(text) + '</span>'
+        + '<span class="tool-body" title="' + esc(text) + '">' + esc(text) + '</span>'
+        + '</div>';
+    }
+
     window.__texts = {};
     window.__images = window.__images || {};
+    window.__expandedTools = window.__expandedTools || {};
     window.cacheImages = function(items) {
       (items || []).forEach(function(item) {
         if (item && item.key && item.url) window.__images[item.key] = item.url;
@@ -428,7 +484,32 @@ struct ChatTranscriptView: NSViewRepresentable {
         root.innerHTML = '<div class="empty">Agent replies show up here.</div>';
         return;
       }
-      const html = messages.map(function(m) {
+
+      // Group consecutive tool calls into a compact stack (Cursor-style).
+      const blocks = [];
+      for (let i = 0; i < messages.length; i++) {
+        const m = messages[i];
+        if ((m.kind || 'assistant') === 'tool') {
+          const tools = [m];
+          while (i + 1 < messages.length && (messages[i + 1].kind || '') === 'tool') {
+            i++;
+            tools.push(messages[i]);
+          }
+          blocks.push({ type: 'tools', items: tools });
+        } else {
+          blocks.push({ type: 'msg', item: m });
+        }
+      }
+
+      const html = blocks.map(function(block) {
+        if (block.type === 'tools') {
+          const rows = block.items.map(function(m) {
+            window.__texts[m.id] = m.text || '';
+            return toolRow(m, !!window.__expandedTools[m.id]);
+          }).join('');
+          return '<div class="msg tool-group">' + rows + '</div>';
+        }
+        const m = block.item;
         const kind = m.kind || 'assistant';
         window.__texts[m.id] = m.text || '';
         let body = '';
@@ -442,9 +523,6 @@ struct ChatTranscriptView: NSViewRepresentable {
         } else if (kind === 'user') {
           body += '<div class="md">' + markdownToHTML(m.text || '') + '</div>';
           if (m.text) body += askButton(m.id);
-        } else if (kind === 'tool') {
-          body += '<span class="glyph">' + toolGlyph(m.text || '') + '</span>';
-          body += '<span>' + esc(m.text || 'Tool') + '</span>';
         } else {
           body += esc(m.text || '');
         }
@@ -463,6 +541,16 @@ struct ChatTranscriptView: NSViewRepresentable {
             type: 'select',
             text: (selected && text.indexOf(selected) !== -1) ? selected : text
           });
+        });
+      });
+      root.querySelectorAll('.msg.tool').forEach(function(el) {
+        el.addEventListener('click', function(e) {
+          e.preventDefault();
+          const id = el.getAttribute('data-id');
+          const next = !el.classList.contains('expanded');
+          el.classList.toggle('expanded', next);
+          el.setAttribute('aria-expanded', next ? 'true' : 'false');
+          if (id) window.__expandedTools[id] = next;
         });
       });
       if (nearBottom) {

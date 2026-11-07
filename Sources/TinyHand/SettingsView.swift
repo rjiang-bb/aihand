@@ -493,7 +493,7 @@ private struct AgentPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             Card(title: "CLI") {
-                Row("Agent CLI", detail: "Starts a session when you finish a drawing and press ⌘↩.") {
+                Row("Agent CLI", detail: "Cursor Agent or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
                     Picker("", selection: model.binding({ Preferences.agentCLI }, { Preferences.agentCLI = $0 })) {
                         ForEach(AgentCLIKind.allCases) { kind in
                             Text(kind.title).tag(kind)

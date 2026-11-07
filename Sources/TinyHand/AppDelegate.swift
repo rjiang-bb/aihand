@@ -22,7 +22,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var sessionManager = AgentSessionManager(store: sessionStore)
     private lazy var sessionsPanel = SessionsSidePanel(store: sessionStore)
     private let annotatePanel = AnnotatePromptPanel()
-    private var pendingStroke: StrokeResult?
+    private var pendingStrokes: [StrokeResult] = []
+    /// True when the prompt panel was opened via Sessions → New (no screenshot).
+    private var textOnlyPrompt = false
     private var sessionIconBag: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -64,7 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.welcome.show()
         }
         welcome.onTryIt = { [weak self] in
-            self?.overlay.activate()
+            self?.startPointerWithSessions()
         }
         if !UserDefaults.standard.bool(forKey: WelcomeWindow.shownKey) || !AXIsProcessTrusted() {
             welcome.show()
@@ -83,34 +85,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessionsPanel.onStop = { [weak self] id in
             self?.sessionManager.stop(sessionID: id)
         }
+        sessionsPanel.onNew = { [weak self] in
+            self?.startTextOnlySession()
+        }
 
         annotatePanel.onOpenChanged = { [weak self] open in
             self?.overlay.suspendInput(open)
+            self?.overlay.setAnnotationHintsVisible(!open)
         }
         annotatePanel.onCancel = { [weak self] in
-            guard let self, let stroke = self.pendingStroke else { return }
-            self.overlay.releaseStrokeHold(stroke, fadeNow: true)
-            self.pendingStroke = nil
+            // Keep drawings — Esc only closes the comment box.
+            self?.textOnlyPrompt = false
+            self?.overlay.setAnnotationHintsVisible(true)
         }
         annotatePanel.onSubmit = { [weak self] prompt in
             self?.submitAnnotation(prompt: prompt)
         }
 
-        overlay.onStrokeComplete = { [weak self] result, screenBounds, screen in
+        overlay.onStrokeComplete = { [weak self] result, _, _ in
             guard let self else { return }
-            if self.annotatePanel.isVisible, let previous = self.pendingStroke {
-                self.overlay.releaseStrokeHold(previous, fadeNow: true)
-            }
-            self.pendingStroke = result
-            let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            self.annotatePanel.show(near: screenBounds, on: screen, workspaceMissing: missing)
+            self.pendingStrokes.append(result)
+        }
+        overlay.onRequestComment = { [weak self] in
+            self?.openAnnotationComment()
+        }
+        overlay.onRequestSend = { [weak self] in
+            guard let self, !self.annotatePanel.isVisible else { return }
+            self.submitAnnotation(prompt: "")
+        }
+        overlay.onInkCleared = { [weak self] in
+            self?.pendingStrokes = []
+            self?.textOnlyPrompt = false
+            self?.annotatePanel.hide()
         }
     }
 
-    private func submitAnnotation(prompt: String) {
-        guard let stroke = pendingStroke else { return }
-        pendingStroke = nil
+    private func startTextOnlySession() {
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        textOnlyPrompt = true
+        let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        annotatePanel.show(on: screen, near: nil, workspaceMissing: missing, requirePrompt: true)
+    }
 
+    private func openAnnotationComment() {
+        guard !annotatePanel.isVisible, !pendingStrokes.isEmpty else { return }
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+                ?? NSScreen.main else { return }
+        textOnlyPrompt = false
+        let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let near = inkScreenBounds()
+        annotatePanel.show(on: screen, near: near, workspaceMissing: missing, requirePrompt: false)
+    }
+
+    private func inkScreenBounds() -> CGRect? {
+        guard let overlayFrame = overlay.overlayFrame, !pendingStrokes.isEmpty else { return nil }
+        let union = pendingStrokes.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
+        guard !union.isNull, !union.isInfinite else { return nil }
+        return CGRect(
+            x: overlayFrame.origin.x + union.minX,
+            y: overlayFrame.origin.y + union.minY,
+            width: union.width,
+            height: union.height
+        )
+    }
+
+    private func submitAnnotation(prompt: String) {
         let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else {
             overlay.exit()
@@ -118,37 +157,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
+        // Text-only "New" session — no screenshot.
+        if textOnlyPrompt || pendingStrokes.isEmpty {
+            textOnlyPrompt = false
+            annotatePanel.hide()
+            if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: nil) {
+                sessionsPanel.openChat(for: session.id)
+            }
+            return
+        }
+
+        let strokes = pendingStrokes
+        pendingStrokes = []
+        textOnlyPrompt = false
+
         guard let overlayFrame = overlay.overlayFrame else {
             overlay.exit()
             return
         }
 
         let pad: CGFloat = 8
+        let union = strokes.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
         let strokeScreen = CGRect(
-            x: overlayFrame.origin.x + stroke.bounds.minX - pad,
-            y: overlayFrame.origin.y + stroke.bounds.minY - pad,
-            width: stroke.bounds.width + pad * 2,
-            height: stroke.bounds.height + pad * 2
+            x: overlayFrame.origin.x + union.minX - pad,
+            y: overlayFrame.origin.y + union.minY - pad,
+            width: union.width + pad * 2,
+            height: union.height + pad * 2
         )
 
         // Keep stroke geometry; hide interactive UI so ScreenCaptureKit exclusion is clean.
         annotatePanel.hide()
-        overlay.releaseStrokeHold(stroke, fadeNow: false)
+        overlay.setAnnotationHintsVisible(false)
+        for stroke in strokes {
+            overlay.releaseStrokeHold(stroke, fadeNow: false)
+        }
 
         Task { @MainActor in
             do {
                 let outcome = try await WindowCapture.captureAnnotated(
-                    stroke: stroke,
+                    strokes: strokes,
                     strokeScreenBounds: strokeScreen,
                     overlayFrame: overlayFrame
                 )
-                self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                for stroke in strokes {
+                    self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                }
                 self.overlay.exit()
                 if let session = self.sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
                     self.sessionsPanel.openChat(for: session.id)
                 }
             } catch {
-                self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                for stroke in strokes {
+                    self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                }
                 self.overlay.exit()
                 Log.write("capture failed: \(error.localizedDescription)")
                 let needsScreenRecording = (error as? WindowCapture.CaptureError) == .permissionDenied
@@ -228,7 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let event = NSApp.currentEvent
         let wantsMenu = event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true
         guard wantsMenu else {
-            overlay.toggle()
+            togglePointerWithSessions()
             return
         }
         refreshMenu()
@@ -283,7 +344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let t = Preferences.toggleShortcut
         let c = Preferences.clearShortcut
         toggleHotKey = HotKeyCenter.shared.register(keyCode: t.keyCode, modifiers: t.modifiers) { [weak self] in
-            self?.overlay.toggle()
+            self?.togglePointerWithSessions()
         }
         clearHotKey = HotKeyCenter.shared.register(keyCode: c.keyCode, modifiers: c.modifiers) { [weak self] in
             self?.overlay.clearInk()
@@ -302,8 +363,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clearHotKey = nil
     }
 
+    /// Menu bar click / toggle shortcut: turn the pointer on/off and show Sessions when starting.
+    private func togglePointerWithSessions() {
+        if overlay.isActive {
+            overlay.toggle()
+            return
+        }
+        startPointerWithSessions()
+    }
+
+    private func startPointerWithSessions() {
+        guard overlay.activate() else { return }
+        sessionsPanel.show()
+    }
+
     @objc private func toggle() {
-        overlay.toggle()
+        togglePointerWithSessions()
     }
 
     @objc private func clearInk() {
@@ -319,7 +394,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func openSettings() {
-        pendingStroke = nil
+        pendingStrokes = []
+        textOnlyPrompt = false
         annotatePanel.hide()
         overlay.exit()
         settings.show()

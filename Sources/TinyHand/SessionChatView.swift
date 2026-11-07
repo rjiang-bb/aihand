@@ -8,9 +8,13 @@ struct SessionChatView: View {
     var onClose: (() -> Void)? = nil
     var compact: Bool = false
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var draft = ""
     @State private var quotedSelection: String?
     @State private var selectionOffer: String?
+
+    private var solidBG: Color { colorScheme == .dark ? .black : .white }
+    private var solidFG: Color { colorScheme == .dark ? .white : .black }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +30,7 @@ struct SessionChatView: View {
             Divider()
             composer
         }
-        .background(compact ? Color.clear : Color(nsColor: .windowBackgroundColor))
+        .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
     }
 
@@ -36,19 +40,20 @@ struct SessionChatView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.title)
                     .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(solidFG)
                     .lineLimit(1)
                 Text(statusLabel)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(solidFG.opacity(0.6))
             }
             Spacer()
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.primary.opacity(0.8))
+                        .foregroundStyle(solidFG)
                         .frame(width: 24, height: 24)
-                        .background(Circle().fill(.white.opacity(0.16)))
+                        .background(Circle().fill(solidFG.opacity(0.1)))
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -56,6 +61,7 @@ struct SessionChatView: View {
         }
         .padding(.horizontal, compact ? 14 : 16)
         .padding(.vertical, 12)
+        .background(compact ? solidBG : Color.clear)
     }
 
     private var statusLabel: String {
@@ -133,8 +139,16 @@ struct SessionChatView: View {
                 TextField("Follow up…", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
+                    .foregroundStyle(.primary)
                     .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .textBackgroundColor)))
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.primary.opacity(compact ? 0.10 : 0.06))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
+                            )
+                    )
                     .onSubmit(send)
                 if session.status == .working {
                     Button(action: onStop) {

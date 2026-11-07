@@ -50,7 +50,7 @@ enum WindowCapture {
     }
 
     static func captureAnnotated(
-        stroke: StrokeResult,
+        strokes: [StrokeResult],
         strokeScreenBounds: CGRect,
         overlayFrame: CGRect
     ) async throws -> Outcome {
@@ -77,7 +77,7 @@ enum WindowCapture {
             throw CaptureError.captureFailed
         }
 
-        let annotated = composite(image: image, stroke: stroke, captureBounds: screenBounds, overlayFrame: overlayFrame)
+        let annotated = composite(image: image, strokes: strokes, captureBounds: screenBounds, overlayFrame: overlayFrame)
             ?? image
 
         let formatter = DateFormatter()
@@ -225,7 +225,7 @@ enum WindowCapture {
 
     private static func composite(
         image: CGImage,
-        stroke: StrokeResult,
+        strokes: [StrokeResult],
         captureBounds: CGRect,
         overlayFrame: CGRect
     ) -> CGImage? {
@@ -258,29 +258,31 @@ enum WindowCapture {
             return CGPoint(x: x, y: y)
         }
 
-        guard let first = stroke.points.first else { return ctx.makeImage() }
-        let path = CGMutablePath()
-        let p0 = toBitmap(first)
-        path.move(to: p0)
-        if stroke.points.count == 1 {
-            path.addLine(to: p0)
-        }
-        for i in 1..<stroke.points.count {
-            let p = toBitmap(stroke.points[i])
-            let prev = toBitmap(stroke.points[i - 1])
-            let mid = CGPoint(x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2)
-            path.addQuadCurve(to: mid, control: prev)
-        }
-        if stroke.points.count > 1, let last = stroke.points.last {
-            path.addLine(to: toBitmap(last))
-        }
+        for stroke in strokes {
+            guard let first = stroke.points.first else { continue }
+            let path = CGMutablePath()
+            let p0 = toBitmap(first)
+            path.move(to: p0)
+            if stroke.points.count == 1 {
+                path.addLine(to: p0)
+            }
+            for i in 1..<stroke.points.count {
+                let p = toBitmap(stroke.points[i])
+                let prev = toBitmap(stroke.points[i - 1])
+                let mid = CGPoint(x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2)
+                path.addQuadCurve(to: mid, control: prev)
+            }
+            if stroke.points.count > 1, let last = stroke.points.last {
+                path.addLine(to: toBitmap(last))
+            }
 
-        ctx.setStrokeColor(stroke.color)
-        ctx.setLineWidth(max(2, stroke.width * ((scaleX + scaleY) / 2)))
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
-        ctx.addPath(path)
-        ctx.strokePath()
+            ctx.setStrokeColor(stroke.color)
+            ctx.setLineWidth(max(2, stroke.width * ((scaleX + scaleY) / 2)))
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            ctx.addPath(path)
+            ctx.strokePath()
+        }
         return ctx.makeImage()
     }
 

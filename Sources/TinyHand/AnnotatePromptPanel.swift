@@ -47,20 +47,36 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         panel.contentView = host
     }
 
-    func show(near screenBounds: CGRect, on screen: NSScreen, workspaceMissing: Bool) {
+    func show(
+        on screen: NSScreen,
+        near screenBounds: CGRect? = nil,
+        workspaceMissing: Bool,
+        requirePrompt: Bool = false
+    ) {
         model.text = ""
         model.workspaceMissing = workspaceMissing
+        model.requirePrompt = requirePrompt
+        let kind = Preferences.agentCLI
+        model.agentSummary = "\(kind.title) · \(kind.defaultModelTitle)"
         model.focusTick += 1
 
         let margin: CGFloat = 12
         let size = panel.frame.size
         let visible = screen.visibleFrame
-        var origin = CGPoint(
-            x: screenBounds.midX - size.width / 2,
-            y: screenBounds.minY - size.height - margin
-        )
-        if origin.y < visible.minY + margin {
-            origin.y = min(screenBounds.maxY + margin, visible.maxY - size.height - margin)
+        var origin: CGPoint
+        if let screenBounds {
+            origin = CGPoint(
+                x: screenBounds.midX - size.width / 2,
+                y: screenBounds.minY - size.height - margin
+            )
+            if origin.y < visible.minY + margin {
+                origin.y = min(screenBounds.maxY + margin, visible.maxY - size.height - margin)
+            }
+        } else {
+            origin = CGPoint(
+                x: visible.midX - size.width / 2,
+                y: visible.minY + 72
+            )
         }
         origin.x = min(max(origin.x, visible.minX + margin), visible.maxX - size.width - margin)
         origin.y = min(max(origin.y, visible.minY + margin), visible.maxY - size.height - margin)
@@ -96,21 +112,46 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
 final class AnnotatePromptModel: ObservableObject {
     @Published var text = ""
     @Published var workspaceMissing = false
+    @Published var requirePrompt = false
+    @Published var agentSummary = ""
     @Published var focusTick = 0
     var onSubmit: ((String) -> Void)?
     var onCancel: (() -> Void)?
+
+    var canSubmit: Bool {
+        guard !workspaceMissing else { return false }
+        if requirePrompt {
+            return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        return true
+    }
 }
 
 private struct AnnotatePromptView: View {
     @ObservedObject var model: AnnotatePromptModel
     @FocusState private var focused: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var solidBG: Color { colorScheme == .dark ? .black : .white }
+    private var fieldFill: Color {
+        colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Ask the agent")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.secondary)
-            TextField("Optional prompt…", text: $model.text, axis: .vertical)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("Ask the agent")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer(minLength: 8)
+                if !model.agentSummary.isEmpty {
+                    Text(model.agentSummary)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            TextField(model.requirePrompt ? "Prompt…" : "Optional prompt…", text: $model.text, axis: .vertical)
                 .font(.system(size: 14))
                 .lineLimit(2...4)
                 .textFieldStyle(.plain)
@@ -118,8 +159,7 @@ private struct AnnotatePromptView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 7)
                 .frame(minHeight: 52, maxHeight: 72, alignment: .topLeading)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.55)))
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(fieldFill))
                 .onChange(of: model.focusTick) { _ in
                     focused = true
                 }
@@ -129,30 +169,34 @@ private struct AnnotatePromptView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.orange)
                 } else {
-                    Text("⌘↩ to send · Esc to cancel")
+                    Text("⌘↩ to send · Esc to close")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
                 Spacer()
                 Button("Send") {
-                    guard !model.workspaceMissing else { return }
+                    guard model.canSubmit else { return }
                     model.onSubmit?(model.text)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
-                .disabled(model.workspaceMissing)
+                .disabled(!model.canSubmit)
                 .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(14)
         .frame(width: 360)
         .background(
-            VisualEffect(material: .hudWindow)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        )
-        .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                .fill(solidBG)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(
+                            colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08),
+                            lineWidth: 0.5
+                        )
+                )
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.5 : 0.16), radius: 12, y: 6)
         )
         .onExitCommand {
             model.onCancel?()

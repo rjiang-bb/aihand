@@ -5,6 +5,7 @@ import SwiftUI
 final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onFollowUp: ((UUID, String) -> Void)?
     var onStop: ((UUID) -> Void)?
+    var onNew: (() -> Void)?
     var onDismiss: (() -> Void)?
 
     private final class Panel: NSPanel {
@@ -59,6 +60,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onClose: { [weak self] in
                 self?.hide()
             },
+            onNew: { [weak self] in
+                self?.onNew?()
+            },
             onSend: { [weak self] id, text in
                 self?.onFollowUp?(id, text)
             },
@@ -67,6 +71,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             }
         )
         let host = NSHostingView(rootView: root)
+        host.wantsLayer = true
+        host.layer?.backgroundColor = NSColor.clear.cgColor
         hosting = host
         panel.contentView = host
     }
@@ -234,38 +240,39 @@ private struct SessionsSidePanelView: View {
     var onSelect: (UUID) -> Void
     var onCloseChat: () -> Void
     var onClose: () -> Void
+    var onNew: () -> Void
     var onSend: (UUID, String) -> Void
     var onStop: (UUID) -> Void
 
     private let listColumnWidth: CGFloat = 344
 
-    var body: some View {
-        ZStack {
-            // Notification Center–style frosted strip; no solid chrome.
-            VisualEffect(material: .fullScreenUI, blending: .behindWindow, emphasized: true)
-                .opacity(0.92)
-                .ignoresSafeArea()
+    @Environment(\.colorScheme) private var colorScheme
 
-            HStack(alignment: .top, spacing: 12) {
-                sessionsColumn
-                    .frame(width: listColumnWidth)
-                if let id = selection.selectedID, let session = store.session(id: id) {
-                    SessionChatView(
-                        session: session,
-                        onSend: { text in onSend(id, text) },
-                        onStop: { onStop(id) },
-                        onClose: onCloseChat,
-                        compact: true
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(NotificationCardBackground(cornerRadius: 22, selected: false))
-                }
+    private var headerFG: Color { colorScheme == .dark ? .white : .black }
+    private var headerBG: Color { colorScheme == .dark ? .black : .white }
+
+    var body: some View {
+        // Clear panel chrome; cards use solid white/black for readable contrast.
+        HStack(alignment: .top, spacing: 12) {
+            sessionsColumn
+                .frame(width: listColumnWidth)
+            if let id = selection.selectedID, let session = store.session(id: id) {
+                SessionChatView(
+                    session: session,
+                    onSend: { text in onSend(id, text) },
+                    onStop: { onStop(id) },
+                    onClose: onCloseChat,
+                    compact: true
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(SolidCardBackground(cornerRadius: 22, selected: false))
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 52)
-            .padding(.bottom, 14)
         }
+        .padding(.horizontal, 14)
+        .padding(.top, 52)
+        .padding(.bottom, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.clear)
         .overlay(alignment: .top) {
             floatingHeader
         }
@@ -274,16 +281,41 @@ private struct SessionsSidePanelView: View {
     private var floatingHeader: some View {
         HStack(alignment: .center) {
             Text("Sessions")
-                .font(.system(size: 20, weight: .semibold, design: .default))
-                .foregroundStyle(.primary)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(headerFG)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(headerBG)
+                        .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+                )
             Spacer(minLength: 8)
+            Button(action: onNew) {
+                Text("New")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(headerFG)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(headerBG)
+                            .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+                    )
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help("Start a new session")
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.primary.opacity(0.85))
+                    .foregroundStyle(headerFG)
                     .frame(width: 28, height: 28)
-                    .background(Circle().fill(.white.opacity(0.18)))
-                    .overlay(Circle().strokeBorder(.white.opacity(0.12), lineWidth: 0.5))
+                    .background(
+                        Circle()
+                            .fill(headerBG)
+                            .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+                    )
             }
             .buttonStyle(.plain)
             .focusable(false)
@@ -299,13 +331,13 @@ private struct SessionsSidePanelView: View {
             if store.sessions.isEmpty {
                 VStack {
                     Spacer()
-                    Text("Draw on screen to start an agent session.")
+                    Text("Tap New to start a prompt, or draw on screen to annotate.")
                         .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary.opacity(0.72))
                         .multilineTextAlignment(.center)
                         .padding(20)
                         .frame(maxWidth: .infinity)
-                        .background(NotificationCardBackground(cornerRadius: 22, selected: false))
+                        .background(SolidCardBackground(cornerRadius: 22, selected: false))
                     Spacer()
                 }
             } else {
@@ -324,27 +356,52 @@ private struct SessionsSidePanelView: View {
                     }
                     .padding(.bottom, 8)
                 }
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
             }
         }
     }
 }
 
-private struct NotificationCardBackground: View {
+private struct SolidCardBackground: View {
     var cornerRadius: CGFloat
     var selected: Bool
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let dark = colorScheme == .dark
+        let base = dark ? Color.black : Color.white
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(.ultraThinMaterial)
+            .fill(base)
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.white.opacity(selected ? 0.16 : 0.10))
+                    .fill(Color.accentColor.opacity(selected ? (dark ? 0.22 : 0.12) : 0))
             )
+            .overlay(alignment: .leading) {
+                if selected {
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(Color.accentColor)
+                        .frame(width: 4)
+                        .padding(.vertical, 10)
+                        .padding(.leading, 5)
+                }
+            }
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(selected ? 0.28 : 0.14), lineWidth: 0.5)
+                    .strokeBorder(
+                        selected
+                            ? Color.accentColor
+                            : (dark ? Color.white.opacity(0.14) : Color.black.opacity(0.08)),
+                        lineWidth: selected ? 2.5 : 0.5
+                    )
             )
-            .shadow(color: .black.opacity(0.28), radius: selected ? 14 : 10, y: 6)
+            .shadow(
+                color: selected
+                    ? Color.accentColor.opacity(dark ? 0.45 : 0.28)
+                    : .black.opacity(dark ? 0.5 : 0.16),
+                radius: selected ? 18 : 12,
+                y: 6
+            )
     }
 }
 
@@ -354,6 +411,9 @@ private struct SessionCardView: View {
     var shortcutNumber: Int?
     var showShortcutBadge: Bool
     var onTap: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fg: Color { colorScheme == .dark ? .white : .black }
 
     var body: some View {
         Button(action: onTap) {
@@ -370,17 +430,17 @@ private struct SessionCardView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(session.title)
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.primary)
+                            .font(.system(size: 14, weight: isSelected ? .bold : .semibold))
+                            .foregroundStyle(fg)
                             .lineLimit(1)
                         Spacer(minLength: 4)
                         Text(relativeTime(session.createdAt))
-                            .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(fg.opacity(0.55))
                     }
                     Text(session.preview)
                         .font(.system(size: 13))
-                        .foregroundStyle(.primary.opacity(0.78))
+                        .foregroundStyle(fg.opacity(0.82))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                 }
@@ -388,7 +448,7 @@ private struct SessionCardView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 13)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NotificationCardBackground(cornerRadius: 22, selected: isSelected))
+            .background(SolidCardBackground(cornerRadius: 22, selected: isSelected))
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.12), value: showShortcutBadge)

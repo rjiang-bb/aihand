@@ -21,10 +21,11 @@ final class AgentSessionRunner {
         self.session = session
         guard let exe = cli.resolveExecutable() else {
             DispatchQueue.main.async {
+                let msg = "Couldn’t find `\(session.cliKind.commandName)`. \(session.cliKind.installHint)"
                 session.status = .failed
-                session.errorMessage = "Couldn’t find `\(Preferences.agentCLI.commandName)`. Install the Cursor CLI."
-                session.preview = session.errorMessage ?? ""
-                session.messages.append(AgentMessage(kind: .system, text: session.errorMessage ?? ""))
+                session.errorMessage = msg
+                session.preview = msg
+                session.messages.append(AgentMessage(kind: .system, text: msg))
             }
             return
         }
@@ -44,9 +45,10 @@ final class AgentSessionRunner {
         }
         guard let exe = cli.resolveExecutable() else {
             DispatchQueue.main.async {
+                let msg = "Couldn’t find `\(session.cliKind.commandName)`. \(session.cliKind.installHint)"
                 session.status = .failed
-                session.errorMessage = "Couldn’t find `\(Preferences.agentCLI.commandName)`."
-                session.messages.append(AgentMessage(kind: .system, text: session.errorMessage ?? ""))
+                session.errorMessage = msg
+                session.messages.append(AgentMessage(kind: .system, text: msg))
             }
             return
         }
@@ -202,6 +204,7 @@ final class AgentSessionRunner {
         guard let session else { return }
         let type = json["type"] as? String ?? ""
         switch type {
+        // Cursor Agent stream-json
         case "system":
             if let sid = json["session_id"] as? String, !sid.isEmpty {
                 session.chatId = sid
@@ -246,9 +249,106 @@ final class AgentSessionRunner {
                 }
             }
             currentAssistantID = nil
+
+        // Codex `codex exec --json` JSONL
+        case "thread.started":
+            if let tid = json["thread_id"] as? String, !tid.isEmpty {
+                session.chatId = tid
+            }
+        case "turn.started":
+            session.status = .working
+        case "item.started", "item.updated", "item.completed":
+            handleCodexItem(json, completed: type == "item.completed")
+        case "turn.completed":
+            session.status = .finished
+            if session.preview.isEmpty || session.preview == "Working…" {
+                session.preview = "Finished"
+            }
+            currentAssistantID = nil
+        case "turn.failed", "error":
+            session.status = .failed
+            let msg = (json["error"] as? [String: Any]).flatMap { $0["message"] as? String }
+                ?? (json["message"] as? String)
+                ?? "Codex failed"
+            session.errorMessage = msg
+            session.preview = msg
+            session.messages.append(AgentMessage(kind: .system, text: msg))
+            currentAssistantID = nil
+
         default:
             break
         }
+    }
+
+    private func handleCodexItem(_ json: [String: Any], completed: Bool) {
+        guard let session, let item = json["item"] as? [String: Any] else { return }
+        let itemType = item["type"] as? String ?? ""
+        switch itemType {
+        case "agent_message":
+            let text = item["text"] as? String ?? ""
+            guard !text.isEmpty else { return }
+            // Codex emits complete messages on item.completed (and sometimes updated).
+            if completed {
+                appendAssistant(text, replace: false)
+                currentAssistantID = nil
+            } else if let id = currentAssistantID,
+                      let idx = session.messages.firstIndex(where: { $0.id == id }) {
+                session.messages[idx].text = text
+                session.preview = String(text.prefix(120))
+            } else {
+                appendAssistant(text, replace: false)
+            }
+        case "command_execution":
+            if !completed {
+                let cmd = item["command"] as? String ?? "command"
+                let label = "Running \(shortCommand(cmd))"
+                session.messages.append(AgentMessage(kind: .tool, text: label))
+                session.preview = label
+                currentAssistantID = nil
+            }
+        case "file_change", "file_change_proposed":
+            if !completed {
+                let path = (item["path"] as? String)
+                    ?? (item["changes"] as? [[String: Any]])?.first.flatMap { $0["path"] as? String }
+                    ?? "file"
+                let label = "Editing \(shortPath(path))"
+                session.messages.append(AgentMessage(kind: .tool, text: label))
+                session.preview = label
+                currentAssistantID = nil
+            }
+        case "mcp_tool_call":
+            if !completed {
+                let name = item["tool"] as? String ?? item["name"] as? String ?? "MCP tool"
+                let label = "MCP \(name)"
+                session.messages.append(AgentMessage(kind: .tool, text: label))
+                session.preview = label
+                currentAssistantID = nil
+            }
+        case "web_search":
+            if !completed {
+                let q = item["query"] as? String ?? "web"
+                let label = "Search \(q)"
+                session.messages.append(AgentMessage(kind: .tool, text: label))
+                session.preview = label
+                currentAssistantID = nil
+            }
+        case "reasoning", "plan_update":
+            break
+        default:
+            if !completed {
+                let label = itemType.replacingOccurrences(of: "_", with: " ")
+                session.messages.append(AgentMessage(kind: .tool, text: label.capitalized))
+                session.preview = label
+                currentAssistantID = nil
+            }
+        }
+    }
+
+    private func shortCommand(_ command: String) -> String {
+        let oneLine = command
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(oneLine.prefix(80))
     }
 
     private func appendAssistant(_ text: String, replace: Bool) {
@@ -353,10 +453,21 @@ final class AgentSessionRunner {
 
     private func shortPath(_ path: String) -> String {
         let home = NSHomeDirectory()
-        if path.hasPrefix(home + "/") {
-            return "~" + path.dropFirst(home.count)
+        var p = path
+        if p.hasPrefix(home + "/") {
+            p = "~" + p.dropFirst(home.count)
         }
-        return path
+        let ns = p as NSString
+        let name = ns.lastPathComponent
+        guard !name.isEmpty else { return p }
+        let parent = ns.deletingLastPathComponent
+        if parent.isEmpty || parent == "." || parent == "~" || parent == "/" {
+            return name
+        }
+        let parentName = (parent as NSString).lastPathComponent
+        let two = "\(parentName)/\(name)"
+        // Prefer a short tail; keep the full path for expand in the UI via message text.
+        return two.count <= 42 ? two : "…/\(name)"
     }
 
     private func handleTermination(status: Int32) {
@@ -368,7 +479,8 @@ final class AgentSessionRunner {
                 if session.preview.isEmpty { session.preview = "Finished" }
             } else {
                 session.status = .waiting
-                let msg = "Agent exited (\(status)). Check that you’re logged in (`agent login`)."
+                let login = session.cliKind == .codex ? "`codex` (sign in with ChatGPT)" : "`agent login`"
+                let msg = "Agent exited (\(status)). Check that you’re logged in (\(login))."
                 session.errorMessage = msg
                 session.preview = msg
                 session.messages.append(AgentMessage(kind: .system, text: msg))
@@ -386,18 +498,27 @@ final class AgentSessionManager {
         self.store = store
     }
 
-    func startFromAnnotation(prompt: String, screenshotPath: String) -> AgentSession? {
+    func startFromAnnotation(prompt: String, screenshotPath: String?) -> AgentSession? {
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return nil }
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Text-only sessions need a prompt; annotated captures can rely on the image alone.
+        if screenshotPath == nil, trimmed.isEmpty { return nil }
         let title: String
-        if prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if trimmed.isEmpty {
             title = "Annotation"
         } else {
-            title = String(prompt.trimmingCharacters(in: .whitespacesAndNewlines).prefix(48))
+            title = String(trimmed.prefix(48))
         }
-        let session = AgentSession(title: title, prompt: prompt, screenshotPath: screenshotPath)
+        let cliKind = Preferences.agentCLI
+        let session = AgentSession(
+            title: title,
+            prompt: prompt,
+            screenshotPath: screenshotPath,
+            cliKind: cliKind
+        )
         store.prepend(session)
-        let runner = AgentSessionRunner()
+        let runner = AgentSessionRunner(cli: AgentCLIFactory.make(cliKind))
         runners[session.id] = runner
         runner.start(session: session, workspace: workspace, prompt: prompt, imagePath: screenshotPath)
         return session
@@ -407,7 +528,7 @@ final class AgentSessionManager {
         guard let session = store.session(id: sessionID) else { return }
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return }
-        let runner = runners[sessionID] ?? AgentSessionRunner()
+        let runner = runners[sessionID] ?? AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
         runners[sessionID] = runner
         runner.interruptQuietly()
         runner.followUp(session: session, workspace: workspace, prompt: text)
