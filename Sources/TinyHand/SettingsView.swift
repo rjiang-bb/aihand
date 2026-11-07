@@ -3,13 +3,14 @@ import ApplicationServices
 import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, pointers, appearance, drawing, sound, about
+    case general, agent, pointers, appearance, drawing, sound, about
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "General"
+        case .agent: return "Agent"
         case .pointers: return "Pointers"
         case .appearance: return "Appearance"
         case .drawing: return "Drawing"
@@ -21,6 +22,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general: return "gearshape.fill"
+        case .agent: return "terminal.fill"
         case .pointers: return "hand.point.up.left.fill"
         case .appearance: return "sparkles"
         case .drawing: return "pencil.tip"
@@ -32,6 +34,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var tint: Color {
         switch self {
         case .general: return Color(white: 0.55)
+        case .agent: return Color(red: 0.2, green: 0.7, blue: 0.55)
         case .pointers: return Color(red: 0.55, green: 0.42, blue: 0.95)
         case .appearance: return Color(red: 0.95, green: 0.45, blue: 0.6)
         case .drawing: return Color(red: 0.96, green: 0.58, blue: 0.2)
@@ -382,6 +385,7 @@ struct SettingsView: View {
     private var content: some View {
         switch model.section {
         case .general: GeneralPage(model: model)
+        case .agent: AgentPage(model: model)
         case .pointers:
             if model.makingHand {
                 MakeHandPage(model: model)
@@ -448,6 +452,22 @@ private struct GeneralPage: View {
                     }
                 }
             }
+            Card(title: "Screenshots") {
+                Row("Save annotated captures to", detail: Preferences.screenshotsFolder) {
+                    PillButton(title: "Choose…") {
+                        Preferences.ensureScreenshotsFolder()
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.canCreateDirectories = true
+                        panel.directoryURL = URL(fileURLWithPath: Preferences.screenshotsFolder)
+                        panel.prompt = "Choose"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            Preferences.screenshotsFolder = url.path
+                        }
+                    }
+                }
+            }
             Card(title: "Startup") {
                 Row("Open TinyHand when you log in") {
                     Toggle("", isOn: model.binding({ Preferences.launchAtLogin }, { Preferences.launchAtLogin = $0 }))
@@ -457,6 +477,50 @@ private struct GeneralPage: View {
                     Row("Check for updates automatically") {
                         Toggle("", isOn: model.binding({ updater.automaticallyChecks }, { updater.automaticallyChecks = $0 }))
                             .toggleStyle(.switch).labelsHidden().focusable(false)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            Preferences.ensureScreenshotsFolder()
+        }
+    }
+}
+
+private struct AgentPage: View {
+    @ObservedObject var model: SettingsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Card(title: "CLI") {
+                Row("Agent CLI", detail: "Starts a session when you finish a drawing and press ⌘↩.") {
+                    Picker("", selection: model.binding({ Preferences.agentCLI }, { Preferences.agentCLI = $0 })) {
+                        ForEach(AgentCLIKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .focusable(false)
+                }
+            }
+            Card(title: "Workspace") {
+                Row("Folder for the agent", detail: Preferences.agentWorkspace.isEmpty
+                    ? "Required before starting a session."
+                    : Preferences.agentWorkspace) {
+                    PillButton(title: "Choose…") {
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.canCreateDirectories = true
+                        if !Preferences.agentWorkspace.isEmpty {
+                            panel.directoryURL = URL(fileURLWithPath: Preferences.agentWorkspace)
+                        }
+                        panel.prompt = "Choose"
+                        if panel.runModal() == .OK, let url = panel.url {
+                            Preferences.agentWorkspace = url.path
+                        }
                     }
                 }
             }

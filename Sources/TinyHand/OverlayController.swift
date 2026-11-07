@@ -45,6 +45,8 @@ final class OverlayController {
     private var activity: NSObjectProtocol?
     var onActiveChanged: (() -> Void)?
     var onNeedsPermission: (() -> Void)?
+    /// Fired after a real ink stroke ends. Coordinates are in AppKit screen space.
+    var onStrokeComplete: ((StrokeResult, CGRect, NSScreen) -> Void)?
 
     init() {
         let frame = (NSScreen.main ?? NSScreen.screens.first).map { $0.frame }
@@ -184,7 +186,33 @@ final class OverlayController {
         buttonSeenDown = false
         armView.held = false
         downPoint = nil
-        armView.ink.end()
+        let wasDrawing = armView.ink.isDrawing
+        let result = armView.ink.end(holdFade: wasDrawing && onStrokeComplete != nil)
+        if wasDrawing, let result, let frame = currentFrame, let screen = currentScreen() {
+            let screenBounds = CGRect(
+                x: frame.origin.x + result.bounds.minX,
+                y: frame.origin.y + result.bounds.minY,
+                width: result.bounds.width,
+                height: result.bounds.height
+            )
+            onStrokeComplete?(result, screenBounds, screen)
+        }
+    }
+
+    func releaseStrokeHold(_ result: StrokeResult, fadeNow: Bool = true) {
+        armView.ink.releaseHold(result, fadeNow: fadeNow)
+    }
+
+    var overlayFrame: CGRect? { currentFrame }
+
+    func screenToLocal(_ screenPoint: CGPoint) -> CGPoint? {
+        guard let frame = currentFrame else { return nil }
+        return CGPoint(x: screenPoint.x - frame.origin.x, y: screenPoint.y - frame.origin.y)
+    }
+
+    func localToScreen(_ local: CGPoint) -> CGPoint? {
+        guard let frame = currentFrame else { return nil }
+        return CGPoint(x: frame.origin.x + local.x, y: frame.origin.y + local.y)
     }
 
     var style: PointerStyle { armView.style }

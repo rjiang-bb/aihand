@@ -42,6 +42,24 @@ enum InteractKey: String, CaseIterable {
     }
 }
 
+enum AgentCLIKind: String, CaseIterable, Identifiable {
+    case cursor
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .cursor: return "Cursor Agent"
+        }
+    }
+
+    var commandName: String {
+        switch self {
+        case .cursor: return "agent"
+        }
+    }
+}
+
 enum InkChoice: String, CaseIterable {
     case match, red, orange, yellow, green, blue, purple, white, black
 
@@ -144,6 +162,40 @@ enum Preferences {
         set { set(newValue, "showInkButton") }
     }
 
+    static var agentCLI: AgentCLIKind {
+        get { defaults.string(forKey: "agentCLI").flatMap(AgentCLIKind.init(rawValue:)) ?? .cursor }
+        set { set(newValue.rawValue, "agentCLI") }
+    }
+
+    static var agentWorkspace: String {
+        get { defaults.string(forKey: "agentWorkspace") ?? "" }
+        set { set(newValue, "agentWorkspace") }
+    }
+
+    static var screenshotsFolder: String {
+        get {
+            if let stored = defaults.string(forKey: "screenshotsFolder"), !stored.isEmpty {
+                return stored
+            }
+            return defaultScreenshotsFolder
+        }
+        set { set(newValue, "screenshotsFolder") }
+    }
+
+    static var defaultScreenshotsFolder: String {
+        NSString(string: "~/Documents/tinyhand").expandingTildeInPath
+    }
+
+    @discardableResult
+    static func ensureScreenshotsFolder() -> String {
+        let path = screenshotsFolder
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: path) {
+            try? fm.createDirectory(atPath: path, withIntermediateDirectories: true)
+        }
+        return path
+    }
+
     static let maxPinned = 8
 
     static var pinnedStyles: [PointerStyle] {
@@ -177,13 +229,13 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound"] {
+                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder"] {
             defaults.removeObject(forKey: key)
         }
         NotificationCenter.default.post(name: changed, object: nil)
     }
 
-        private static func set(_ value: Any, _ key: String) {
+    private static func set(_ value: Any, _ key: String) {
         defaults.set(value, forKey: key)
         NotificationCenter.default.post(name: changed, object: nil)
     }

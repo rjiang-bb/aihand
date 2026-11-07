@@ -1,5 +1,13 @@
 import AppKit
 
+struct StrokeResult {
+    let points: [CGPoint]
+    let bounds: CGRect
+    let color: CGColor
+    let width: CGFloat
+    let layer: CAShapeLayer
+}
+
 final class Ink {
     let layer = CALayer()
     var keep: Bool { Preferences.fadeSeconds <= 0 }
@@ -18,6 +26,7 @@ final class Ink {
 
     private var stroke: CAShapeLayer?
     private var points: [CGPoint] = []
+    private var heldLayers: Set<ObjectIdentifier> = []
 
     var isDrawing: Bool { stroke != nil }
 
@@ -53,22 +62,41 @@ final class Ink {
         redraw()
     }
 
-    func end() {
+    @discardableResult
+    func end(holdFade: Bool = false) -> StrokeResult? {
         guard let s = stroke else {
-            return
+            return nil
         }
+        let snapshotPoints = points
+        let color = s.strokeColor ?? self.color
+        let width = s.lineWidth
         stroke = nil
         points = []
         freeze(s)
-        if keep {
-            return
+        let pad = width / 2 + 4
+        let bounds = s.path.map { $0.boundingBoxOfPath.insetBy(dx: -pad, dy: -pad) } ?? s.bounds
+        let result = StrokeResult(points: snapshotPoints, bounds: bounds, color: color, width: width, layer: s)
+        if holdFade || keep {
+            heldLayers.insert(ObjectIdentifier(s))
+            return result
         }
         fade(s, after: fadeDelay, over: fadeDuration)
+        return result
+    }
+
+    func releaseHold(_ result: StrokeResult, fadeNow: Bool = true) {
+        let id = ObjectIdentifier(result.layer)
+        heldLayers.remove(id)
+        guard fadeNow, !keep else {
+            return
+        }
+        fade(result.layer, after: 0.15, over: fadeDuration)
     }
 
     func clear() {
         stroke = nil
         points = []
+        heldLayers.removeAll()
         layer.sublayers?.forEach { $0.removeFromSuperlayer() }
     }
 

@@ -13,11 +13,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var toggleItem: NSMenuItem?
     private var clearItem: NSMenuItem?
     private var soundItem: NSMenuItem?
+    private var sessionsItem: NSMenuItem?
     private var toggleHotKey: UInt32?
     private var clearHotKey: UInt32?
 
+    private let sessionStore = SessionStore()
+    private lazy var sessionManager = AgentSessionManager(store: sessionStore)
+    private lazy var sessionsPanel = SessionsSidePanel(store: sessionStore)
+    private let annotatePanel = AnnotatePromptPanel()
+    private var pendingStroke: StrokeResult?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = editingMenu()
+        Preferences.ensureScreenshotsFolder()
         HandAsset.preloadThumbnails(PointerStyle.allCases.compactMap(\.assetName))
         Log.write("launch \(Bundle.main.bundlePath) trusted=\(AXIsProcessTrusted())")
         CursorHider.enableBackgroundHiding()
@@ -28,11 +36,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.refreshMenu()
         }
         overlay.extraPassThrough = { [weak self] in
-            guard let frame = self?.statusItem.button?.window?.frame else {
-                return []
+            var frames: [CGRect] = []
+            if let frame = self?.statusItem.button?.window?.frame {
+                frames.append(frame)
             }
-            return [frame]
+            if let panel = self, panel.annotatePanel.isVisible {
+                // Annotate panel is key; input already suspended.
+            }
+            return frames
         }
+        wireAgentFlow()
         enableLaunchAtLoginOnFirstRun()
         updater.start()
         setupStatusItem()
@@ -54,6 +67,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlay.deactivate()
     }
 
+    private func wireAgentFlow() {
+        sessionsPanel.onFollowUp = { [weak self] id, text in
+            self?.sessionManager.followUp(sessionID: id, text: text)
+        }
+        sessionsPanel.onStop = { [weak self] id in
+            self?.sessionManager.stop(sessionID: id)
+        }
+
+        annotatePanel.onOpenChanged = { [weak self] open in
+            self?.overlay.suspendInput(open)
+        }
+        annotatePanel.onCancel = { [weak self] in
+            guard let self, let stroke = self.pendingStroke else { return }
+            self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+            self.pendingStroke = nil
+        }
+        annotatePanel.onSubmit = { [weak self] prompt in
+            self?.submitAnnotation(prompt: prompt)
+        }
+
+        overlay.onStrokeComplete = { [weak self] result, screenBounds, screen in
+            guard let self else { return }
+            if self.annotatePanel.isVisible, let previous = self.pendingStroke {
+                self.overlay.releaseStrokeHold(previous, fadeNow: true)
+            }
+            self.pendingStroke = result
+            let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            self.annotatePanel.show(near: screenBounds, on: screen, workspaceMissing: missing)
+        }
+    }
+
+    private func submitAnnotation(prompt: String) {
+        guard let stroke = pendingStroke else { return }
+        pendingStroke = nil
+
+        let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !workspace.isEmpty else {
+            overlay.exit()
+            settings.show(.agent)
+            return
+        }
+
+        guard let overlayFrame = overlay.overlayFrame else {
+            overlay.exit()
+            return
+        }
+
+        let pad: CGFloat = 8
+        let strokeScreen = CGRect(
+            x: overlayFrame.origin.x + stroke.bounds.minX - pad,
+            y: overlayFrame.origin.y + stroke.bounds.minY - pad,
+            width: stroke.bounds.width + pad * 2,
+            height: stroke.bounds.height + pad * 2
+        )
+
+        do {
+            let outcome = try WindowCapture.captureAnnotated(
+                stroke: stroke,
+                strokeScreenBounds: strokeScreen,
+                overlayFrame: overlayFrame
+            )
+            overlay.exit()
+            if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
+                sessionsPanel.openChat(for: session.id)
+            }
+        } catch {
+            overlay.exit()
+            Log.write("capture failed: \(error.localizedDescription)")
+            let alert = NSAlert()
+            alert.messageText = "Couldn’t capture screenshot"
+            alert.informativeText = error.localizedDescription
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            if error.localizedDescription.contains("Screen Recording") {
+                alert.addButton(withTitle: "Open Settings")
+            }
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn,
+               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     private func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateIcon()
@@ -67,12 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let toggle = NSMenuItem(title: "", action: #selector(toggle), keyEquivalent: "")
         let clear = NSMenuItem(title: "", action: #selector(clearInk), keyEquivalent: "")
         let sound = NSMenuItem(title: "Tap Sound", action: #selector(toggleSound), keyEquivalent: "")
+        let sessions = NSMenuItem(title: "Agent Sessions", action: #selector(showSessions), keyEquivalent: "")
         toggleItem = toggle
         clearItem = clear
         soundItem = sound
+        sessionsItem = sessions
         menu.addItem(toggle)
         menu.addItem(clear)
         menu.addItem(sound)
+        menu.addItem(sessions)
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         if Updater.isAvailable {
@@ -191,7 +291,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlay.soundOn.toggle()
     }
 
+    @objc private func showSessions() {
+        sessionsPanel.toggle()
+    }
+
     @objc private func openSettings() {
+        pendingStroke = nil
+        annotatePanel.hide()
         overlay.exit()
         settings.show()
     }
