@@ -20,7 +20,7 @@ struct SessionChatView: View {
     private var solidBG: Color { colorScheme == .dark ? .black : .white }
     private var solidFG: Color { colorScheme == .dark ? .white : .black }
     private var isWorking: Bool { session.status == .working }
-    private var workspace: String { Preferences.agentWorkspace }
+    private var workspace: String { session.workspace }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,21 +34,6 @@ struct SessionChatView: View {
                 Divider()
             }
             composer
-                .overlay(alignment: .top) {
-                    if skillAC.isActive {
-                        SkillSuggestionList(
-                            controller: skillAC,
-                            query: SkillCatalog.slashQuery(in: draft)?.query ?? ""
-                        ) { skill in
-                            applySkill(skill)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 6)
-                        // Anchor the list's bottom to the composer's top so it floats upward.
-                        .alignmentGuide(.top) { $0[.bottom] }
-                    }
-                }
-                .zIndex(1)
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
@@ -270,6 +255,18 @@ struct SessionChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // In-flow above the prompt so multiline growth can never cover it.
+            if skillAC.isActive {
+                SkillSuggestionList(
+                    controller: skillAC,
+                    query: SkillCatalog.slashQuery(in: draft)?.query ?? ""
+                ) { skill in
+                    applySkill(skill)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity)
+            }
+
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Follow up…", text: $draft, axis: .vertical)
                     .lineLimit(1...12)
@@ -327,7 +324,7 @@ struct SessionChatView: View {
                     hintPair(key: "⌃C", label: "stop")
                 }
                 .padding(.horizontal, 4)
-            } else if !skillAC.isActive {
+            } else {
                 HStack(spacing: 14) {
                     hintPair(key: "/", label: "skills")
                     hintPair(key: "⇧↩", label: "newline")
@@ -416,3 +413,4 @@ private struct OptionalHelp: ViewModifier {
         }
     }
 }
+

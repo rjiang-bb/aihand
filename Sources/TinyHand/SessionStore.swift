@@ -57,6 +57,8 @@ final class AgentSession: ObservableObject, Identifiable {
     let screenshotPath: String?
     let initialPrompt: String
     let cliKind: AgentCLIKind
+    /// Working directory this session belongs to.
+    let workspace: String
 
     @Published var title: String
     @Published var status: AgentSessionStatus
@@ -73,6 +75,7 @@ final class AgentSession: ObservableObject, Identifiable {
         title: String,
         prompt: String,
         screenshotPath: String?,
+        workspace: String = Preferences.agentWorkspace,
         cliKind: AgentCLIKind = Preferences.agentCLI,
         status: AgentSessionStatus = .working,
         blank: Bool = false
@@ -82,6 +85,7 @@ final class AgentSession: ObservableObject, Identifiable {
         self.title = title
         self.initialPrompt = prompt
         self.screenshotPath = screenshotPath
+        self.workspace = SessionStore.normalizedWorkspace(workspace)
         self.cliKind = cliKind
         self.status = status
         if blank {
@@ -106,6 +110,10 @@ final class AgentSession: ObservableObject, Identifiable {
         self.screenshotPath = snapshot.screenshotPath
         self.initialPrompt = snapshot.initialPrompt
         self.cliKind = snapshot.cliKind ?? .cursor
+        let migratedWorkspace = snapshot.workspace?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.workspace = SessionStore.normalizedWorkspace(
+            migratedWorkspace.isEmpty ? Preferences.agentWorkspace : migratedWorkspace
+        )
         self.title = snapshot.title
         // In-flight processes don't survive relaunch.
         if snapshot.status == .working {
@@ -138,7 +146,8 @@ final class AgentSession: ObservableObject, Identifiable {
             preview: preview,
             chatId: chatId,
             errorMessage: errorMessage,
-            cliKind: cliKind
+            cliKind: cliKind,
+            workspace: workspace
         )
     }
 }
@@ -163,50 +172,114 @@ final class SessionStore: ObservableObject {
         var errorMessage: String?
         /// Optional for backwards compatibility with older sessions.json files.
         var cliKind: AgentCLIKind?
+        /// Optional for backwards compatibility; missing values migrate to the current workspace.
+        var workspace: String?
     }
 
     private struct StoreFile: Codable {
         var sessions: [SessionSnapshot]
     }
 
-    @Published private(set) var sessions: [AgentSession] = []
+    /// All sessions across every workspace. Prefer `sessions` for the UI list.
+    @Published private(set) var allSessions: [AgentSession] = []
+    /// Working directory whose sessions are shown in the panel.
+    @Published private(set) var currentWorkspace: String = ""
+    /// Folders from Settings — kept in sync so the panel picker refreshes.
+    @Published private(set) var workspaceFolders: [String] = []
     @Published var selectedSessionID: UUID?
     private var bags: [UUID: AnyCancellable] = [:]
+    private var prefsObserver: Any?
     private var saveWork: DispatchWorkItem?
     private let saveQueue = DispatchQueue(label: "com.kamranahmed.tinyhand.sessions", qos: .utility)
 
+    /// Sessions for the current working directory (panel list / ⌘1…9).
+    var sessions: [AgentSession] {
+        allSessions.filter { Self.sameWorkspace($0.workspace, currentWorkspace) }
+    }
+
     var selectedSession: AgentSession? {
-        sessions.first { $0.id == selectedSessionID }
+        allSessions.first { $0.id == selectedSessionID }
     }
 
-    /// Still running or blocked on the user.
+    /// Still running or blocked on the user (any workspace — menu badge).
     var activeCount: Int {
-        sessions.filter { $0.status == .working || $0.status == .waiting }.count
+        allSessions.filter { $0.status == .working || $0.status == .waiting }.count
     }
 
-    /// Successfully finished sessions.
+    /// Successfully finished sessions (any workspace — menu badge).
     var completedCount: Int {
-        sessions.filter { $0.status == .finished }.count
+        allSessions.filter { $0.status == .finished }.count
     }
 
     init() {
+        syncFromPreferences(clearSelectionIfNeeded: false)
         load()
+        prefsObserver = NotificationCenter.default.addObserver(
+            forName: Preferences.changed,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.syncFromPreferences()
+        }
+    }
+
+    deinit {
+        if let prefsObserver {
+            NotificationCenter.default.removeObserver(prefsObserver)
+        }
+    }
+
+    static func normalizedWorkspace(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+    }
+
+    static func sameWorkspace(_ a: String, _ b: String) -> Bool {
+        normalizedWorkspace(a) == normalizedWorkspace(b)
+    }
+
+    /// Re-filter the panel when Settings changes folders or the current working folder.
+    func syncFromPreferences(clearSelectionIfNeeded: Bool = true) {
+        // Keep Settings’ paths as-is so selectAgentWorkspace can match them.
+        let folders = Preferences.agentWorkspaces
+        let next = Self.normalizedWorkspace(Preferences.agentWorkspace)
+        let foldersChanged = folders != workspaceFolders
+        let currentChanged = next != currentWorkspace
+        guard foldersChanged || currentChanged else { return }
+        if foldersChanged {
+            workspaceFolders = folders
+        }
+        if currentChanged {
+            currentWorkspace = next
+            if clearSelectionIfNeeded,
+               let id = selectedSessionID,
+               let session = allSessions.first(where: { $0.id == id }),
+               !Self.sameWorkspace(session.workspace, next) {
+                selectedSessionID = nil
+            }
+        }
+    }
+
+    /// Back-compat name used by older call sites / mental model.
+    func syncWorkspaceFilter() {
+        syncFromPreferences()
     }
 
     func prepend(_ session: AgentSession) {
-        sessions.insert(session, at: 0)
+        allSessions.insert(session, at: 0)
         observe(session)
         discardOverflow()
         scheduleSave()
     }
 
     func session(id: UUID) -> AgentSession? {
-        sessions.first { $0.id == id }
+        allSessions.first { $0.id == id }
     }
 
     func remove(_ id: UUID) {
-        guard let session = sessions.first(where: { $0.id == id }) else { return }
-        sessions.removeAll { $0.id == id }
+        guard let session = allSessions.first(where: { $0.id == id }) else { return }
+        allSessions.removeAll { $0.id == id }
         bags[id] = nil
         if selectedSessionID == id {
             selectedSessionID = nil
@@ -216,12 +289,24 @@ final class SessionStore: ObservableObject {
         scheduleSave()
     }
 
-    /// Drop sessions past the cap (oldest at the end of the list).
+    /// Drop sessions past the cap per workspace (oldest at the end of that workspace’s list).
     @discardableResult
     private func discardOverflow() -> [AgentSession] {
-        guard sessions.count > Self.maxSessions else { return [] }
-        let overflow = Array(sessions.suffix(from: Self.maxSessions))
-        sessions = Array(sessions.prefix(Self.maxSessions))
+        var overflow: [AgentSession] = []
+        var kept: [AgentSession] = []
+        var counts: [String: Int] = [:]
+        for session in allSessions {
+            let key = Self.normalizedWorkspace(session.workspace)
+            let count = counts[key, default: 0]
+            if count < Self.maxSessions {
+                kept.append(session)
+                counts[key] = count + 1
+            } else {
+                overflow.append(session)
+            }
+        }
+        guard !overflow.isEmpty else { return [] }
+        allSessions = kept
         for session in overflow {
             bags[session.id] = nil
             if selectedSessionID == session.id {
@@ -229,10 +314,8 @@ final class SessionStore: ObservableObject {
             }
             cleanupFiles(for: session)
         }
-        if !overflow.isEmpty {
-            onDiscard?(overflow)
-            Log.write("discarded \(overflow.count) session(s) past limit of \(Self.maxSessions)")
-        }
+        onDiscard?(overflow)
+        Log.write("discarded \(overflow.count) session(s) past limit of \(Self.maxSessions) per workspace")
         return overflow
     }
 
@@ -257,7 +340,7 @@ final class SessionStore: ObservableObject {
     func saveNow() {
         saveWork?.cancel()
         saveWork = nil
-        for session in sessions where session.status == .working {
+        for session in allSessions where session.status == .working {
             session.status = .stopped
             if session.preview.isEmpty { session.preview = "Stopped" }
             if session.messages.last?.text != "Stopped (app quit)" {
@@ -300,24 +383,27 @@ final class SessionStore: ObservableObject {
             decoder.dateDecodingStrategy = .iso8601
             let file = try decoder.decode(StoreFile.self, from: data)
             let hadInFlight = file.sessions.contains { $0.status == .working }
+            let missingWorkspace = file.sessions.contains {
+                ($0.workspace ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
             let restored = file.sessions.map(AgentSession.init(snapshot:))
-            sessions = restored
+            allSessions = restored
             for session in restored {
                 observe(session)
             }
             let discarded = discardOverflow()
-            // Rewrite file when we normalized working → stopped or trimmed overflow.
-            if hadInFlight || !discarded.isEmpty {
+            // Rewrite when we normalized working → stopped, migrated workspace, or trimmed overflow.
+            if hadInFlight || missingWorkspace || !discarded.isEmpty {
                 scheduleSave()
             }
-            Log.write("loaded \(sessions.count) persisted session(s)")
+            Log.write("loaded \(allSessions.count) persisted session(s) (\(sessions.count) for current workspace)")
         } catch {
             Log.write("session load failed: \(error.localizedDescription)")
         }
     }
 
     private func persist() {
-        let snapshots = sessions.map(\.snapshot)
+        let snapshots = allSessions.map(\.snapshot)
         let file = StoreFile(sessions: snapshots)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

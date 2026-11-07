@@ -511,25 +511,127 @@ private struct AgentPage: View {
                 }
             }
             Card(title: "Workspace") {
-                Row("Folder for the agent", detail: Preferences.agentWorkspace.isEmpty
-                    ? "Required before starting a session."
-                    : Preferences.agentWorkspace) {
-                    PillButton(title: "Choose…") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseFiles = false
-                        panel.canChooseDirectories = true
-                        panel.canCreateDirectories = true
-                        if !Preferences.agentWorkspace.isEmpty {
-                            panel.directoryURL = URL(fileURLWithPath: Preferences.agentWorkspace)
-                        }
-                        panel.prompt = "Choose"
-                        if panel.runModal() == .OK, let url = panel.url {
-                            Preferences.agentWorkspace = url.path
-                        }
+                WorkspaceFoldersBlock()
+            }
+        }
+    }
+}
+
+private struct WorkspaceFoldersBlock: View {
+    private var folders: [String] { Preferences.agentWorkspaces }
+    private var current: String { Preferences.agentWorkspace }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if folders.isEmpty {
+                Row("Folders for the agent", detail: "Add at least one. New sessions use the current folder.") {
+                    PillButton(title: "Add…") { addFolder() }
+                }
+            } else {
+                ForEach(Array(folders.enumerated()), id: \.element) { index, path in
+                    WorkspaceFolderRow(
+                        path: path,
+                        isCurrent: path == current,
+                        onSelect: { Preferences.selectAgentWorkspace(path) },
+                        onRemove: { Preferences.removeAgentWorkspace(path) }
+                    )
+                    if index < folders.count - 1 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(height: 1)
+                            .padding(.leading, 14)
                     }
+                }
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+                    .padding(.leading, 14)
+                Row("Add another folder", detail: "Sessions use the folder marked Current.") {
+                    PillButton(title: "Add…") { addFolder() }
                 }
             }
         }
+    }
+
+    private func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = true
+        if !current.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: current)
+        }
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            Preferences.addAgentWorkspace(url.path)
+        }
+    }
+}
+
+private struct WorkspaceFolderRow: View {
+    let path: String
+    let isCurrent: Bool
+    let onSelect: () -> Void
+    let onRemove: () -> Void
+    @State private var hovering = false
+
+    private var title: String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    Image(systemName: isCurrent ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundColor(isCurrent ? Color(red: 0.2, green: 0.55, blue: 0.98) : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(title).font(.system(size: 13)).foregroundColor(.primary)
+                            if isCurrent {
+                                Text("Current")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                            }
+                        }
+                        Text(path)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(isCurrent ? "Current working folder" : "Use as current working folder")
+
+            if hovering || !isCurrent {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help("Remove folder")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(minHeight: 44)
+        .background(Color.primary.opacity(hovering ? 0.03 : 0))
+        .onHover { hovering = $0 }
     }
 }
 

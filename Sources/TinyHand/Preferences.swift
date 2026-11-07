@@ -204,9 +204,91 @@ enum Preferences {
         set { set(newValue.rawValue, "agentCLI") }
     }
 
+    /// Folders available for agent sessions. One of them is the current working folder (`agentWorkspace`).
+    static var agentWorkspaces: [String] {
+        get {
+            if let stored = defaults.stringArray(forKey: "agentWorkspaces") {
+                var seen = Set<String>()
+                let cleaned = stored
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty && seen.insert($0).inserted }
+                if !cleaned.isEmpty { return cleaned }
+            }
+            let legacy = (defaults.string(forKey: "agentWorkspace") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return legacy.isEmpty ? [] : [legacy]
+        }
+        set {
+            var seen = Set<String>()
+            let cleaned = newValue
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && seen.insert($0).inserted }
+            defaults.set(cleaned, forKey: "agentWorkspaces")
+            let current = (defaults.string(forKey: "agentWorkspace") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if cleaned.isEmpty {
+                defaults.removeObject(forKey: "agentWorkspace")
+            } else if !cleaned.contains(current) {
+                defaults.set(cleaned[0], forKey: "agentWorkspace")
+            }
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Current working folder for new agent sessions.
     static var agentWorkspace: String {
-        get { defaults.string(forKey: "agentWorkspace") ?? "" }
-        set { set(newValue, "agentWorkspace") }
+        get {
+            let folders = agentWorkspaces
+            let stored = (defaults.string(forKey: "agentWorkspace") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if folders.contains(stored) { return stored }
+            return folders.first ?? ""
+        }
+        set {
+            let path = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { return }
+            var folders = agentWorkspaces
+            if !folders.contains(path) {
+                folders.append(path)
+                defaults.set(folders, forKey: "agentWorkspaces")
+            }
+            set(path, "agentWorkspace")
+        }
+    }
+
+    static func addAgentWorkspace(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var folders = agentWorkspaces
+        if !folders.contains(trimmed) {
+            folders.append(trimmed)
+            defaults.set(folders, forKey: "agentWorkspaces")
+        }
+        set(trimmed, "agentWorkspace")
+    }
+
+    static func removeAgentWorkspace(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var folders = agentWorkspaces
+        folders.removeAll { $0 == trimmed }
+        defaults.set(folders, forKey: "agentWorkspaces")
+        let current = (defaults.string(forKey: "agentWorkspace") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if current == trimmed {
+            if let next = folders.first {
+                defaults.set(next, forKey: "agentWorkspace")
+            } else {
+                defaults.removeObject(forKey: "agentWorkspace")
+            }
+        }
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    static func selectAgentWorkspace(_ path: String) {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard agentWorkspaces.contains(trimmed) else { return }
+        set(trimmed, "agentWorkspace")
     }
 
     static var screenshotsFolder: String {
@@ -310,7 +392,7 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder",
+                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)
         }

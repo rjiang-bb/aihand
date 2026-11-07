@@ -6,6 +6,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onFollowUp: ((UUID, String, FollowUpSubmit) -> Void)?
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
+    var onManageWorkspaces: (() -> Void)?
     var onDismiss: (() -> Void)?
 
     private final class Panel: NSPanel {
@@ -100,6 +101,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             },
             onNew: { [weak self] in
                 self?.onNew?()
+            },
+            onManageWorkspaces: { [weak self] in
+                self?.onManageWorkspaces?()
             },
             onArchive: { [weak self] id in
                 self?.archive(id)
@@ -549,6 +553,7 @@ private struct SessionsSidePanelView: View {
     var onCloseChat: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
+    var onManageWorkspaces: () -> Void
     var onArchive: (UUID) -> Void
     var onSend: (UUID, String, FollowUpSubmit) -> Void
     var onStop: (UUID) -> Void
@@ -602,6 +607,12 @@ private struct SessionsSidePanelView: View {
         }
         .onChange(of: store.sessions.map(\.id)) { ids in
             if let id = selection.selectedID, !ids.contains(id) {
+                onCloseChat()
+            }
+        }
+        .onChange(of: store.currentWorkspace) { _ in
+            if let id = selection.selectedID,
+               !store.sessions.contains(where: { $0.id == id }) {
                 onCloseChat()
             }
         }
@@ -661,11 +672,19 @@ private struct SessionsSidePanelView: View {
     }
 
     private var sessionsColumn: some View {
-        Group {
+        VStack(spacing: 16) {
+            WorkspacePicker(
+                folders: store.workspaceFolders,
+                current: store.currentWorkspace,
+                onSelect: { Preferences.selectAgentWorkspace($0) },
+                onManage: onManageWorkspaces
+            )
             if store.sessions.isEmpty {
                 VStack {
                     Spacer()
-                    Text("Tap New to start a prompt, or draw on screen to annotate.")
+                    Text(store.currentWorkspace.isEmpty
+                         ? "Add a working folder to start sessions here."
+                         : "Tap New to start a prompt, or draw on screen to annotate.")
                         .font(.system(size: 13))
                         .foregroundStyle(.primary.opacity(0.72))
                         .multilineTextAlignment(.center)
@@ -694,6 +713,91 @@ private struct SessionsSidePanelView: View {
                 .background(Color.clear)
             }
         }
+    }
+}
+
+private struct WorkspacePicker: View {
+    let folders: [String]
+    let current: String
+    var onSelect: (String) -> Void
+    var onManage: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fg: Color { colorScheme == .dark ? .white : .black }
+
+    private var title: String {
+        if current.isEmpty { return "No folder" }
+        return URL(fileURLWithPath: current).lastPathComponent
+    }
+
+    var body: some View {
+        // Draw the card ourselves — Menu’s borderless label swallows custom backgrounds.
+        HStack(spacing: 12) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(fg)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(current.isEmpty ? "Choose a working folder" : current)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(fg.opacity(0.55))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(fg.opacity(0.45))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WorkspacePickerBackground(cornerRadius: 22))
+        .overlay {
+            Menu {
+                if folders.isEmpty {
+                    Button("Add folders…", action: onManage)
+                } else {
+                    ForEach(folders, id: \.self) { path in
+                        Button {
+                            onSelect(path)
+                        } label: {
+                            // Title + path: macOS menus render the second Text as a subtitle.
+                            if SessionStore.sameWorkspace(path, current) {
+                                Label {
+                                    Text(menuTitle(for: path))
+                                    Text(path)
+                                } icon: {
+                                    Image(systemName: "checkmark")
+                                }
+                            } else {
+                                Text(menuTitle(for: path))
+                                Text(path)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Manage folders…", action: onManage)
+                }
+            } label: {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+        }
+        .help(current.isEmpty ? "Choose a working folder" : current)
+    }
+
+    private func menuTitle(for path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
     }
 }
 
@@ -875,6 +979,29 @@ private struct SolidCardBackground: View {
                 radius: selected ? 16 : 12,
                 y: 6
             )
+    }
+}
+
+/// Same chrome as session cards, but a muted fill so the folder picker reads as chrome.
+private struct WorkspacePickerBackground: View {
+    var cornerRadius: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let dark = colorScheme == .dark
+        let base = dark
+            ? Color(white: 0.16)
+            : Color(white: 0.94)
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(base)
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        dark ? Color.white.opacity(0.12) : Color.black.opacity(0.06),
+                        lineWidth: 0.5
+                    )
+            )
+            .shadow(color: .black.opacity(dark ? 0.4 : 0.12), radius: 10, y: 4)
     }
 }
 

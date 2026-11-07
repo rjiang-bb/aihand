@@ -87,6 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessionsPanel.onNew = { [weak self] in
             self?.startBlankSession()
         }
+        sessionsPanel.onManageWorkspaces = { [weak self] in
+            self?.settings.show(.agent)
+        }
 
         annotatePanel.onOpenChanged = { [weak self] open in
             self?.overlay.suspendInput(open)
