@@ -119,6 +119,12 @@ final class AgentSession: ObservableObject, Identifiable {
 }
 
 final class SessionStore: ObservableObject {
+    /// Hard cap for the sessions list (also matches ⌘1…⌘9 shortcuts).
+    static let maxSessions = 9
+
+    /// Called after older sessions are dropped past `maxSessions`.
+    var onDiscard: (([AgentSession]) -> Void)?
+
     struct SessionSnapshot: Codable {
         var id: UUID
         var createdAt: Date
@@ -165,6 +171,7 @@ final class SessionStore: ObservableObject {
     func prepend(_ session: AgentSession) {
         sessions.insert(session, at: 0)
         observe(session)
+        discardOverflow()
         scheduleSave()
     }
 
@@ -173,12 +180,52 @@ final class SessionStore: ObservableObject {
     }
 
     func remove(_ id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
         sessions.removeAll { $0.id == id }
         bags[id] = nil
         if selectedSessionID == id {
             selectedSessionID = nil
         }
+        cleanupFiles(for: session)
+        onDiscard?([session])
         scheduleSave()
+    }
+
+    /// Drop sessions past the cap (oldest at the end of the list).
+    @discardableResult
+    private func discardOverflow() -> [AgentSession] {
+        guard sessions.count > Self.maxSessions else { return [] }
+        let overflow = Array(sessions.suffix(from: Self.maxSessions))
+        sessions = Array(sessions.prefix(Self.maxSessions))
+        for session in overflow {
+            bags[session.id] = nil
+            if selectedSessionID == session.id {
+                selectedSessionID = nil
+            }
+            cleanupFiles(for: session)
+        }
+        if !overflow.isEmpty {
+            onDiscard?(overflow)
+            Log.write("discarded \(overflow.count) session(s) past limit of \(Self.maxSessions)")
+        }
+        return overflow
+    }
+
+    private func cleanupFiles(for session: AgentSession) {
+        var paths = Set<String>()
+        if let path = session.screenshotPath { paths.insert(path) }
+        for message in session.messages {
+            if let path = message.imagePath { paths.insert(path) }
+        }
+        let fm = FileManager.default
+        for path in paths {
+            guard fm.fileExists(atPath: path) else { continue }
+            do {
+                try fm.removeItem(atPath: path)
+            } catch {
+                Log.write("session file cleanup failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Flush immediately (call on quit). Marks in-flight runs as stopped first.
@@ -233,11 +280,12 @@ final class SessionStore: ObservableObject {
             for session in restored {
                 observe(session)
             }
-            // Rewrite file when we normalized working → stopped.
-            if hadInFlight {
+            let discarded = discardOverflow()
+            // Rewrite file when we normalized working → stopped or trimmed overflow.
+            if hadInFlight || !discarded.isEmpty {
                 scheduleSave()
             }
-            Log.write("loaded \(restored.count) persisted session(s)")
+            Log.write("loaded \(sessions.count) persisted session(s)")
         } catch {
             Log.write("session load failed: \(error.localizedDescription)")
         }

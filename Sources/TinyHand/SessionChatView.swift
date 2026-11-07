@@ -10,8 +10,6 @@ struct SessionChatView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft = ""
-    @State private var quotedSelection: String?
-    @State private var selectionOffer: String?
     @FocusState private var composerFocused: Bool
 
     private var solidBG: Color { colorScheme == .dark ? .black : .white }
@@ -21,13 +19,8 @@ struct SessionChatView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            ChatTranscriptView(messages: session.messages) { selected in
-                selectionOffer = selected
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if let offer = selectionOffer {
-                selectionBar(offer)
-            }
+            ChatTranscriptView(messages: session.messages)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             composer
         }
@@ -106,108 +99,49 @@ struct SessionChatView: View {
         }
     }
 
-    private func selectionBar(_ text: String) -> some View {
-        HStack(spacing: 8) {
-            Text("Selected")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-            Text(text)
-                .font(.system(size: 12))
-                .lineLimit(1)
-            Spacer()
-            Button("Ask about selection") {
-                quotedSelection = text
-                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    draft = "About this: "
-                }
-                selectionOffer = nil
-                focusComposer()
-            }
-            .controlSize(.small)
-            Button("Dismiss") {
-                selectionOffer = nil
-            }
-            .controlSize(.small)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .background(Color.accentColor.opacity(0.08))
-    }
-
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let quoted = quotedSelection {
-                HStack {
-                    Text("“\(quoted)”")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                    Spacer()
-                    Button {
-                        quotedSelection = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Follow up…", text: $draft, axis: .vertical)
-                    .lineLimit(1...5)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(.primary)
-                    .focused($composerFocused)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.primary.opacity(compact ? 0.10 : 0.06))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
-                            )
-                    )
-                    .onSubmit(send)
-                if session.status == .working {
-                    Button(action: onStop) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 28))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop")
-                }
-                Button(action: send) {
-                    Image(systemName: "arrow.up.circle.fill")
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Follow up…", text: $draft, axis: .vertical)
+                .lineLimit(1...5)
+                .textFieldStyle(.plain)
+                .foregroundStyle(.primary)
+                .focused($composerFocused)
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.primary.opacity(compact ? 0.10 : 0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
+                        )
+                )
+                .onSubmit(send)
+            if session.status == .working {
+                Button(action: onStop) {
+                    Image(systemName: "stop.circle.fill")
                         .font(.system(size: 28))
                         .symbolRenderingMode(.hierarchical)
+                        .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && quotedSelection == nil)
-                .keyboardShortcut(.return, modifiers: .command)
+                .help("Stop")
             }
+            Button(action: send) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 28))
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .buttonStyle(.plain)
+            .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .keyboardShortcut(.return, modifiers: .command)
         }
         .padding(12)
     }
 
     private func send() {
-        var parts: [String] = []
-        if let quoted = quotedSelection?.trimmingCharacters(in: .whitespacesAndNewlines), !quoted.isEmpty {
-            parts.append("Regarding this selection:\n> \(quoted)")
-        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty {
-            parts.append(text)
-        }
-        guard !parts.isEmpty else { return }
-        let prompt = parts.joined(separator: "\n\n")
+        guard !text.isEmpty else { return }
         draft = ""
-        quotedSelection = nil
-        selectionOffer = nil
-        onSend(prompt)
+        onSend(text)
     }
 }
-

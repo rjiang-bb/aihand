@@ -22,7 +22,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private let listWidth: CGFloat = 360
     private let chatWidth: CGFloat = 440
-    private let maxShortcutSlots = 9
+    private let maxShortcutSlots = SessionStore.maxSessions
 
     var isVisible: Bool { panel.isVisible }
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
@@ -283,6 +283,11 @@ private struct SessionsSidePanelView: View {
         .background(Color.clear)
         .overlay(alignment: .top) {
             floatingHeader
+        }
+        .onChange(of: store.sessions.map(\.id)) { ids in
+            if let id = selection.selectedID, !ids.contains(id) {
+                onCloseChat()
+            }
         }
     }
 

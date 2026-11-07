@@ -5,15 +5,13 @@ import WebKit
 /// Cursor-style agent transcript rendered in a WKWebView (markdown, tool cards, code).
 struct ChatTranscriptView: NSViewRepresentable {
     let messages: [AgentMessage]
-    var onSelect: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onSelect: onSelect)
+        Coordinator()
     }
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
-        config.userContentController.add(context.coordinator, name: "tinyhand")
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
@@ -28,12 +26,10 @@ struct ChatTranscriptView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        context.coordinator.onSelect = onSelect
         context.coordinator.push(messages: messages)
     }
 
-    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
-        var onSelect: (String) -> Void
+    final class Coordinator: NSObject, WKNavigationDelegate {
         weak var webView: WKWebView?
         private var ready = false
         private var pendingMessages: [AgentMessage] = []
@@ -41,23 +37,11 @@ struct ChatTranscriptView: NSViewRepresentable {
         private var imageDataURLs: [String: String] = [:]
         private var imagesSentToPage: Set<String> = []
 
-        init(onSelect: @escaping (String) -> Void) {
-            self.onSelect = onSelect
-        }
-
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             ready = true
             imagesSentToPage.removeAll()
             lastPayload = ""
             push(messages: pendingMessages)
-        }
-
-        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard let body = message.body as? [String: Any],
-                  let type = body["type"] as? String else { return }
-            if type == "select", let text = body["text"] as? String, !text.isEmpty {
-                onSelect(text)
-            }
         }
 
         func push(messages: [AgentMessage]) {
@@ -313,17 +297,6 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 6px 8px;
         text-align: left;
       }
-      .ask {
-        margin-top: 8px;
-        appearance: none;
-        border: none;
-        background: transparent;
-        color: var(--link);
-        font: 600 11px var(--sans);
-        padding: 0;
-        cursor: pointer;
-      }
-      .ask:hover { text-decoration: underline; }
       .empty {
         color: var(--muted);
         text-align: center;
@@ -479,12 +452,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       return parts.join(', ') || (items.length + ' tools');
     }
 
-    function askButton(id) {
-      return '<button class="ask" data-id="' + esc(id) + '">Ask about this</button>';
-    }
-
     function toolGroupHTML(items, groupId, expanded) {
-      items.forEach(function(m) { window.__texts[m.id] = m.text || ''; });
       const summary = summarizeTools(items);
       const open = expanded ? ' expanded' : '';
       const details = items.map(function(m) {
@@ -503,7 +471,6 @@ struct ChatTranscriptView: NSViewRepresentable {
         + '</div>';
     }
 
-    window.__texts = {};
     window.__images = window.__images || {};
     window.__expandedGroups = window.__expandedGroups || {};
     window.cacheImages = function(items) {
@@ -513,7 +480,6 @@ struct ChatTranscriptView: NSViewRepresentable {
     };
     window.renderMessages = function(messages) {
       const root = document.getElementById('root');
-      window.__texts = {};
       if (!messages || !messages.length) {
         root.innerHTML = '<div class="empty">Send a message to start.</div>';
         return;
@@ -542,18 +508,13 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
         const m = block.item;
         const kind = m.kind || 'assistant';
-        window.__texts[m.id] = m.text || '';
         let body = '';
         const image = m.image || (m.imageKey ? window.__images[m.imageKey] : null);
         if (image) {
           body += '<img class="shot" src="' + image + '" alt="Screenshot">';
         }
-        if (kind === 'assistant') {
+        if (kind === 'assistant' || kind === 'user') {
           body += '<div class="md">' + markdownToHTML(m.text || '') + '</div>';
-          if (m.text) body += askButton(m.id);
-        } else if (kind === 'user') {
-          body += '<div class="md">' + markdownToHTML(m.text || '') + '</div>';
-          if (m.text) body += askButton(m.id);
         } else {
           body += esc(m.text || '');
         }
@@ -561,19 +522,6 @@ struct ChatTranscriptView: NSViewRepresentable {
       }).join('');
       const nearBottom = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 80);
       root.innerHTML = html;
-      root.querySelectorAll('button.ask').forEach(function(btn) {
-        btn.addEventListener('click', function(e) {
-          e.preventDefault();
-          const id = btn.getAttribute('data-id');
-          const text = (window.__texts[id] || '').trim();
-          if (!text) return;
-          const selected = String(window.getSelection() || '').trim();
-          window.webkit.messageHandlers.tinyhand.postMessage({
-            type: 'select',
-            text: (selected && text.indexOf(selected) !== -1) ? selected : text
-          });
-        });
-      });
       root.querySelectorAll('.msg.tool-group .tool-summary').forEach(function(summary) {
         summary.addEventListener('click', function(e) {
           e.preventDefault();

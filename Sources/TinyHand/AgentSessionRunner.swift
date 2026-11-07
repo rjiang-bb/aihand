@@ -575,6 +575,17 @@ final class AgentSessionManager {
 
     init(store: SessionStore) {
         self.store = store
+        store.onDiscard = { [weak self] discarded in
+            self?.cleanupRunners(for: discarded)
+        }
+    }
+
+    private func cleanupRunners(for discarded: [AgentSession]) {
+        for session in discarded {
+            if let runner = runners.removeValue(forKey: session.id) {
+                runner.stop()
+            }
+        }
     }
 
     func startFromAnnotation(prompt: String, screenshotPath: String?) -> AgentSession? {
