@@ -191,9 +191,18 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private func closeChat() {
         guard selection.selectedID != nil else { return }
+        // Keep the expanded panel’s trailing edge; the list slides right into
+        // where the chat card was (instead of staying pinned to the left).
+        let expanded = panel.frame
         discardBlankDraftIfLeaving()
         selection.selectedID = nil
-        layout()
+        layout(
+            listOriginOverride: CGPoint(
+                x: expanded.maxX - listWidth,
+                y: expanded.maxY - listHeight
+            )
+        )
+        persistListPlacement()
     }
 
     /// Drop an untouched "New session" when leaving it (switch, Esc, click away, hide).
@@ -206,7 +215,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         store.remove(id)
     }
 
-    private func layout(on screen: NSScreen? = nil) {
+    private func layout(on screen: NSScreen? = nil, listOriginOverride: CGPoint? = nil) {
         let screen = screen ?? panel.screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         let visible = screen.visibleFrame
@@ -216,7 +225,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let size = preferredSize(visible: visible, expanded: expanded)
         // Prefer the live panel position when visible so layout never snaps back
         // to a stale saved origin. Fall back to prefs / default trailing dock.
+        // `listOriginOverride` is used when collapsing chat so the list can pin
+        // to the former chat trailing edge instead of the expanded leading edge.
         let listOrigin: CGPoint = {
+            if let listOriginOverride {
+                return listOriginOverride
+            }
             if isVisible, panel.frame.width > 1 {
                 return listOnlyOrigin(from: panel.frame)
             }
