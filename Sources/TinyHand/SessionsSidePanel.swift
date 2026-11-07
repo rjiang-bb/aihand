@@ -19,9 +19,11 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var hosting: NSHostingView<SessionsSidePanelView>?
     private var keyMonitor: Any?
     private var flagsMonitor: Any?
+    private var applyingLayout = false
 
     private let listWidth: CGFloat = 360
-    private let chatWidth: CGFloat = 440
+    private let minExpandedWidth: CGFloat = 640
+    private let minHeight: CGFloat = 360
     private let maxShortcutSlots = SessionStore.maxSessions
 
     var isVisible: Bool { panel.isVisible }
@@ -42,8 +44,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     init(store: SessionStore) {
         self.store = store
         panel = Panel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 640),
-            styleMask: [.borderless, .nonactivatingPanel],
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: Preferences.sessionsPanelDefaultWidth,
+                height: Preferences.sessionsPanelDefaultHeight
+            ),
+            styleMask: [.borderless, .nonactivatingPanel, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -53,6 +60,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
+        panel.isMovable = false
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
@@ -88,6 +96,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         )
         let host = NSHostingView(rootView: root)
         host.wantsLayer = true
+        host.autoresizingMask = [.width, .height]
         host.layer?.backgroundColor = NSColor.clear.cgColor
         hosting = host
         panel.contentView = host
@@ -161,15 +170,72 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard let screen else { return }
         let visible = screen.visibleFrame
         let expanded = selection.selectedID != nil
-        let width = expanded ? listWidth + chatWidth : listWidth
-        let height = min(640, visible.height - 40)
+        updateSizeLimits(visible: visible, expanded: expanded)
+
+        let size = preferredSize(visible: visible, expanded: expanded)
         let frame = NSRect(
-            x: visible.maxX - width - 12,
-            y: visible.minY + (visible.height - height) / 2,
-            width: width,
-            height: height
+            x: visible.maxX - size.width - 12,
+            y: visible.minY + (visible.height - size.height) / 2,
+            width: size.width,
+            height: size.height
         )
+        applyingLayout = true
         panel.setFrame(frame, display: true, animate: isVisible)
+        applyingLayout = false
+    }
+
+    private func preferredSize(visible: NSRect, expanded: Bool) -> NSSize {
+        let maxW = floor(visible.width * 0.5)
+        let maxH = floor(visible.height * 0.9)
+        let height = min(max(Preferences.sessionsPanelHeight, min(minHeight, maxH)), maxH)
+        if expanded {
+            let minW = min(minExpandedWidth, maxW)
+            let width = min(max(Preferences.sessionsPanelWidth, minW), maxW)
+            return NSSize(width: width, height: height)
+        }
+        let width = min(listWidth, maxW)
+        return NSSize(width: width, height: height)
+    }
+
+    private func updateSizeLimits(visible: NSRect, expanded: Bool) {
+        let maxW = max(1, floor(visible.width * 0.5))
+        let maxH = max(1, floor(visible.height * 0.9))
+        let minH = min(minHeight, maxH)
+        if expanded {
+            let minW = min(minExpandedWidth, maxW)
+            panel.minSize = NSSize(width: minW, height: minH)
+            panel.maxSize = NSSize(width: maxW, height: maxH)
+        } else {
+            let width = min(listWidth, maxW)
+            panel.minSize = NSSize(width: width, height: minH)
+            panel.maxSize = NSSize(width: width, height: maxH)
+        }
+    }
+
+    private func persistSizeIfNeeded() {
+        guard !applyingLayout else { return }
+        let size = panel.frame.size
+        guard size.width > 0, size.height > 0 else { return }
+        if selection.selectedID != nil {
+            Preferences.sessionsPanelWidth = size.width
+        }
+        Preferences.sessionsPanelHeight = size.height
+    }
+
+    private func dockToTrailingEdge() {
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        var frame = panel.frame
+        frame.size.width = min(frame.width, floor(visible.width * 0.5))
+        frame.size.height = min(frame.height, floor(visible.height * 0.9))
+        frame.origin.x = visible.maxX - frame.width - 12
+        frame.origin.y = min(
+            max(frame.origin.y, visible.minY),
+            visible.maxY - frame.height
+        )
+        applyingLayout = true
+        panel.setFrame(frame, display: true)
+        applyingLayout = false
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -179,6 +245,32 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         selection.showShortcutBadges = false
         closeChat()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        persistSizeIfNeeded()
+        dockToTrailingEdge()
+    }
+
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        guard let screen = sender.screen ?? NSScreen.main else { return frameSize }
+        let visible = screen.visibleFrame
+        let expanded = selection.selectedID != nil
+        let maxW = floor(visible.width * 0.5)
+        let maxH = floor(visible.height * 0.9)
+        let minH = min(minHeight, maxH)
+        if expanded {
+            let minW = min(minExpandedWidth, maxW)
+            return NSSize(
+                width: min(max(frameSize.width, minW), maxW),
+                height: min(max(frameSize.height, minH), maxH)
+            )
+        }
+        let width = min(listWidth, maxW)
+        return NSSize(
+            width: width,
+            height: min(max(frameSize.height, minH), maxH)
+        )
     }
 
     private func installShortcutMonitors() {

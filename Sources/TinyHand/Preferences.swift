@@ -223,6 +223,26 @@ enum Preferences {
         NSString(string: "~/Documents/tinyhand").expandingTildeInPath
     }
 
+    /// Preferred sessions panel size (expanded width + height). Caps applied at layout time.
+    static let sessionsPanelDefaultWidth: CGFloat = 800
+    static let sessionsPanelDefaultHeight: CGFloat = 640
+
+    static var sessionsPanelWidth: CGFloat {
+        get {
+            (defaults.object(forKey: "sessionsPanelWidth") as? Double)
+                .map { CGFloat($0) } ?? sessionsPanelDefaultWidth
+        }
+        set { defaults.set(Double(newValue), forKey: "sessionsPanelWidth") }
+    }
+
+    static var sessionsPanelHeight: CGFloat {
+        get {
+            (defaults.object(forKey: "sessionsPanelHeight") as? Double)
+                .map { CGFloat($0) } ?? sessionsPanelDefaultHeight
+        }
+        set { defaults.set(Double(newValue), forKey: "sessionsPanelHeight") }
+    }
+
     @discardableResult
     static func ensureScreenshotsFolder() -> String {
         let path = screenshotsFolder
@@ -266,7 +286,8 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder"] {
+                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "screenshotsFolder",
+                    "sessionsPanelWidth", "sessionsPanelHeight"] {
             defaults.removeObject(forKey: key)
         }
         NotificationCenter.default.post(name: changed, object: nil)
