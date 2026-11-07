@@ -1591,17 +1591,29 @@ private struct ShortcutField: NSViewRepresentable {
 }
 
 struct VisualEffect: NSViewRepresentable {
-    let material: NSVisualEffectView.Material
+    var material: NSVisualEffectView.Material = .hudWindow
+    var blending: NSVisualEffectView.BlendingMode = .behindWindow
+    var emphasized = false
 
     func makeNSView(context: Context) -> NSVisualEffectView {
         let v = NSVisualEffectView()
         v.material = material
-        v.blendingMode = .behindWindow
+        v.blendingMode = blending
         v.state = .active
+        if emphasized {
+            v.appearance = NSAppearance(named: .vibrantDark)
+        }
         return v
     }
 
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        nsView.material = material
+        nsView.blendingMode = blending
+        nsView.state = .active
+        if emphasized {
+            nsView.appearance = NSAppearance(named: .vibrantDark)
+        }
+    }
 }
 
 private let blankIcon = NSImage(size: NSSize(width: 64, height: 64))

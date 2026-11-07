@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build, bundle, and launch TinyHand with a stable development signature so
-# Accessibility / Screen Recording grants stick across rebuilds.
+# Build and launch TinyHand from ~/Applications with a pinned Apple Development
+# signature so Accessibility / Screen Recording grants survive rebuilds.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
@@ -16,16 +16,32 @@ fi
 
 quit_running_app
 
-APP="dist/$APP_NAME.app"
+# Stable path for TCC. Mirror to dist/ after signing.
+APP="$(debug_install_app)"
+DIST="dist/$APP_NAME.app"
+mkdir -p "$HOME/Applications" dist
+
 make_bundle "$BINARY" "$APP" "0"
 
 IDENTITY="$(debug_codesign_identity)"
-sign_app "$APP" "$IDENTITY"
-echo "Signed with: $IDENTITY"
 if [[ "$IDENTITY" == "-" ]]; then
-    echo "warning: ad-hoc signature — macOS will re-ask permissions after each rebuild."
-    echo "         Set CODESIGN_IDENTITY or install an Apple Development certificate."
+    echo "error: no Apple Development identity found."
+    echo "  Create one in Xcode (Settings → Accounts → Manage Certificates), then re-run."
+    exit 1
 fi
+
+# Debug builds skip hardened runtime — friendlier for local TCC during iteration.
+sign_app "$APP" "$IDENTITY" "" "none"
+
+rm -rf "$DIST"
+ditto "$APP" "$DIST"
+
+TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+echo "Installed $APP"
+echo "Signed with: $IDENTITY (Team $TEAM)"
+echo "If Accessibility still prompts: System Settings → Privacy & Security → Accessibility"
+echo "  • Remove any old TinyHand rows"
+echo "  • Enable the TinyHand entry (from Applications), then re-run"
 
 open "$APP"
 echo "Launched $APP"

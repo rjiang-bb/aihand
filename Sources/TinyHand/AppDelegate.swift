@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
+import Combine
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
@@ -22,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var sessionsPanel = SessionsSidePanel(store: sessionStore)
     private let annotatePanel = AnnotatePromptPanel()
     private var pendingStroke: StrokeResult?
+    private var sessionIconBag: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = editingMenu()
@@ -51,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupStatusItem()
         setupSettings()
         registerHotKeys()
+        sessionIconBag = sessionStore.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                // objectWillChange fires before the value updates — refresh after.
+                DispatchQueue.main.async { self?.updateIcon() }
+            }
 
         overlay.onNeedsPermission = { [weak self] in
             self?.welcome.show()
@@ -65,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         overlay.deactivate()
+        sessionStore.saveNow()
     }
 
     private func wireAgentFlow() {
@@ -351,9 +360,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
         statusItem.button?.image = image
-        statusItem.button?.toolTip = overlay.isActive
+        statusItem.button?.imagePosition = .imageLeft
+        statusItem.button?.attributedTitle = sessionBadgeTitle()
+        statusItem.button?.appearsDisabled = false
+
+        var tip = overlay.isActive
             ? "TinyHand is on — click to turn off, right-click for the menu"
             : "TinyHand — click to turn on, right-click for the menu"
+        let active = sessionStore.activeCount
+        let completed = sessionStore.completedCount
+        if active > 0 || completed > 0 {
+            var parts: [String] = []
+            if active > 0 { parts.append("\(active) active") }
+            if completed > 0 { parts.append("\(completed) completed") }
+            tip += "\n" + parts.joined(separator: " · ")
+        }
+        statusItem.button?.toolTip = tip
+    }
+
+    private func sessionBadgeTitle() -> NSAttributedString {
+        let active = sessionStore.activeCount
+        let completed = sessionStore.completedCount
+        guard active > 0 || completed > 0 else {
+            return NSAttributedString()
+        }
+
+        let title = NSMutableAttributedString(string: " ")
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        let baseline = (font.capHeight - 6) / 2
+
+        func appendDot(_ color: NSColor, count: Int) {
+            guard count > 0 else { return }
+            if title.length > 1 {
+                title.append(NSAttributedString(string: " ", attributes: [
+                    .font: font,
+                    .foregroundColor: NSColor.secondaryLabelColor
+                ]))
+            }
+            let attachment = NSTextAttachment()
+            attachment.image = Self.menuBarDot(color: color, diameter: 6)
+            attachment.bounds = CGRect(x: 0, y: baseline, width: 6, height: 6)
+            title.append(NSAttributedString(attachment: attachment))
+            title.append(NSAttributedString(string: "\(count)", attributes: [
+                .font: font,
+                .foregroundColor: NSColor.labelColor,
+                .baselineOffset: 0
+            ]))
+        }
+
+        appendDot(NSColor.systemBlue, count: active)
+        appendDot(NSColor.systemGreen, count: completed)
+        return title
+    }
+
+    private static func menuBarDot(color: NSColor, diameter: CGFloat) -> NSImage {
+        let size = NSSize(width: diameter, height: diameter)
+        let image = NSImage(size: size, flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 0.25, dy: 0.25)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
     }
 
     private func editingMenu() -> NSMenu {

@@ -16,26 +16,10 @@ struct SessionChatView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(session.messages) { message in
-                            MessageBubble(message: message) { selected in
-                                selectionOffer = selected
-                            }
-                            .id(message.id)
-                        }
-                    }
-                    .padding(compact ? 12 : 16)
-                }
-                .onChange(of: session.messages.count) { _ in
-                    if let last = session.messages.last {
-                        withAnimation {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
-                }
+            ChatTranscriptView(messages: session.messages) { selected in
+                selectionOffer = selected
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             if let offer = selectionOffer {
                 selectionBar(offer)
             }
@@ -43,6 +27,7 @@ struct SessionChatView: View {
             composer
         }
         .background(compact ? Color.clear : Color(nsColor: .windowBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
     }
 
     private var header: some View {
@@ -54,19 +39,16 @@ struct SessionChatView: View {
                     .lineLimit(1)
                 Text(statusLabel)
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                    .foregroundStyle(.secondary)
             }
             Spacer()
-            if session.status == .working {
-                Button("Stop", action: onStop)
-                    .controlSize(.small)
-            }
             if let onClose {
                 Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundColor(.secondary)
-                        .font(.system(size: 16))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.primary.opacity(0.8))
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(.white.opacity(0.16)))
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -154,6 +136,16 @@ struct SessionChatView: View {
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .textBackgroundColor)))
                     .onSubmit(send)
+                if session.status == .working {
+                    Button(action: onStop) {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 28))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop")
+                }
                 Button(action: send) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 28))
@@ -185,64 +177,3 @@ struct SessionChatView: View {
     }
 }
 
-private struct MessageBubble: View {
-    let message: AgentMessage
-    var onSelect: (String) -> Void
-
-    var body: some View {
-        HStack {
-            if message.kind == .user { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 8) {
-                if let path = message.imagePath, let image = NSImage(contentsOfFile: path) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: 280, maxHeight: 180)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                if !message.text.isEmpty {
-                    Text(message.text)
-                        .font(message.kind == .tool
-                              ? .system(size: 11, design: .monospaced)
-                              : .system(size: 13))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if message.kind == .assistant || message.kind == .user {
-                    Button("Ask about this") {
-                        onSelect(message.text)
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .buttonStyle(.plain)
-                    .foregroundColor(.accentColor)
-                }
-            }
-            .padding(10)
-            .background(background)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .contextMenu {
-                Button("Ask about selection") {
-                    if let selected = NSPasteboard.general.string(forType: .string), !selected.isEmpty,
-                       message.text.contains(selected) {
-                        onSelect(selected)
-                    } else {
-                        onSelect(message.text)
-                    }
-                }
-                Button("Ask about this message") {
-                    onSelect(message.text)
-                }
-            }
-            if message.kind != .user { Spacer(minLength: 40) }
-        }
-    }
-
-    private var background: Color {
-        switch message.kind {
-        case .user: return Color.accentColor.opacity(0.18)
-        case .assistant: return Color(nsColor: .controlBackgroundColor)
-        case .tool: return Color.primary.opacity(0.05)
-        case .system: return Color.orange.opacity(0.12)
-        }
-    }
-}

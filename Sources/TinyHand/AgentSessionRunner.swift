@@ -300,12 +300,46 @@ final class AgentSessionRunner {
         if let read = tool["readToolCall"] as? [String: Any],
            let args = read["args"] as? [String: Any],
            let path = args["path"] as? String {
-            return "Reading \(path)"
+            return "Reading \(shortPath(path))"
         }
         if let write = tool["writeToolCall"] as? [String: Any],
            let args = write["args"] as? [String: Any],
            let path = args["path"] as? String {
-            return "Writing \(path)"
+            return "Writing \(shortPath(path))"
+        }
+        if let edit = tool["editToolCall"] as? [String: Any],
+           let args = edit["args"] as? [String: Any],
+           let path = args["path"] as? String {
+            return "Editing \(shortPath(path))"
+        }
+        if let shell = tool["shellToolCall"] as? [String: Any],
+           let args = shell["args"] as? [String: Any],
+           let command = args["command"] as? String {
+            let oneLine = command
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let clipped = oneLine.count > 80 ? String(oneLine.prefix(77)) + "…" : oneLine
+            return "Ran \(clipped)"
+        }
+        if let grep = tool["grepToolCall"] as? [String: Any],
+           let args = grep["args"] as? [String: Any],
+           let pattern = args["pattern"] as? String {
+            return "Searched \(pattern)"
+        }
+        if let glob = tool["globToolCall"] as? [String: Any],
+           let args = glob["args"] as? [String: Any],
+           let pattern = args["globPattern"] as? String ?? args["pattern"] as? String {
+            return "Glob \(pattern)"
+        }
+        if let del = tool["deleteToolCall"] as? [String: Any],
+           let args = del["args"] as? [String: Any],
+           let path = args["path"] as? String {
+            return "Deleting \(shortPath(path))"
+        }
+        if let ls = tool["lsToolCall"] as? [String: Any],
+           let args = ls["args"] as? [String: Any],
+           let path = args["path"] as? String {
+            return "Listed \(shortPath(path))"
         }
         if let fn = tool["function"] as? [String: Any],
            let name = fn["name"] as? String {
@@ -315,6 +349,14 @@ final class AgentSessionRunner {
             return key.replacingOccurrences(of: "ToolCall", with: "")
         }
         return "Tool"
+    }
+
+    private func shortPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
     }
 
     private func handleTermination(status: Int32) {
