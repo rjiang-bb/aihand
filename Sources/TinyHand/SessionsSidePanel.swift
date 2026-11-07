@@ -3,7 +3,7 @@ import Carbon.HIToolbox
 import SwiftUI
 
 final class SessionsSidePanel: NSObject, NSWindowDelegate {
-    var onFollowUp: ((UUID, String) -> Void)?
+    var onFollowUp: ((UUID, String, FollowUpSubmit) -> Void)?
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
     var onDismiss: (() -> Void)?
@@ -22,8 +22,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var applyingLayout = false
 
     private let listWidth: CGFloat = 360
-    private let minExpandedWidth: CGFloat = 640
-    private let minHeight: CGFloat = 360
+    /// Floor at the default panel size — users can only grow from here.
+    private var minExpandedWidth: CGFloat { Preferences.sessionsPanelDefaultWidth }
+    private var minHeight: CGFloat { Preferences.sessionsPanelDefaultHeight }
     private let maxShortcutSlots = SessionStore.maxSessions
 
     var isVisible: Bool { panel.isVisible }
@@ -87,8 +88,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onArchive: { [weak self] id in
                 self?.archive(id)
             },
-            onSend: { [weak self] id, text in
-                self?.onFollowUp?(id, text)
+            onSend: { [weak self] id, text, submit in
+                self?.onFollowUp?(id, text, submit)
             },
             onStop: { [weak self] id in
                 self?.onStop?(id)
@@ -373,7 +374,7 @@ private struct SessionsSidePanelView: View {
     var onClose: () -> Void
     var onNew: () -> Void
     var onArchive: (UUID) -> Void
-    var onSend: (UUID, String) -> Void
+    var onSend: (UUID, String, FollowUpSubmit) -> Void
     var onStop: (UUID) -> Void
 
     private let listColumnWidth: CGFloat = 344
@@ -391,7 +392,7 @@ private struct SessionsSidePanelView: View {
             if let id = selection.selectedID, let session = store.session(id: id) {
                 SessionChatView(
                     session: session,
-                    onSend: { text in onSend(id, text) },
+                    onSend: { text, submit in onSend(id, text, submit) },
                     onStop: { onStop(id) },
                     onClose: onCloseChat,
                     compact: true

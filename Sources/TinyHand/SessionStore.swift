@@ -33,6 +33,24 @@ struct AgentMessage: Identifiable, Equatable, Codable {
     }
 }
 
+/// Follow-up waiting for the current turn to finish (Enter while working).
+struct QueuedFollowUp: Identifiable, Equatable {
+    let id: UUID
+    var text: String
+
+    init(id: UUID = UUID(), text: String) {
+        self.id = id
+        self.text = text
+    }
+}
+
+enum FollowUpSubmit: Equatable {
+    /// Wait until the current turn finishes, then run (Enter while working).
+    case queue
+    /// Interrupt and send now / steer (⌘↩ or send button while working).
+    case sendNow
+}
+
 final class AgentSession: ObservableObject, Identifiable {
     let id: UUID
     let createdAt: Date
@@ -46,6 +64,8 @@ final class AgentSession: ObservableObject, Identifiable {
     @Published var preview: String
     @Published var chatId: String?
     @Published var errorMessage: String?
+    /// Pending follow-ups; not persisted across relaunch.
+    @Published var queuedFollowUps: [QueuedFollowUp] = []
 
     init(
         id: UUID = UUID(),

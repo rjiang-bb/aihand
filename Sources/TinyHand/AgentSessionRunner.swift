@@ -11,7 +11,8 @@ final class AgentSessionRunner {
     /// Claude stream-json re-emits full assistant snapshots that include prior `tool_use` blocks.
     private var seenToolUseIDs: Set<String> = []
     private weak var session: AgentSession?
-    private var onFinished: (() -> Void)?
+    /// Fired on the main queue after a natural process exit (not interrupt/stop).
+    var onFinished: (() -> Void)?
 
     init(cli: AgentCLI = AgentCLIFactory.make()) {
         self.cli = cli
@@ -609,7 +610,7 @@ final class AgentSessionManager {
         )
         store.prepend(session)
         let runner = AgentSessionRunner(cli: AgentCLIFactory.make(cliKind))
-        runners[session.id] = runner
+        wireRunner(runner, sessionID: session.id)
         runner.start(session: session, workspace: workspace, prompt: prompt, imagePath: screenshotPath)
         return session
     }
@@ -630,7 +631,7 @@ final class AgentSessionManager {
         return session
     }
 
-    func followUp(sessionID: UUID, text: String) {
+    func followUp(sessionID: UUID, text: String, submit: FollowUpSubmit = .sendNow) {
         guard let session = store.session(id: sessionID) else { return }
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return }
@@ -638,8 +639,17 @@ final class AgentSessionManager {
         guard !trimmed.isEmpty else { return }
 
         let runner = runners[sessionID] ?? AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
-        runners[sessionID] = runner
-        runner.interruptQuietly()
+        wireRunner(runner, sessionID: sessionID)
+
+        let busy = session.status == .working && runner.isRunning
+        if busy, submit == .queue {
+            session.queuedFollowUps.append(QueuedFollowUp(text: trimmed))
+            return
+        }
+
+        if busy, submit == .sendNow {
+            runner.interruptQuietly()
+        }
 
         // First message in a blank "New session" starts a fresh agent turn.
         let needsStart = (session.chatId == nil || session.chatId?.isEmpty == true) && session.messages.isEmpty
@@ -661,11 +671,31 @@ final class AgentSessionManager {
         runner.followUp(session: session, workspace: workspace, prompt: trimmed)
     }
 
+    func removeQueuedFollowUp(sessionID: UUID, followUpID: UUID) {
+        guard let session = store.session(id: sessionID) else { return }
+        session.queuedFollowUps.removeAll { $0.id == followUpID }
+    }
+
     func stop(sessionID: UUID) {
         runners[sessionID]?.stop()
     }
 
     func runner(for sessionID: UUID) -> AgentSessionRunner? {
         runners[sessionID]
+    }
+
+    private func wireRunner(_ runner: AgentSessionRunner, sessionID: UUID) {
+        runners[sessionID] = runner
+        runner.onFinished = { [weak self] in
+            self?.drainQueue(sessionID: sessionID)
+        }
+    }
+
+    private func drainQueue(sessionID: UUID) {
+        guard let session = store.session(id: sessionID) else { return }
+        guard session.status != .working else { return }
+        guard !session.queuedFollowUps.isEmpty else { return }
+        let next = session.queuedFollowUps.removeFirst()
+        followUp(sessionID: sessionID, text: next.text, submit: .sendNow)
     }
 }

@@ -78,8 +78,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func wireAgentFlow() {
-        sessionsPanel.onFollowUp = { [weak self] id, text in
-            self?.sessionManager.followUp(sessionID: id, text: text)
+        sessionsPanel.onFollowUp = { [weak self] id, text, submit in
+            self?.sessionManager.followUp(sessionID: id, text: text, submit: submit)
         }
         sessionsPanel.onStop = { [weak self] id in
             self?.sessionManager.stop(sessionID: id)
