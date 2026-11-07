@@ -1057,7 +1057,6 @@ private struct SessionCardView: View {
                             .foregroundStyle(fg.opacity(session.preview.isEmpty ? 0.45 : 0.82))
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
-                            .padding(.trailing, hovering ? 36 : 0)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -1067,21 +1066,27 @@ private struct SessionCardView: View {
             }
             .buttonStyle(.plain)
 
+            // Float over the card — do not pad/reflow text when it appears.
             if hovering {
                 Button(action: onArchive) {
                     Image(systemName: "archivebox")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(fg)
                         .frame(width: 28, height: 28)
-                        .background(
+                        .background {
+                            let dark = colorScheme == .dark
                             Circle()
-                                .fill(fg.opacity(0.1))
-                        )
+                                .fill(dark ? Color.black : Color.white)
+                                .overlay(
+                                    Circle().fill(Color.accentColor.opacity(isSelected ? (dark ? 0.22 : 0.12) : 0))
+                                )
+                                .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+                        }
                 }
                 .buttonStyle(.plain)
                 .help("Archive session")
                 .padding(.trailing, 10)
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                .transition(.opacity)
             }
         }
         .onHover { hovering = $0 }
