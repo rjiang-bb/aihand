@@ -515,7 +515,7 @@ private struct AgentPage: View {
                     .id(Preferences.agentCLI.rawValue)
             }
             Card(title: "Workspace") {
-                WorkspaceFoldersBlock()
+                WorkspaceFoldersBlock(model: model)
             }
         }
     }
@@ -826,8 +826,10 @@ private struct AgentFavoriteRow: View {
 }
 
 private struct WorkspaceFoldersBlock: View {
-    private var folders: [String] { Preferences.agentWorkspaces }
-    private var current: String { Preferences.agentWorkspace }
+    @ObservedObject var model: SettingsModel
+    /// Local copies so add/remove/select refresh this list (Preferences alone isn’t observed).
+    @State private var folders: [String] = Preferences.agentWorkspaces
+    @State private var current: String = Preferences.agentWorkspace
 
     var body: some View {
         VStack(spacing: 0) {
@@ -840,8 +842,14 @@ private struct WorkspaceFoldersBlock: View {
                     WorkspaceFolderRow(
                         path: path,
                         isCurrent: path == current,
-                        onSelect: { Preferences.selectAgentWorkspace(path) },
-                        onRemove: { Preferences.removeAgentWorkspace(path) }
+                        onSelect: {
+                            Preferences.selectAgentWorkspace(path)
+                            reload()
+                        },
+                        onRemove: {
+                            Preferences.removeAgentWorkspace(path)
+                            reload()
+                        }
                     )
                     if index < folders.count - 1 {
                         Rectangle()
@@ -859,6 +867,16 @@ private struct WorkspaceFoldersBlock: View {
                 }
             }
         }
+        .onAppear { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            reload()
+        }
+    }
+
+    private func reload() {
+        folders = Preferences.agentWorkspaces
+        current = Preferences.agentWorkspace
+        model.refresh()
     }
 
     private func addFolder() {
@@ -875,6 +893,7 @@ private struct WorkspaceFoldersBlock: View {
         for url in panel.urls {
             Preferences.addAgentWorkspace(url.path)
         }
+        reload()
     }
 }
 
