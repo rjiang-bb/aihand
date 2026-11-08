@@ -1,6 +1,8 @@
 #!/bin/bash
 
 APP_NAME="TinyHand"
+# Finder / menu display name. Binary and .app folder stay APP_NAME.
+DISPLAY_NAME="AiHand"
 BUNDLE_ID="com.kamranahmed.tinyhand"
 REPO="nilbuild/tinyhand"
 FEED_URL="https://github.com/$REPO/releases/latest/download/appcast.xml"
@@ -50,9 +52,9 @@ make_bundle() {
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>$APP_NAME</string>
+    <string>$DISPLAY_NAME</string>
     <key>CFBundleDisplayName</key>
-    <string>$APP_NAME</string>
+    <string>$DISPLAY_NAME</string>
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key>

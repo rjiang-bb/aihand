@@ -83,6 +83,15 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// Stable UUID for the built-in Default favorite for this CLI.
+    var defaultFavoriteID: UUID {
+        switch self {
+        case .cursor: return UUID(uuidString: "00000000-0000-4000-8000-54494E590001")!
+        case .claude: return UUID(uuidString: "00000000-0000-4000-8000-54494E590002")!
+        case .codex: return UUID(uuidString: "00000000-0000-4000-8000-54494E590003")!
+        }
+    }
+
     var loginHint: String {
         switch self {
         case .cursor: return "`agent login`"
@@ -201,7 +210,198 @@ enum Preferences {
 
     static var agentCLI: AgentCLIKind {
         get { defaults.string(forKey: "agentCLI").flatMap(AgentCLIKind.init(rawValue:)) ?? .cursor }
-        set { set(newValue.rawValue, "agentCLI") }
+        set {
+            defaults.set(newValue.rawValue, forKey: "agentCLI")
+            ensureAgentFavorites()
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Named model (+ effort) presets, each tagged with a `cliKind`. UI shows only the active CLI’s set.
+    static var agentFavorites: [AgentFavorite] {
+        get {
+            guard let data = defaults.data(forKey: "agentFavorites") else { return [] }
+            return (try? JSONDecoder().decode([AgentFavorite].self, from: data)) ?? []
+        }
+        set {
+            let data = (try? JSONEncoder().encode(newValue)) ?? Data()
+            set(data, "agentFavorites")
+        }
+    }
+
+    /// Per-CLI current favorite ids (`cliKind.rawValue` → uuid string).
+    private static var currentFavoriteIDsByCLI: [String: String] {
+        get { defaults.dictionary(forKey: "currentAgentFavoriteIDs") as? [String: String] ?? [:] }
+        set { defaults.set(newValue, forKey: "currentAgentFavoriteIDs") }
+    }
+
+    static func currentAgentFavoriteID(for kind: AgentCLIKind) -> UUID? {
+        // Migrate legacy single-id key once.
+        if let legacy = defaults.string(forKey: "currentAgentFavoriteID"),
+           let uuid = UUID(uuidString: legacy) {
+            var map = currentFavoriteIDsByCLI
+            if map[kind.rawValue] == nil {
+                map[kind.rawValue] = uuid.uuidString
+                currentFavoriteIDsByCLI = map
+            }
+            defaults.removeObject(forKey: "currentAgentFavoriteID")
+        }
+        guard let raw = currentFavoriteIDsByCLI[kind.rawValue] else { return nil }
+        return UUID(uuidString: raw)
+    }
+
+    static func setCurrentAgentFavoriteID(_ id: UUID, for kind: AgentCLIKind) {
+        var map = currentFavoriteIDsByCLI
+        map[kind.rawValue] = id.uuidString
+        currentFavoriteIDsByCLI = map
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    /// Favorite used for new sessions on the current CLI (always non-nil after ensure).
+    static var currentAgentFavorite: AgentFavorite {
+        ensureAgentFavorites()
+        let kind = agentCLI
+        if let id = currentAgentFavoriteID(for: kind),
+           let fav = agentFavorites.first(where: { $0.id == id && $0.cliKind == kind }) {
+            return fav
+        }
+        return favorites(for: kind).first { $0.isBuiltIn }
+            ?? AgentFavorite.builtInDefault(for: kind)
+    }
+
+    static func favorites(for kind: AgentCLIKind) -> [AgentFavorite] {
+        ensureAgentFavorites()
+        return agentFavorites.filter { $0.cliKind == kind }
+    }
+
+    /// Guarantee each CLI has a Default favorite and each CLI’s current selection is valid.
+    static func ensureAgentFavorites() {
+        var list = agentFavorites
+        var mutated = false
+        for kind in AgentCLIKind.allCases {
+            let builtin = AgentFavorite.builtInDefault(for: kind)
+            if let idx = list.firstIndex(where: { $0.cliKind == kind && ($0.isBuiltIn || $0.id == builtin.id) }) {
+                var fav = list[idx]
+                var fix = false
+                if fav.id != builtin.id { fav.id = builtin.id; fix = true }
+                if !fav.isBuiltIn { fav.isBuiltIn = true; fix = true }
+                if !fav.modelId.isEmpty { fav.modelId = ""; fix = true }
+                if fav.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    fav.title = "Default"; fix = true
+                }
+                if fav.modelTitle.isEmpty { fav.modelTitle = kind.defaultModelTitle; fix = true }
+                if fix {
+                    list[idx] = fav
+                    mutated = true
+                }
+            } else {
+                list.insert(builtin, at: 0)
+                mutated = true
+            }
+        }
+        if mutated {
+            defaults.set((try? JSONEncoder().encode(list)) ?? Data(), forKey: "agentFavorites")
+        }
+
+        var map = currentFavoriteIDsByCLI
+        // One-time migrate legacy global current id onto the active CLI.
+        if let legacy = defaults.string(forKey: "currentAgentFavoriteID") {
+            if map[agentCLI.rawValue] == nil {
+                map[agentCLI.rawValue] = legacy
+            }
+            defaults.removeObject(forKey: "currentAgentFavoriteID")
+            mutated = true
+        }
+        for kind in AgentCLIKind.allCases {
+            let forCLI = list.filter { $0.cliKind == kind }
+            let raw = map[kind.rawValue]
+            let ok = raw.flatMap(UUID.init(uuidString:)).map { id in forCLI.contains(where: { $0.id == id }) } ?? false
+            if !ok {
+                let fallback = forCLI.first(where: { $0.isBuiltIn })?.id ?? kind.defaultFavoriteID
+                map[kind.rawValue] = fallback.uuidString
+                mutated = true
+            }
+        }
+        if map != currentFavoriteIDsByCLI {
+            currentFavoriteIDsByCLI = map
+            mutated = true
+        }
+        if mutated {
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    static func addAgentFavorite(_ favorite: AgentFavorite) {
+        ensureAgentFavorites()
+        var list = agentFavorites
+        list.append(favorite)
+        agentFavorites = list
+        setCurrentAgentFavoriteID(favorite.id, for: favorite.cliKind)
+    }
+
+    @discardableResult
+    static func removeAgentFavorite(_ id: UUID) -> Bool {
+        ensureAgentFavorites()
+        var list = agentFavorites
+        guard let fav = list.first(where: { $0.id == id }) else { return false }
+        let others = list.filter { $0.cliKind == fav.cliKind && $0.id != id }
+        // Always keep at least one favorite for the CLI (the built-in Default).
+        if others.isEmpty { return false }
+        if fav.isBuiltIn { return false }
+        list.removeAll { $0.id == id }
+        defaults.set((try? JSONEncoder().encode(list)) ?? Data(), forKey: "agentFavorites")
+        if currentAgentFavoriteID(for: fav.cliKind) == id {
+            let fallback = others.first(where: { $0.isBuiltIn })?.id ?? others[0].id
+            setCurrentAgentFavoriteID(fallback, for: fav.cliKind)
+        } else {
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+        return true
+    }
+
+    static func selectAgentFavorite(_ id: UUID) {
+        ensureAgentFavorites()
+        guard let fav = agentFavorites.first(where: { $0.id == id }),
+              fav.cliKind == agentCLI else { return }
+        setCurrentAgentFavoriteID(id, for: fav.cliKind)
+    }
+
+    /// Pick the favorite a new session should use — prefer the last session’s when still available.
+    static func favoriteForNewSession(cli: AgentCLIKind, lastSession: AgentSession?) -> AgentFavorite {
+        ensureAgentFavorites()
+        let available = favorites(for: cli)
+
+        if let last = lastSession, last.cliKind == cli {
+            if let id = last.favoriteId,
+               let match = available.first(where: { $0.id == id }) {
+                setCurrentAgentFavoriteID(match.id, for: cli)
+                return match
+            }
+            let lastModel = last.modelId ?? ""
+            let lastEffort = last.effort
+            if let match = available.first(where: {
+                $0.modelId == lastModel && ($0.effort ?? nil) == lastEffort
+            }) {
+                setCurrentAgentFavoriteID(match.id, for: cli)
+                return match
+            }
+        }
+
+        let currentID = currentAgentFavoriteID(for: cli)
+        let current = available.first(where: { $0.id == currentID })
+            ?? available.first(where: { $0.isBuiltIn })
+            ?? AgentFavorite.builtInDefault(for: cli)
+        setCurrentAgentFavoriteID(current.id, for: cli)
+        return current
+    }
+
+    static func updateAgentFavoriteTitle(_ id: UUID, title: String) {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var list = agentFavorites
+        guard let i = list.firstIndex(where: { $0.id == id }) else { return }
+        list[i].title = trimmed
+        agentFavorites = list
     }
 
     /// Folders available for agent sessions. One of them is the current working folder (`agentWorkspace`).
@@ -392,7 +592,8 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces", "screenshotsFolder",
+                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
+                    "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)
         }

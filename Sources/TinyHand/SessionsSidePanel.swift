@@ -634,7 +634,7 @@ private struct SessionsSidePanelView: View {
 
     private var floatingHeader: some View {
         HStack(alignment: .center) {
-            Text("Tinyhand sessions")
+            Text("AI sessions")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)

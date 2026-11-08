@@ -45,7 +45,7 @@ jobs:
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           NOTES="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
           if [ -z "$NOTES" ]; then
-            NOTES="Download the DMG, open it and drag TinyHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
+            NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
           fi
           {
             echo 'RELEASE_NOTES<<RELEASE_NOTES_EOF'

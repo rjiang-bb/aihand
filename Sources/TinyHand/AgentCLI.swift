@@ -4,8 +4,21 @@ protocol AgentCLI {
     var kind: AgentCLIKind { get }
     var displayName: String { get }
     func resolveExecutable() -> String?
-    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String]
-    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String]
+    func startArguments(
+        workspace: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String]
+    func followUpArguments(
+        workspace: String,
+        chatId: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String]
 }
 
 extension AgentCLI {
@@ -78,7 +91,13 @@ struct CursorAgentCLI: AgentCLI {
         AgentPathLookup.resolve("agent")
     }
 
-    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
+    func startArguments(
+        workspace: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String] {
         var args = [
             "-p",
             "--force",
@@ -87,6 +106,7 @@ struct CursorAgentCLI: AgentCLI {
             "--output-format", "stream-json",
             "--stream-partial-output"
         ]
+        appendCursorModel(&args, model: model, effort: effort)
         if let imagePath {
             args += ["--image", imagePath]
         }
@@ -94,7 +114,14 @@ struct CursorAgentCLI: AgentCLI {
         return args
     }
 
-    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
+    func followUpArguments(
+        workspace: String,
+        chatId: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String] {
         var args = [
             "-p",
             "--force",
@@ -104,11 +131,22 @@ struct CursorAgentCLI: AgentCLI {
             "--output-format", "stream-json",
             "--stream-partial-output"
         ]
+        appendCursorModel(&args, model: model, effort: effort)
         if let imagePath {
             args += ["--image", imagePath]
         }
         args.append(prompt)
         return args
+    }
+
+    private func appendCursorModel(_ args: inout [String], model: String?, effort: String?) {
+        guard let model, !model.isEmpty, model != "auto" else { return }
+        // Prefer a bare discovered id; if a separate effort was saved, use bracket override.
+        if let effort, !effort.isEmpty, !model.contains("[") {
+            args += ["--model", "\(model)[effort=\(effort)]"]
+        } else {
+            args += ["--model", model]
+        }
     }
 }
 
@@ -122,7 +160,13 @@ struct ClaudeAgentCLI: AgentCLI {
         AgentPathLookup.resolve("claude")
     }
 
-    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
+    func startArguments(
+        workspace: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String] {
         // Workspace is the process cwd (set by AgentSessionRunner). Claude has no --workspace
         // flag; --dangerously-skip-permissions matches Cursor `--force` for unattended runs.
         // --verbose is required for useful stream-json assistant/tool events.
@@ -132,12 +176,25 @@ struct ClaudeAgentCLI: AgentCLI {
             "--output-format", "stream-json",
             "--dangerously-skip-permissions"
         ]
+        if let model, !model.isEmpty {
+            args += ["--model", model]
+        }
+        if let effort, !effort.isEmpty {
+            args += ["--effort", effort]
+        }
         // No native --image; include the path in the prompt text.
         args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         return args
     }
 
-    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
+    func followUpArguments(
+        workspace: String,
+        chatId: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String] {
         var args = [
             "-p",
             "--verbose",
@@ -145,6 +202,12 @@ struct ClaudeAgentCLI: AgentCLI {
             "--dangerously-skip-permissions",
             "--resume", chatId
         ]
+        if let model, !model.isEmpty {
+            args += ["--model", model]
+        }
+        if let effort, !effort.isEmpty {
+            args += ["--effort", effort]
+        }
         if let imagePath {
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         } else {
@@ -164,7 +227,13 @@ struct CodexAgentCLI: AgentCLI {
         AgentPathLookup.resolve("codex")
     }
 
-    func startArguments(workspace: String, prompt: String, imagePath: String?) -> [String] {
+    func startArguments(
+        workspace: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String] {
         // `codex exec` is the non-interactive entry point. workspace-write matches Cursor's
         // auto-approve editing intent without full --yolo. --skip-git-repo-check allows
         // arbitrary folders chosen in Settings.
@@ -175,6 +244,12 @@ struct CodexAgentCLI: AgentCLI {
             "--skip-git-repo-check",
             "-C", workspace
         ]
+        if let model, !model.isEmpty {
+            args += ["-m", model]
+        }
+        if let effort, !effort.isEmpty {
+            args += ["-c", "model_reasoning_effort=\(effort)"]
+        }
         if let imagePath {
             args += ["--image", imagePath]
         }
@@ -183,15 +258,28 @@ struct CodexAgentCLI: AgentCLI {
         return args
     }
 
-    func followUpArguments(workspace: String, chatId: String, prompt: String, imagePath: String?) -> [String] {
+    func followUpArguments(
+        workspace: String,
+        chatId: String,
+        prompt: String,
+        imagePath: String?,
+        model: String?,
+        effort: String?
+    ) -> [String] {
         var args = [
             "exec",
             "--json",
             "--sandbox", "workspace-write",
             "--skip-git-repo-check",
-            "-C", workspace,
-            "resume", chatId
+            "-C", workspace
         ]
+        if let model, !model.isEmpty {
+            args += ["-m", model]
+        }
+        if let effort, !effort.isEmpty {
+            args += ["-c", "model_reasoning_effort=\(effort)"]
+        }
+        args += ["resume", chatId]
         if let imagePath {
             args += ["--image", imagePath]
         }

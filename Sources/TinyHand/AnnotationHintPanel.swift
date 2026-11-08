@@ -49,6 +49,7 @@ final class AnnotationHintPanel {
         let fg = dark ? NSColor.white : NSColor.black
         let muted = fg.withAlphaComponent(0.55)
         let parts: [(String, String)] = [
+            ("⌘Z", "undo"),
             ("Enter", "comment"),
             ("⌘↩", "send to agent"),
             ("Esc", "exit"),
@@ -75,11 +76,7 @@ final class AnnotationHintPanel {
         row.layoutSubtreeIfNeeded()
         p.setContentSize(row.fittingSize)
 
-        let visible = screen.visibleFrame
-        p.setFrameOrigin(CGPoint(
-            x: visible.midX - p.frame.width / 2,
-            y: visible.minY + 28
-        ))
+        place(p, on: screen)
         p.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.2
@@ -101,10 +98,15 @@ final class AnnotationHintPanel {
 
     func reposition(on screen: NSScreen) {
         guard let p = panel else { return }
+        place(p, on: screen)
+    }
+
+    /// Sit above the hand toolbar and the ink/color tray that opens over it.
+    private func place(_ p: NSPanel, on screen: NSScreen) {
         let visible = screen.visibleFrame
         p.setFrameOrigin(CGPoint(
             x: visible.midX - p.frame.width / 2,
-            y: visible.minY + 28
+            y: visible.minY + 128
         ))
     }
 }

@@ -1,37 +1,54 @@
-<img src="./.github/logo.png" width="80" />
+<p align="center">
+  <img src="./.github/logo.png" width="72" alt="AiHand" />
+</p>
 
-# TinyHand
+# AiHand
 
 [![Latest release](https://img.shields.io/github/v/release/nilbuild/tinyhand?display_name=tag&sort=semver&cacheSeconds=3600)](https://github.com/nilbuild/tinyhand/releases/latest)
 [![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](https://tinyhand.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-A tiny hand on a stick that points at things on your Mac screen.
+A tiny hand for demos — and a draw-to-agent loop for Cursor, Claude Code, and Codex.
 
-<img src="./.github/banner.jpg" alt="TinyHand: a tiny hand for your Mac" />
+Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 
-[![Download for macOS](https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/nilbuild/tinyhand/releases/latest/download/TinyHand.dmg)
-[![Visit website](https://img.shields.io/badge/Visit_website-ffffff?style=for-the-badge&logo=safari&logoColor=black)](https://tinyhand.app)
+<img src="./.github/readme-hero.jpg" alt="AiHand: a tiny (AI) hand for your Mac" />
 
-macOS 13 or later, Apple Silicon and Intel.
+<p align="center">
+  <a href="https://github.com/nilbuild/tinyhand/releases/latest/download/TinyHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
+  <a href="https://tinyhand.app"><img src="https://img.shields.io/badge/Visit_website-ffffff?style=for-the-badge&logo=safari&logoColor=black" alt="Visit website" /></a>
+</p>
 
-## Install
+## What it does
 
-Open `TinyHand.dmg`, drag TinyHand to Applications and allow **Accessibility** when asked. It needs that to turn your clicks into taps. TinyHand updates itself.
+- **Point & tap** — a toy hand follows the cursor; clicks stay visual, not real
+- **Draw** — hold and drag; lines fade; ink can match the hand
+- **Send to an agent** — annotate the screen, then hand off to Cursor Agent, Claude Code, or Codex
+- **AI sessions** — chat, follow-ups, skills (`/`), and per-folder working directories
 
-## Use
+<p align="center"><strong>Draw → ask the agent</strong></p>
+
+<img src="./.github/readme-annotate.jpg" alt="Drawing with the hand pointer and the Ask the agent prompt" />
+
+<p align="center"><strong>AI sessions</strong></p>
+
+<img src="./.github/readme-sessions.jpg" alt="AI sessions panel with chat open" />
+
+<img src="./.github/readme-hands.png" alt="A selection of AiHand pointers" />
+
+## Shortcuts
 
 | | |
 |---|---|
-| Click the menu bar icon, or **⌃⌥H** | Turn the pointer on or off |
-| Right-click the menu bar icon | Menu and Settings |
-| Click | Tap (nothing underneath gets clicked) |
-| Hold and drag | Draw on the screen |
-| **⌃⌥X** | Clear the drawing |
-| **Esc** | Clear everything and turn the pointer off |
+| **⌃⌥H** | Pointer on / off |
+| Click / drag | Tap / draw |
+| **⌃⌥X** | Clear drawing |
+| **⌘⇧G** | AI sessions panel |
+| **Esc** | Clear and turn off |
 
-While the pointer is on, a small toolbar at the bottom of the screen lets you pick one of
-36 hands or a laser dot, mute the tap sound, or exit.
+## Install
+
+macOS 13+, Apple silicon and Intel. Open the DMG, drag to Applications, allow **Accessibility** (and Screen Recording for captures). Updates itself.
 
 ## License
 

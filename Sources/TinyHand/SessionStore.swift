@@ -60,6 +60,13 @@ final class AgentSession: ObservableObject, Identifiable {
     /// Working directory this session belongs to.
     let workspace: String
 
+    /// Favorite used for this session (updated when the composer picker changes).
+    @Published var favoriteId: UUID?
+    /// CLI `--model` id when a favorite (or explicit pick) was set; nil = CLI default.
+    @Published var modelId: String?
+    /// Separate effort level when the CLI supports it.
+    @Published var effort: String?
+
     @Published var title: String
     @Published var status: AgentSessionStatus
     @Published var messages: [AgentMessage]
@@ -69,6 +76,26 @@ final class AgentSession: ObservableObject, Identifiable {
     /// Pending follow-ups; not persisted across relaunch.
     @Published var queuedFollowUps: [QueuedFollowUp] = []
 
+    /// Apply a favorite to this session and mark it Current for this CLI.
+    func applyFavorite(_ fav: AgentFavorite) {
+        guard fav.cliKind == cliKind else { return }
+        favoriteId = fav.id
+        modelId = fav.usesCLIDefaultModel ? nil : fav.modelId
+        effort = fav.effort.flatMap { $0.isEmpty ? nil : $0 }
+        Preferences.setCurrentAgentFavoriteID(fav.id, for: cliKind)
+    }
+
+    /// Cycle to the next favorite for this session’s CLI (wraps).
+    @discardableResult
+    func cycleFavorite() -> AgentFavorite? {
+        let favs = Preferences.favorites(for: cliKind)
+        guard !favs.isEmpty else { return nil }
+        let idx = favs.firstIndex(where: { $0.id == favoriteId }) ?? -1
+        let next = favs[(idx + 1) % favs.count]
+        applyFavorite(next)
+        return next
+    }
+
     init(
         id: UUID = UUID(),
         createdAt: Date = Date(),
@@ -77,6 +104,9 @@ final class AgentSession: ObservableObject, Identifiable {
         screenshotPath: String?,
         workspace: String = Preferences.agentWorkspace,
         cliKind: AgentCLIKind = Preferences.agentCLI,
+        favoriteId: UUID? = nil,
+        modelId: String? = nil,
+        effort: String? = nil,
         status: AgentSessionStatus = .working,
         blank: Bool = false
     ) {
@@ -87,6 +117,9 @@ final class AgentSession: ObservableObject, Identifiable {
         self.screenshotPath = screenshotPath
         self.workspace = SessionStore.normalizedWorkspace(workspace)
         self.cliKind = cliKind
+        self.favoriteId = favoriteId
+        self.modelId = modelId.flatMap { $0.isEmpty ? nil : $0 }
+        self.effort = effort.flatMap { $0.isEmpty ? nil : $0 }
         self.status = status
         if blank {
             self.preview = ""
@@ -114,6 +147,9 @@ final class AgentSession: ObservableObject, Identifiable {
         self.workspace = SessionStore.normalizedWorkspace(
             migratedWorkspace.isEmpty ? Preferences.agentWorkspace : migratedWorkspace
         )
+        self.favoriteId = snapshot.favoriteId
+        self.modelId = snapshot.modelId.flatMap { $0.isEmpty ? nil : $0 }
+        self.effort = snapshot.effort.flatMap { $0.isEmpty ? nil : $0 }
         self.title = snapshot.title
         // In-flight processes don't survive relaunch.
         if snapshot.status == .working {
@@ -147,7 +183,10 @@ final class AgentSession: ObservableObject, Identifiable {
             chatId: chatId,
             errorMessage: errorMessage,
             cliKind: cliKind,
-            workspace: workspace
+            workspace: workspace,
+            favoriteId: favoriteId,
+            modelId: modelId,
+            effort: effort
         )
     }
 }
@@ -174,6 +213,9 @@ final class SessionStore: ObservableObject {
         var cliKind: AgentCLIKind?
         /// Optional for backwards compatibility; missing values migrate to the current workspace.
         var workspace: String?
+        var favoriteId: UUID?
+        var modelId: String?
+        var effort: String?
     }
 
     private struct StoreFile: Codable {

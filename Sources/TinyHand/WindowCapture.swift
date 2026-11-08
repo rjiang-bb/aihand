@@ -21,7 +21,7 @@ enum WindowCapture {
             case .noScreen: return "Couldn’t find the screen that contains the drawing."
             case .captureFailed: return "Screen capture failed."
             case .permissionDenied:
-                return "Allow Screen Recording for TinyHand in System Settings, then try again."
+                return "Allow Screen Recording for AiHand in System Settings, then try again."
             case .writeFailed(let msg): return "Couldn’t save screenshot: \(msg)"
             }
         }

@@ -5,6 +5,7 @@ import WebKit
 /// Cursor-style agent transcript rendered in a WKWebView (markdown, tool cards, code).
 struct ChatTranscriptView: NSViewRepresentable {
     let messages: [AgentMessage]
+    var sessionID: UUID
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -12,6 +13,9 @@ struct ChatTranscriptView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        let uc = config.userContentController
+        uc.add(context.coordinator, name: "openImage")
+        uc.add(context.coordinator, name: "imageMenu")
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
@@ -21,18 +25,27 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
 #endif
         context.coordinator.webView = webView
+        context.coordinator.pendingSessionID = sessionID
         webView.loadHTMLString(Self.shellHTML, baseURL: URL(fileURLWithPath: "/"))
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        context.coordinator.push(messages: messages)
+        context.coordinator.push(messages: messages, sessionID: sessionID)
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        let uc = webView.configuration.userContentController
+        uc.removeScriptMessageHandler(forName: "openImage")
+        uc.removeScriptMessageHandler(forName: "imageMenu")
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         private var ready = false
         private var pendingMessages: [AgentMessage] = []
+        var pendingSessionID: UUID?
+        private var boundSessionID: UUID?
         private var lastPayload: String = ""
         private var imageDataURLs: [String: String] = [:]
         private var imagesSentToPage: Set<String> = []
@@ -41,12 +54,43 @@ struct ChatTranscriptView: NSViewRepresentable {
             ready = true
             imagesSentToPage.removeAll()
             lastPayload = ""
-            push(messages: pendingMessages)
+            push(messages: pendingMessages, sessionID: pendingSessionID ?? boundSessionID, forceScroll: true)
         }
 
-        func push(messages: [AgentMessage]) {
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: Any],
+                  let key = body["key"] as? String,
+                  !key.isEmpty,
+                  FileManager.default.fileExists(atPath: key) else { return }
+
+            switch message.name {
+            case "openImage":
+                ChatImageActions.open(path: key)
+            case "imageMenu":
+                guard let webView else { return }
+                let clientX = CGFloat((body["x"] as? Double) ?? (body["x"] as? Int).map(Double.init) ?? 0)
+                let clientY = CGFloat((body["y"] as? Double) ?? (body["y"] as? Int).map(Double.init) ?? 0)
+                // JS client coords are top-left; AppKit view coords are bottom-left.
+                let point = NSPoint(x: clientX, y: webView.bounds.height - clientY)
+                ChatImageActions.showMenu(path: key, at: point, in: webView)
+            default:
+                break
+            }
+        }
+
+        func push(messages: [AgentMessage], sessionID: UUID? = nil, forceScroll: Bool = false) {
             pendingMessages = messages
+            if let sessionID {
+                pendingSessionID = sessionID
+            }
             guard ready, let webView else { return }
+
+            let switched = sessionID != nil && sessionID != boundSessionID
+            if let sessionID, switched {
+                boundSessionID = sessionID
+                lastPayload = ""
+            }
+            let shouldForceScroll = forceScroll || switched
 
             // Keep heavy screenshot payloads out of the per-token JS update:
             // send a stable key and let the page cache data-URLs separately.
@@ -78,12 +122,15 @@ struct ChatTranscriptView: NSViewRepresentable {
             if json == lastPayload && imageLoads.isEmpty { return }
             lastPayload = json
             var script = ""
+            if shouldForceScroll {
+                script += "window.__expandedGroups = {};"
+            }
             if !imageLoads.isEmpty,
                let imgData = try? JSONSerialization.data(withJSONObject: imageLoads),
                let imgJSON = String(data: imgData, encoding: .utf8) {
                 script += "window.cacheImages(\(imgJSON));"
             }
-            script += "window.renderMessages(\(json));"
+            script += "window.renderMessages(\(json), \(shouldForceScroll ? "true" : "false"));"
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
@@ -239,6 +286,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-radius: 8px;
         margin-bottom: 8px;
         object-fit: contain;
+        cursor: zoom-in;
       }
       .md > *:first-child { margin-top: 0; }
       .md > *:last-child { margin-bottom: 0; }
@@ -478,10 +526,11 @@ struct ChatTranscriptView: NSViewRepresentable {
         if (item && item.key && item.url) window.__images[item.key] = item.url;
       });
     };
-    window.renderMessages = function(messages) {
+    window.renderMessages = function(messages, forceScroll) {
       const root = document.getElementById('root');
       if (!messages || !messages.length) {
         root.innerHTML = '<div class="empty">Send a message to start.</div>';
+        if (forceScroll) window.scrollTo(0, 0);
         return;
       }
 
@@ -511,7 +560,8 @@ struct ChatTranscriptView: NSViewRepresentable {
         let body = '';
         const image = m.image || (m.imageKey ? window.__images[m.imageKey] : null);
         if (image) {
-          body += '<img class="shot" src="' + image + '" alt="Screenshot">';
+          const keyAttr = m.imageKey ? ' data-key="' + esc(m.imageKey) + '"' : '';
+          body += '<img class="shot" src="' + image + '"' + keyAttr + ' alt="Screenshot" title="Click to open · Right-click to copy">';
         }
         if (kind === 'assistant' || kind === 'user') {
           body += '<div class="md">' + markdownToHTML(m.text || '') + '</div>';
@@ -534,8 +584,35 @@ struct ChatTranscriptView: NSViewRepresentable {
           if (id) window.__expandedGroups[id] = next;
         });
       });
-      if (nearBottom) {
-        window.scrollTo(0, document.body.scrollHeight);
+      root.querySelectorAll('img.shot[data-key]').forEach(function(img) {
+        img.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var key = img.getAttribute('data-key');
+          if (key && window.webkit && window.webkit.messageHandlers.openImage) {
+            window.webkit.messageHandlers.openImage.postMessage({ key: key });
+          }
+        });
+        img.addEventListener('contextmenu', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var key = img.getAttribute('data-key');
+          if (key && window.webkit && window.webkit.messageHandlers.imageMenu) {
+            window.webkit.messageHandlers.imageMenu.postMessage({
+              key: key,
+              x: e.clientX,
+              y: e.clientY
+            });
+          }
+        });
+      });
+      if (forceScroll || nearBottom) {
+        const goBottom = function() { window.scrollTo(0, document.body.scrollHeight); };
+        goBottom();
+        requestAnimationFrame(goBottom);
+        root.querySelectorAll('img.shot').forEach(function(img) {
+          if (!img.complete) img.addEventListener('load', goBottom, { once: true });
+        });
       }
     };
     </script>

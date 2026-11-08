@@ -32,7 +32,13 @@ final class AgentSessionRunner {
             }
             return
         }
-        let args = cli.startArguments(workspace: workspace, prompt: prompt, imagePath: imagePath)
+        let args = cli.startArguments(
+            workspace: workspace,
+            prompt: prompt,
+            imagePath: imagePath,
+            model: session.modelId,
+            effort: session.effort
+        )
         launch(exe: exe, args: args, session: session)
     }
 
@@ -66,7 +72,14 @@ final class AgentSessionRunner {
         } else {
             DispatchQueue.main.sync(execute: appendUser)
         }
-        let args = cli.followUpArguments(workspace: workspace, chatId: chatId, prompt: prompt, imagePath: imagePath)
+        let args = cli.followUpArguments(
+            workspace: workspace,
+            chatId: chatId,
+            prompt: prompt,
+            imagePath: imagePath,
+            model: session.modelId,
+            effort: session.effort
+        )
         launch(exe: exe, args: args, session: session)
     }
 
@@ -601,12 +614,18 @@ final class AgentSessionManager {
             title = String(trimmed.prefix(48))
         }
         let cliKind = Preferences.agentCLI
+        // Prefer the latest session that used this CLI (list is workspace-scoped, mixed CLIs).
+        let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI)
         let session = AgentSession(
             title: title,
             prompt: prompt,
             screenshotPath: screenshotPath,
             workspace: workspace,
-            cliKind: cliKind
+            cliKind: cliKind,
+            favoriteId: favorite.id,
+            modelId: favorite.usesCLIDefaultModel ? nil : favorite.modelId,
+            effort: favorite.effort
         )
         store.prepend(session)
         let runner = AgentSessionRunner(cli: AgentCLIFactory.make(cliKind))
@@ -619,12 +638,18 @@ final class AgentSessionManager {
     func createBlankSession() -> AgentSession? {
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return nil }
+        let cliKind = Preferences.agentCLI
+        let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI)
         let session = AgentSession(
             title: "New session",
             prompt: "",
             screenshotPath: nil,
             workspace: workspace,
-            cliKind: Preferences.agentCLI,
+            cliKind: cliKind,
+            favoriteId: favorite.id,
+            modelId: favorite.usesCLIDefaultModel ? nil : favorite.modelId,
+            effort: favorite.effort,
             status: .waiting,
             blank: true
         )

@@ -15,18 +15,36 @@ struct SessionChatView: View {
     @State private var draggingQueueID: UUID?
     @FocusState private var composerFocused: Bool
     @StateObject private var skillAC = SkillAutocompleteController()
-    @State private var newlineMonitor: Any?
+    @State private var keyMonitor: Any?
+    @State private var prefsTick = 0
 
     private var solidBG: Color { colorScheme == .dark ? .black : .white }
     private var solidFG: Color { colorScheme == .dark ? .white : .black }
     private var isWorking: Bool { session.status == .working }
     private var workspace: String { session.workspace }
 
+    private var favorites: [AgentFavorite] {
+        _ = prefsTick
+        return Preferences.favorites(for: session.cliKind)
+    }
+
+    private var currentFavorite: AgentFavorite? {
+        if let id = session.favoriteId,
+           let match = favorites.first(where: { $0.id == id }) {
+            return match
+        }
+        return favorites.first { $0.isBuiltIn } ?? favorites.first
+    }
+
+    private var currentFavoriteTitle: String {
+        currentFavorite?.title ?? "Default"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            ChatTranscriptView(messages: session.messages)
+            ChatTranscriptView(messages: session.messages, sessionID: session.id)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             if !session.queuedFollowUps.isEmpty {
@@ -42,9 +60,10 @@ struct SessionChatView: View {
             skillAC.readText = { draft }
             skillAC.writeText = { draft = $0 }
             focusComposer()
+            installKeyMonitor()
         }
         .onDisappear {
-            removeNewlineMonitor()
+            removeKeyMonitor()
             skillAC.teardown()
         }
         .onChange(of: session.id) { _ in
@@ -53,12 +72,8 @@ struct SessionChatView: View {
         .onChange(of: draft) { _ in
             skillAC.update(text: draft)
         }
-        .onChange(of: composerFocused) { focused in
-            if focused {
-                installNewlineMonitor()
-            } else {
-                removeNewlineMonitor()
-            }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            prefsTick &+= 1
         }
     }
 
@@ -68,20 +83,34 @@ struct SessionChatView: View {
         }
     }
 
-    private func installNewlineMonitor() {
-        guard newlineMonitor == nil else { return }
-        newlineMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [session] event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // ⌘/ → cycle favorite models for this session’s CLI.
+            if flags.contains(.command),
+               !flags.contains(.shift),
+               !flags.contains(.option),
+               !flags.contains(.control),
+               event.charactersIgnoringModifiers == "/" {
+                DispatchQueue.main.async {
+                    session.cycleFavorite()
+                }
+                return nil
+            }
+
             // Shift+Return → newline; plain Return still submits via onSubmit.
             let code = Int(event.keyCode)
             guard code == 36 || code == 76 else { return event }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             guard flags.contains(.shift),
                   !flags.contains(.command),
                   !flags.contains(.option),
                   !flags.contains(.control) else {
                 return event
             }
-            guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+            guard composerFocused,
+                  let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
                   textView.isEditable else {
                 return event
             }
@@ -90,11 +119,11 @@ struct SessionChatView: View {
         }
     }
 
-    private func removeNewlineMonitor() {
-        if let newlineMonitor {
-            NSEvent.removeMonitor(newlineMonitor)
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
         }
-        newlineMonitor = nil
+        keyMonitor = nil
     }
 
     private var header: some View {
@@ -276,10 +305,15 @@ struct SessionChatView: View {
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.primary.opacity(compact ? 0.10 : 0.06))
+                            .fill(Color(nsColor: .textBackgroundColor))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 0.5)
+                                    .strokeBorder(
+                                        composerFocused
+                                            ? Color(red: 0.2, green: 0.55, blue: 0.98)
+                                            : Color.primary.opacity(0.45),
+                                        lineWidth: composerFocused ? 1.5 : 1
+                                    )
                             )
                     )
                     .onSubmit {
@@ -316,36 +350,74 @@ struct SessionChatView: View {
                 .help(isWorking ? "Send now" : "Send")
             }
 
-            if isWorking {
-                HStack(spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
+                if isWorking {
                     hintPair(key: "Enter", label: "queue")
                     hintPair(key: "⇧↩", label: "newline")
                     hintPair(key: "⌘↩", label: "steer")
                     hintPair(key: "⌃C", label: "stop")
-                }
-                .padding(.horizontal, 4)
-            } else {
-                HStack(spacing: 14) {
+                } else {
                     hintPair(key: "/", label: "skills")
                     hintPair(key: "⇧↩", label: "newline")
                     hintPair(key: "Enter", label: "send")
                 }
-                .padding(.horizontal, 4)
+                Spacer(minLength: 8)
+                hintPair(key: "⌘/", label: "model")
+                favoritePicker
             }
+            .padding(.horizontal, 4)
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 12)
     }
 
+    private var favoritePicker: some View {
+        Menu {
+            ForEach(favorites) { fav in
+                Button {
+                    session.applyFavorite(fav)
+                } label: {
+                    if fav.id == currentFavorite?.id {
+                        Label(fav.title, systemImage: "checkmark")
+                    } else {
+                        Text(fav.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(currentFavoriteTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(Color.primary.opacity(0.78))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Favorite model — ⌘/ to cycle")
+    }
+
     private func hintPair(key: String, label: String) -> some View {
         HStack(spacing: 4) {
             Text(key)
                 .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.primary.opacity(0.72))
             Text(label)
                 .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Color.primary.opacity(0.55))
         }
     }
 

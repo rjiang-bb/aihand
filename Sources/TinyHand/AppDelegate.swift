@@ -49,6 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return frames
         }
         wireAgentFlow()
+        Preferences.ensureAgentFavorites()
         enableLaunchAtLoginOnFirstRun()
         updater.start()
         setupStatusItem()
@@ -117,6 +118,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         overlay.onInkCleared = { [weak self] in
             self?.pendingStrokes = []
             self?.annotatePanel.hide()
+        }
+        overlay.onStrokeUndone = { [weak self] layer in
+            guard let self else { return }
+            if let idx = self.pendingStrokes.lastIndex(where: { $0.layer === layer }) {
+                self.pendingStrokes.remove(at: idx)
+            }
+            if self.pendingStrokes.isEmpty {
+                self.annotatePanel.hide()
+            }
         }
     }
 
@@ -220,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let alert = NSAlert()
                 alert.messageText = "Couldn’t capture screenshot"
                 alert.informativeText = needsScreenRecording
-                    ? "Turn on TinyHand under Privacy & Security → Screen Recording, then draw again."
+                    ? "Turn on AiHand under Privacy & Security → Screen Recording, then draw again."
                     : error.localizedDescription
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
@@ -263,7 +273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
         }
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Quit TinyHand", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(NSMenuItem(title: "Quit AiHand", action: #selector(quit), keyEquivalent: "q"))
         menu.items.forEach { $0.target = self }
         menu.delegate = self
     }
@@ -313,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let on = overlay.isActive
         toggleItem?.title = "\(on ? "Turn Pointer Off" : "Turn Pointer On")    \(Preferences.toggleShortcut.display)"
         clearItem?.title = "Clear Drawing    \(Preferences.clearShortcut.display)"
-        sessionsItem?.title = "Tinyhand sessions    \(Preferences.sessionsShortcut.display)"
+        sessionsItem?.title = "AI sessions panel    \(Preferences.sessionsShortcut.display)"
         soundItem?.state = overlay.soundOn ? .on : .off
         permissionItem?.isHidden = AXIsProcessTrusted()
     }
@@ -453,7 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let on = overlay.isActive
         let image = Bundle.main.image(forResource: on ? "menubar_on" : "menubar_off")
             ?? NSImage(systemSymbolName: on ? "hand.point.up.left.fill" : "hand.point.up.left",
-                       accessibilityDescription: "TinyHand")
+                       accessibilityDescription: "AiHand")
         image?.size = NSSize(width: 18, height: 18)
         image?.isTemplate = true
         statusItem.button?.image = image
@@ -462,8 +472,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.appearsDisabled = false
 
         var tip = overlay.isActive
-            ? "TinyHand is on — click to turn off, right-click for the menu"
-            : "TinyHand — click to turn on, right-click for the menu"
+            ? "AiHand is on — click to turn off, right-click for the menu"
+            : "AiHand — click to turn on, right-click for the menu"
         let active = sessionStore.activeCount
         let completed = sessionStore.completedCount
         if active > 0 || completed > 0 {
@@ -526,7 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        appMenu.addItem(withTitle: "Quit TinyHand", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(withTitle: "Quit AiHand", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
         let editItem = NSMenuItem()
