@@ -9,6 +9,8 @@ final class AnnotationHintPanel {
 
     private var panel: Panel?
 
+    var frame: CGRect { panel?.frame ?? .zero }
+
     func show(on screen: NSScreen) {
         hide()
         let p = Panel(

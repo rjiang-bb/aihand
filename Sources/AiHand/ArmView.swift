@@ -21,7 +21,10 @@ final class ArmView: NSView {
 
     let ink = Ink()
     var held = false
-    var inkWidth: CGFloat { max(3, bounds.height * 0.0055) }
+    var inkWidth: CGFloat {
+        let base = max(3, bounds.height * 0.0055)
+        return max(1.5, base * Preferences.strokeThickness.multiplier)
+    }
 
     private var pressAmount: CGFloat = 0
     private var gripX: CGFloat?

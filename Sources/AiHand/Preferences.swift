@@ -162,6 +162,61 @@ enum InkChoice: String, CaseIterable {
     }
 }
 
+enum DrawTool: String, CaseIterable {
+    case freehand, rectangle, arrow
+
+    var title: String {
+        switch self {
+        case .freehand: return "Freehand"
+        case .rectangle: return "Rectangle"
+        case .arrow: return "Arrow"
+        }
+    }
+
+    var shortcut: String {
+        switch self {
+        case .freehand: return "F"
+        case .rectangle: return "R"
+        case .arrow: return "A"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .freehand: return "scribble"
+        case .rectangle: return "rectangle"
+        case .arrow: return "arrow.up.right"
+        }
+    }
+}
+
+enum StrokeThickness: Int, CaseIterable {
+    case thin = 1, light, medium, heavy, bold
+
+    var title: String {
+        switch self {
+        case .thin: return "Thin"
+        case .light: return "Light"
+        case .medium: return "Medium"
+        case .heavy: return "Heavy"
+        case .bold: return "Bold"
+        }
+    }
+
+    var shortcut: String { "\(rawValue)" }
+
+    /// Multiplier on the screen-relative base ink width.
+    var multiplier: CGFloat {
+        switch self {
+        case .thin: return 0.55
+        case .light: return 0.75
+        case .medium: return 1.0
+        case .heavy: return 1.45
+        case .bold: return 2.0
+        }
+    }
+}
+
 enum Preferences {
     static let changed = Notification.Name("AiHandPreferencesChanged")
     private static let defaults = UserDefaults.standard
@@ -246,6 +301,19 @@ enum Preferences {
     static var showInkButton: Bool {
         get { defaults.object(forKey: "showInkButton") as? Bool ?? true }
         set { set(newValue, "showInkButton") }
+    }
+
+    static var drawTool: DrawTool {
+        get { defaults.string(forKey: "drawTool").flatMap(DrawTool.init(rawValue:)) ?? .freehand }
+        set { set(newValue.rawValue, "drawTool") }
+    }
+
+    static var strokeThickness: StrokeThickness {
+        get {
+            let raw = defaults.object(forKey: "strokeThickness") as? Int
+            return raw.flatMap(StrokeThickness.init(rawValue:)) ?? .medium
+        }
+        set { set(newValue.rawValue, "strokeThickness") }
     }
 
     static var agentCLI: AgentCLIKind {
@@ -620,7 +688,7 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
+                    "inkChoice", "showInkButton", "drawTool", "strokeThickness", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)

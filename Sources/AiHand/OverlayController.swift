@@ -36,7 +36,9 @@ final class OverlayController {
     private var enterHotKey: UInt32?
     private var sendHotKey: UInt32?
     private var undoHotKey: UInt32?
+    private var toolHotKeys: [UInt32] = []
     private let annotationHints = AnnotationHintPanel()
+    private let drawingTools = DrawingToolsPanel()
     private var lastPermissionCheck = Date.distantPast
 
     /// Zones / cursor / menus — not used for hand pose (display link + mouse events drive that).
@@ -268,9 +270,11 @@ final class OverlayController {
     func setAnnotationHintsVisible(_ visible: Bool) {
         guard visible, isActive, let screen = currentScreen() else {
             annotationHints.hide()
+            drawingTools.hide()
             return
         }
         annotationHints.show(on: screen)
+        drawingTools.show(on: screen, above: annotationHints.frame)
     }
 
     private func drag() {
@@ -282,7 +286,7 @@ final class OverlayController {
             if hypot(p.x - start.x, p.y - start.y) < 4 {
                 return
             }
-            ink.begin(at: start, width: armView.inkWidth)
+            ink.begin(at: start, width: armView.inkWidth, tool: Preferences.drawTool)
         }
         ink.extend(to: p)
     }
@@ -338,6 +342,7 @@ final class OverlayController {
         if let screen = currentScreen() {
             toolbar.place(on: screen)
             annotationHints.show(on: screen)
+            drawingTools.show(on: screen, above: annotationHints.frame)
         }
         toolbar.setNeedsPermission(!installed)
         toolbar.show()
@@ -384,6 +389,7 @@ final class OverlayController {
         window.orderOut(nil)
         toolbar.hide()
         annotationHints.hide()
+        drawingTools.hide()
         normalCursor = false
         armView.pointerHidden = false
         inputTap.passThroughRects = []
@@ -439,6 +445,10 @@ final class OverlayController {
         if toolbar.revealed {
             rects.append(OverlayController.cgRect(f))
         }
+        let toolsFrame = drawingTools.frame
+        if toolsFrame.width > 0 {
+            rects.append(OverlayController.cgRect(toolsFrame))
+        }
         inputTap.passThroughRects = rects
     }
 
@@ -479,6 +489,35 @@ final class OverlayController {
                     self?.undoLastStroke()
                 }
             }
+            if toolHotKeys.isEmpty {
+                let toolKeys: [(DrawTool, Int)] = [
+                    (.freehand, kVK_ANSI_F),
+                    (.rectangle, kVK_ANSI_R),
+                    (.arrow, kVK_ANSI_A),
+                ]
+                for (tool, code) in toolKeys {
+                    if let id = HotKeyCenter.shared.register(keyCode: UInt32(code), modifiers: 0, action: {
+                        Preferences.drawTool = tool
+                    }) {
+                        toolHotKeys.append(id)
+                    }
+                }
+                for thickness in StrokeThickness.allCases {
+                    let code: Int
+                    switch thickness.rawValue {
+                    case 1: code = kVK_ANSI_1
+                    case 2: code = kVK_ANSI_2
+                    case 3: code = kVK_ANSI_3
+                    case 4: code = kVK_ANSI_4
+                    default: code = kVK_ANSI_5
+                    }
+                    if let id = HotKeyCenter.shared.register(keyCode: UInt32(code), modifiers: 0, action: {
+                        Preferences.strokeThickness = thickness
+                    }) {
+                        toolHotKeys.append(id)
+                    }
+                }
+            }
             return
         }
         if let id = enterHotKey {
@@ -493,6 +532,10 @@ final class OverlayController {
             HotKeyCenter.shared.unregister(id)
             undoHotKey = nil
         }
+        for id in toolHotKeys {
+            HotKeyCenter.shared.unregister(id)
+        }
+        toolHotKeys = []
     }
 
     private static func menuBarRect(_ screen: NSScreen) -> CGRect {
@@ -683,6 +726,7 @@ final class OverlayController {
             armView.frame = NSRect(origin: .zero, size: screen.frame.size)
             toolbar.place(on: screen)
             annotationHints.reposition(on: screen)
+            drawingTools.reposition(on: screen, above: annotationHints.frame)
             if let link = displayLink,
                let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
                 CVDisplayLinkSetCurrentCGDisplay(link, CGDirectDisplayID(num.uint32Value))

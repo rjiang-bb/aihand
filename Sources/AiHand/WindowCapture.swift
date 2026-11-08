@@ -259,25 +259,14 @@ enum WindowCapture {
         }
 
         for stroke in strokes {
-            guard let first = stroke.points.first else { continue }
-            let path = CGMutablePath()
-            let p0 = toBitmap(first)
-            path.move(to: p0)
-            if stroke.points.count == 1 {
-                path.addLine(to: p0)
-            }
-            for i in 1..<stroke.points.count {
-                let p = toBitmap(stroke.points[i])
-                let prev = toBitmap(stroke.points[i - 1])
-                let mid = CGPoint(x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2)
-                path.addQuadCurve(to: mid, control: prev)
-            }
-            if stroke.points.count > 1, let last = stroke.points.last {
-                path.addLine(to: toBitmap(last))
-            }
+            guard !stroke.points.isEmpty else { continue }
+            let mapped = stroke.points.map(toBitmap)
+            let scale = (scaleX + scaleY) / 2
+            let width = max(2, stroke.width * scale)
+            let path = StrokePath.make(tool: stroke.tool, points: mapped, lineWidth: width)
 
             ctx.setStrokeColor(stroke.color)
-            ctx.setLineWidth(max(2, stroke.width * ((scaleX + scaleY) / 2)))
+            ctx.setLineWidth(width)
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
             ctx.addPath(path)
