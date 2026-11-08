@@ -35,7 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         Log.write("launch \(Bundle.main.bundlePath) trusted=\(AXIsProcessTrusted())")
         CursorHider.enableBackgroundHiding()
         overlay.onActiveChanged = { [weak self] in
-            self?.updateIcon()
+            guard let self else { return }
+            self.updateIcon()
+            // Drawing mode owns the screen — keep sessions/chat out of the way.
+            if self.overlay.isActive {
+                self.sessionsPanel.hide()
+            }
         }
         overlay.onSoundChanged = { [weak self] in
             self?.refreshMenu()
@@ -464,7 +469,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         sessionsHotKey = nil
     }
 
-    /// Menu bar click / toggle shortcut: turn the pointer on/off and show Sessions when starting.
+    /// Menu bar click / toggle shortcut: turn the pointer (drawing mode) on/off.
     private func togglePointerWithSessions() {
         if overlay.isActive {
             overlay.toggle()
@@ -474,8 +479,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func startPointerWithSessions() {
-        guard overlay.activate() else { return }
-        sessionsPanel.show()
+        // onActiveChanged hides sessions once the overlay is actually active.
+        _ = overlay.activate()
     }
 
     @objc private func toggle() {
@@ -491,6 +496,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func showSessions() {
+        // Sessions/chat stay hidden while drawing.
+        guard !overlay.isActive else { return }
         sessionsPanel.toggle()
     }
 
@@ -503,6 +510,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// Bring the sessions panel forward with this chat (e.g. from a notification click).
     private func revealSession(_ id: UUID) {
         guard let session = sessionStore.session(id: id) else { return }
+        // Leave drawing mode before showing chat.
+        if overlay.isActive {
+            overlay.exit()
+        }
         let path = session.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
         if !path.isEmpty, !SessionStore.sameWorkspace(path, Preferences.agentWorkspace) {
             Preferences.agentWorkspace = path

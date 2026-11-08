@@ -257,7 +257,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     func hide() {
-        discardBlankDraftIfLeaving()
+        // Keep selected session/chat so the next show restores the same state.
         // Only refresh the remembered origin while list-only. If a chat is open,
         // keep the existing list-home — expanded geometry must not shift it.
         if selection.selectedID == nil {
@@ -265,7 +265,6 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         }
         removeShortcutMonitors()
         selection.showShortcutBadges = false
-        selection.selectedID = nil
         panel.orderOut(nil)
         onDismiss?()
     }
@@ -327,7 +326,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         persistListPlacement()
     }
 
-    /// Drop an untouched "New session" when leaving it (switch, Esc, click away, hide).
+    /// Drop an untouched "New session" when leaving it (switch, Esc close-chat, click away).
     private func discardBlankDraftIfLeaving(except keepID: UUID? = nil) {
         guard let id = selection.selectedID,
               id != keepID,
@@ -353,7 +352,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             if let listOriginOverride {
                 return listOriginOverride
             }
-            if isVisible, panel.frame.width > 1 {
+            // Prefer the live frame even after orderOut so hide→show keeps chat geometry.
+            if panel.frame.width > 1 {
                 return listOnlyOrigin(from: panel.frame)
             }
             if hasCustomPlacement, let saved = Preferences.sessionsPanelOrigin {
