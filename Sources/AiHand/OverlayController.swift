@@ -24,6 +24,8 @@ final class OverlayController {
     private var downPoint: CGPoint?
     private var buttonSeenDown = false
     private var dragEvents = 0
+    /// Click-away that committed a text box should not open a new one on the same click.
+    private var suppressNextTextPlacement = false
 
     private let toolbar = Toolbar()
     private var revealUntil = Date.distantPast
@@ -36,7 +38,12 @@ final class OverlayController {
     private var enterHotKey: UInt32?
     private var sendHotKey: UInt32?
     private var undoHotKey: UInt32?
+    private var saveHotKey: UInt32?
+    private var toolHotKeys: [UInt32] = []
     private let annotationHints = AnnotationHintPanel()
+    private let drawingTools = DrawingToolsPanel()
+    private let textEditor = InkTextEditor()
+    private let savePreview = ScreenshotSavePreview()
     private var lastPermissionCheck = Date.distantPast
 
     /// Zones / cursor / menus — not used for hand pose (display link + mouse events drive that).
@@ -57,9 +64,16 @@ final class OverlayController {
     var onRequestComment: (() -> Void)?
     /// ⌘↩ while ink is on screen — send the annotated screenshot immediately.
     var onRequestSend: (() -> Void)?
+    /// ⌘⇧S while drawing — save an annotated screenshot to the AiHand folder.
+    var onRequestSave: (() -> Void)?
     var onInkCleared: (() -> Void)?
     /// Fired after undoing a finished stroke (layer removed from the overlay).
-    var onStrokeUndone: ((CAShapeLayer) -> Void)?
+    var onStrokeUndone: ((CALayer) -> Void)?
+
+    var isEditingText: Bool { textEditor.isEditing }
+
+    /// Screen the overlay currently tracks (mouse / active display).
+    var activeScreen: NSScreen? { currentScreen() }
 
     init() {
         let frame = (NSScreen.main ?? NSScreen.screens.first).map { $0.frame }
@@ -77,9 +91,24 @@ final class OverlayController {
         armView = ArmView(frame: NSRect(origin: .zero, size: frame.size))
         window.contentView = armView
 
+        textEditor.onCommit = { [weak self] text in
+            self?.finishTextEditing(commit: text)
+        }
+        textEditor.onCancel = { [weak self] in
+            self?.finishTextEditing(commit: nil)
+        }
+        textEditor.onFrameChanged = { [weak self] in
+            guard let self, let screen = self.currentScreen() else { return }
+            self.updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+        }
+
         inputTap.onMouseDown = { [weak self] in
             guard let self = self else {
                 return
+            }
+            if self.textEditor.isEditing {
+                self.textEditor.commit()
+                self.suppressNextTextPlacement = true
             }
             self.armView.press()
             self.armView.held = true
@@ -138,12 +167,20 @@ final class OverlayController {
         tapSound.enabled = soundOn
         toolbar.setSoundOn(soundOn)
         NotificationCenter.default.addObserver(forName: Preferences.changed, object: nil, queue: .main) { [weak self] _ in
-            self?.syncSound()
-            self?.inputTap.interactKey = Preferences.interactKey.cgFlags
-            self?.armView.updateInkColor()
-            self?.tapSound.load(Preferences.tapSound)
-            if let self = self, self.armView.style != PointerStyle.saved {
+            guard let self else { return }
+            self.syncSound()
+            self.inputTap.interactKey = Preferences.interactKey.cgFlags
+            self.armView.updateInkColor()
+            self.tapSound.load(Preferences.tapSound)
+            if self.armView.style != PointerStyle.saved {
                 self.pick(PointerStyle.saved)
+            }
+            // Switching tools while typing commits the current box.
+            if self.textEditor.isEditing, Preferences.drawTool != .text {
+                self.textEditor.commit()
+            }
+            if self.isActive {
+                self.updateCaptureOutline()
             }
         }
     }
@@ -189,18 +226,27 @@ final class OverlayController {
     }
 
     func exit() {
-        clearInk()
         deactivate()
     }
 
     private func release() {
-        if let start = downPoint {
-            let moved = localMouse().map { Int(hypot($0.x - start.x, $0.y - start.y)) } ?? -1
-            Log.write("release, drag events=\(dragEvents) moved=\(moved)pt stroke drawn=\(armView.ink.isDrawing)")
+        let start = downPoint
+        let moved = start.flatMap { s in localMouse().map { hypot($0.x - s.x, $0.y - s.y) } } ?? -1
+        if start != nil {
+            Log.write("release, drag events=\(dragEvents) moved=\(Int(moved))pt stroke drawn=\(armView.ink.isDrawing)")
         }
         buttonSeenDown = false
         armView.held = false
+        let clickPoint = start
         downPoint = nil
+        let skipText = suppressNextTextPlacement
+        suppressNextTextPlacement = false
+
+        if Preferences.drawTool == .text, !skipText, !armView.ink.isDrawing, moved < 6, let clickPoint {
+            beginTextEditing(at: clickPoint)
+            return
+        }
+
         let wasDrawing = armView.ink.isDrawing
         let result = armView.ink.end(holdFade: wasDrawing && onStrokeComplete != nil)
         if wasDrawing, let result, let frame = currentFrame, let screen = currentScreen() {
@@ -212,6 +258,50 @@ final class OverlayController {
             )
             onStrokeComplete?(result, screenBounds, screen)
         }
+    }
+
+    private func beginTextEditing(at localPoint: CGPoint) {
+        guard let frame = currentFrame, let screen = currentScreen() else { return }
+        let topLeftScreen = CGPoint(x: frame.origin.x + localPoint.x, y: frame.origin.y + localPoint.y)
+        let fontSize = InkTextStyle.fontSize(forStrokeWidth: armView.inkWidth)
+        setAnnotationHotKeysEnabled(false)
+        textEditor.begin(
+            topLeftScreen: topLeftScreen,
+            background: armView.ink.color,
+            fontSize: fontSize,
+            on: screen
+        )
+        updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+    }
+
+    private func finishTextEditing(commit text: String?) {
+        defer {
+            if isActive {
+                setAnnotationHotKeysEnabled(true)
+                if let screen = currentScreen() {
+                    updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+                }
+            }
+        }
+        guard let text, let frame = currentFrame, let screen = currentScreen() else { return }
+        let topLeftLocal = CGPoint(
+            x: textEditor.topLeftScreenPoint.x - frame.origin.x,
+            y: textEditor.topLeftScreenPoint.y - frame.origin.y
+        )
+        let fontSize = InkTextStyle.fontSize(forStrokeWidth: armView.inkWidth)
+        guard let result = armView.ink.addText(
+            text,
+            topLeft: topLeftLocal,
+            fontSize: fontSize,
+            holdFade: onStrokeComplete != nil
+        ) else { return }
+        let screenBounds = CGRect(
+            x: frame.origin.x + result.bounds.minX,
+            y: frame.origin.y + result.bounds.minY,
+            width: result.bounds.width,
+            height: result.bounds.height
+        )
+        onStrokeComplete?(result, screenBounds, screen)
     }
 
     func releaseStrokeHold(_ result: StrokeResult, fadeNow: Bool = true) {
@@ -249,12 +339,19 @@ final class OverlayController {
     }
 
     func clearInk() {
+        if textEditor.isEditing {
+            textEditor.cancel()
+        }
         armView.ink.clear()
         onInkCleared?()
     }
 
     /// Undo the current drag or the last finished stroke (⌘Z).
     func undoLastStroke() {
+        if textEditor.isEditing {
+            textEditor.cancel()
+            return
+        }
         if let layer = armView.ink.undoLast() {
             onStrokeUndone?(layer)
         }
@@ -262,18 +359,24 @@ final class OverlayController {
 
     /// Finished strokes on the overlay (not including an in-progress drag).
     var hasAnnotationInk: Bool {
-        !armView.ink.isDrawing && inkStrokes > 0
+        !armView.ink.isDrawing && !textEditor.isEditing && inkStrokes > 0
     }
 
     func setAnnotationHintsVisible(_ visible: Bool) {
+        if !visible, textEditor.isEditing {
+            textEditor.commit()
+        }
         guard visible, isActive, let screen = currentScreen() else {
             annotationHints.hide()
+            drawingTools.hide()
             return
         }
         annotationHints.show(on: screen)
+        drawingTools.show(on: screen, above: annotationHints.frame)
     }
 
     private func drag() {
+        guard Preferences.drawTool != .text else { return }
         guard let start = downPoint, let p = localMouse() else {
             return
         }
@@ -282,7 +385,7 @@ final class OverlayController {
             if hypot(p.x - start.x, p.y - start.y) < 4 {
                 return
             }
-            ink.begin(at: start, width: armView.inkWidth)
+            ink.begin(at: start, width: armView.inkWidth, tool: Preferences.drawTool)
         }
         ink.extend(to: p)
     }
@@ -338,6 +441,7 @@ final class OverlayController {
         if let screen = currentScreen() {
             toolbar.place(on: screen)
             annotationHints.show(on: screen)
+            drawingTools.show(on: screen, above: annotationHints.frame)
         }
         toolbar.setNeedsPermission(!installed)
         toolbar.show()
@@ -357,6 +461,7 @@ final class OverlayController {
         }
         setEscEnabled(true)
         setAnnotationHotKeysEnabled(true)
+        updateCaptureOutline()
         onActiveChanged?()
         return installed
     }
@@ -378,12 +483,17 @@ final class OverlayController {
         }
         armView.held = false
         downPoint = nil
-        armView.ink.clear()
-        onInkCleared?()
+        // Keep drawings across hand sessions; only clearInk() / undo removes them.
+        if textEditor.isEditing {
+            textEditor.commit()
+        }
+        armView.setCaptureOutline(localRect: nil)
+        savePreview.hide()
         window.ignoresMouseEvents = true
         window.orderOut(nil)
         toolbar.hide()
         annotationHints.hide()
+        drawingTools.hide()
         normalCursor = false
         armView.pointerHidden = false
         inputTap.passThroughRects = []
@@ -392,6 +502,32 @@ final class OverlayController {
         ownMenuOpen = false
         CursorHider.show()
         onActiveChanged?()
+    }
+
+    func showSavePreview(fileURL: URL, image: NSImage, on screen: NSScreen) {
+        savePreview.show(fileURL: fileURL, image: image, on: screen)
+        if let screen = currentScreen() {
+            updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+        }
+    }
+
+    func hideSavePreview() {
+        savePreview.hide()
+    }
+
+    private func updateCaptureOutline() {
+        guard isActive, let screen = currentScreen(), let frame = currentFrame else {
+            armView.setCaptureOutline(localRect: nil)
+            return
+        }
+        let region = WindowCapture.captureRegion(on: screen)
+        let local = CGRect(
+            x: region.minX - frame.minX,
+            y: region.minY - frame.minY,
+            width: region.width,
+            height: region.height
+        )
+        armView.setCaptureOutline(localRect: local.intersection(armView.bounds))
     }
 
     private func updateZones(mouse: CGPoint, screen: NSScreen) {
@@ -439,13 +575,29 @@ final class OverlayController {
         if toolbar.revealed {
             rects.append(OverlayController.cgRect(f))
         }
+        let toolsFrame = drawingTools.frame
+        if toolsFrame.width > 0 {
+            rects.append(OverlayController.cgRect(toolsFrame))
+        }
+        if textEditor.isEditing {
+            rects.append(OverlayController.cgRect(textEditor.frame))
+        }
+        let previewFrame = savePreview.frame
+        if previewFrame.width > 0 {
+            rects.append(OverlayController.cgRect(previewFrame))
+        }
         inputTap.passThroughRects = rects
     }
 
     private func setEscEnabled(_ enabled: Bool) {
         if enabled && isActive && escHotKey == nil {
             escHotKey = HotKeyCenter.shared.register(keyCode: UInt32(kVK_Escape), modifiers: 0) { [weak self] in
-                self?.exit()
+                guard let self else { return }
+                if self.textEditor.isEditing {
+                    self.textEditor.cancel()
+                    return
+                }
+                self.exit()
             }
         }
         if !enabled, let id = escHotKey {
@@ -479,6 +631,53 @@ final class OverlayController {
                     self?.undoLastStroke()
                 }
             }
+            if saveHotKey == nil {
+                saveHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_ANSI_S),
+                    modifiers: UInt32(cmdKey | shiftKey)
+                ) { [weak self] in
+                    self?.onRequestSave?()
+                }
+            }
+            if toolHotKeys.isEmpty {
+                let toolKeys: [(DrawTool, Int)] = [
+                    (.freehand, kVK_ANSI_F),
+                    (.rectangle, kVK_ANSI_R),
+                    (.arrow, kVK_ANSI_A),
+                    (.text, kVK_ANSI_T),
+                ]
+                for (tool, code) in toolKeys {
+                    if let id = HotKeyCenter.shared.register(keyCode: UInt32(code), modifiers: 0, action: {
+                        Preferences.drawTool = tool
+                    }) {
+                        toolHotKeys.append(id)
+                    }
+                }
+                for thickness in StrokeThickness.allCases {
+                    let code: Int
+                    switch thickness.rawValue {
+                    case 1: code = kVK_ANSI_1
+                    case 2: code = kVK_ANSI_2
+                    case 3: code = kVK_ANSI_3
+                    case 4: code = kVK_ANSI_4
+                    default: code = kVK_ANSI_5
+                    }
+                    if let id = HotKeyCenter.shared.register(keyCode: UInt32(code), modifiers: 0, action: {
+                        Preferences.strokeThickness = thickness
+                    }) {
+                        toolHotKeys.append(id)
+                    }
+                }
+                if let id = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_ANSI_Slash),
+                    modifiers: UInt32(cmdKey),
+                    action: {
+                        Preferences.captureScope = Preferences.captureScope.toggled
+                    }
+                ) {
+                    toolHotKeys.append(id)
+                }
+            }
             return
         }
         if let id = enterHotKey {
@@ -493,6 +692,14 @@ final class OverlayController {
             HotKeyCenter.shared.unregister(id)
             undoHotKey = nil
         }
+        if let id = saveHotKey {
+            HotKeyCenter.shared.unregister(id)
+            saveHotKey = nil
+        }
+        for id in toolHotKeys {
+            HotKeyCenter.shared.unregister(id)
+        }
+        toolHotKeys = []
     }
 
     private static func menuBarRect(_ screen: NSScreen) -> CGRect {
@@ -677,12 +884,12 @@ final class OverlayController {
                 release()
                 revealUntil = Date().addingTimeInterval(1.5)
             }
-            armView.ink.clear()
-            onInkCleared?()
             window.setFrame(screen.frame, display: false)
             armView.frame = NSRect(origin: .zero, size: screen.frame.size)
             toolbar.place(on: screen)
             annotationHints.reposition(on: screen)
+            drawingTools.reposition(on: screen, above: annotationHints.frame)
+            updateCaptureOutline()
             if let link = displayLink,
                let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
                 CVDisplayLinkSetCurrentCGDisplay(link, CGDirectDisplayID(num.uint32Value))
@@ -712,6 +919,7 @@ final class OverlayController {
         guard let screen = currentScreen() else { return }
 
         updateZones(mouse: mouse, screen: screen)
+        updateCaptureOutline()
         let overDock = DockArea.contains(OverlayController.cgPoint(mouse))
         let catchMouse = overDock && inputTap.isInstalled && !normalCursor && !interactHeld
         if window.ignoresMouseEvents == catchMouse {

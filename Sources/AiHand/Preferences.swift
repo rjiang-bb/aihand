@@ -99,6 +99,15 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// Shell command shown in Settings when this CLI is missing (copyable).
+    var installCommand: String? {
+        switch self {
+        case .cursor: return nil
+        case .claude: return nil
+        case .codex: return "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+        }
+    }
+
     /// Short label for the CLI’s default model when AiHand doesn’t pass `--model`.
     var defaultModelTitle: String {
         switch self {
@@ -162,6 +171,93 @@ enum InkChoice: String, CaseIterable {
     }
 }
 
+enum DrawTool: String, CaseIterable {
+    case freehand, rectangle, arrow, text
+
+    var title: String {
+        switch self {
+        case .freehand: return "Freehand"
+        case .rectangle: return "Rectangle"
+        case .arrow: return "Arrow"
+        case .text: return "Text"
+        }
+    }
+
+    var shortcut: String {
+        switch self {
+        case .freehand: return "F"
+        case .rectangle: return "R"
+        case .arrow: return "A"
+        case .text: return "T"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .freehand: return "scribble"
+        case .rectangle: return "rectangle"
+        case .arrow: return "arrow.up.right"
+        case .text: return "textformat"
+        }
+    }
+}
+
+enum StrokeThickness: Int, CaseIterable {
+    case thin = 1, light, medium, heavy, bold
+
+    var title: String {
+        switch self {
+        case .thin: return "Thin"
+        case .light: return "Light"
+        case .medium: return "Medium"
+        case .heavy: return "Heavy"
+        case .bold: return "Bold"
+        }
+    }
+
+    var shortcut: String { "\(rawValue)" }
+
+    /// Multiplier on the screen-relative base ink width.
+    var multiplier: CGFloat {
+        switch self {
+        case .thin: return 0.55
+        case .light: return 0.75
+        case .medium: return 1.0
+        case .heavy: return 1.45
+        case .bold: return 2.0
+        }
+    }
+}
+
+enum CaptureScope: String, CaseIterable {
+    case screen, window
+
+    var title: String {
+        switch self {
+        case .screen: return "Entire screen"
+        case .window: return "Focused window"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .screen: return "Screen"
+        case .window: return "Window"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .screen: return "rectangle.dashed"
+        case .window: return "macwindow"
+        }
+    }
+
+    var toggled: CaptureScope {
+        self == .screen ? .window : .screen
+    }
+}
+
 enum Preferences {
     static let changed = Notification.Name("AiHandPreferencesChanged")
     private static let defaults = UserDefaults.standard
@@ -181,11 +277,18 @@ enum Preferences {
         set { saveShortcut(newValue, "shortcut.sessions") }
     }
 
-    static let pointerSizeRange: ClosedRange<CGFloat> = 0.08...0.20
+    /// Hand length as a fraction of screen height. Max 0.20 (= 20%); min ≈ 36pt on a typical display.
+    static let pointerSizeRange: ClosedRange<CGFloat> = 0.04...0.20
 
     static var pointerSize: CGFloat {
-        get { (defaults.object(forKey: "pointerSize") as? Double).map { CGFloat($0) } ?? 0.13 }
-        set { set(Double(newValue), "pointerSize") }
+        get {
+            let raw = (defaults.object(forKey: "pointerSize") as? Double).map { CGFloat($0) } ?? 0.13
+            return min(max(raw, pointerSizeRange.lowerBound), pointerSizeRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, pointerSizeRange.lowerBound), pointerSizeRange.upperBound)
+            set(Double(clamped), "pointerSize")
+        }
     }
 
     static var showShadow: Bool {
@@ -204,11 +307,6 @@ enum Preferences {
 
     static func applyTheme() {
         NSApp.appearance = theme.nsAppearance
-    }
-
-    static var fadeSeconds: Double {
-        get { defaults.object(forKey: "fadeSeconds") as? Double ?? 3 }
-        set { set(newValue, "fadeSeconds") }
     }
 
     static var handSound: Bool {
@@ -244,6 +342,25 @@ enum Preferences {
     static var showInkButton: Bool {
         get { defaults.object(forKey: "showInkButton") as? Bool ?? true }
         set { set(newValue, "showInkButton") }
+    }
+
+    static var drawTool: DrawTool {
+        get { defaults.string(forKey: "drawTool").flatMap(DrawTool.init(rawValue:)) ?? .freehand }
+        set { set(newValue.rawValue, "drawTool") }
+    }
+
+    static var strokeThickness: StrokeThickness {
+        get {
+            let raw = defaults.object(forKey: "strokeThickness") as? Int
+            return raw.flatMap(StrokeThickness.init(rawValue:)) ?? .medium
+        }
+        set { set(newValue.rawValue, "strokeThickness") }
+    }
+
+    /// What the annotate screenshot includes: the full display or the frontmost window.
+    static var captureScope: CaptureScope {
+        get { defaults.string(forKey: "captureScope").flatMap(CaptureScope.init(rawValue:)) ?? .screen }
+        set { set(newValue.rawValue, "captureScope") }
     }
 
     static var agentCLI: AgentCLIKind {
@@ -618,7 +735,7 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
+                    "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)

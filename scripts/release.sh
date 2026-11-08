@@ -27,7 +27,7 @@ Usage: ./scripts/release.sh [--skip-notarize] [--skip-publish] [--no-bump]
   Env:
     AIHAND_VERSION   If set, use this version and skip bumping (CI/tags).
     SKIP_PUBLISH=1   Same as --skip-publish.
-    RELEASE_NOTES    Release body / Sparkle notes (optional).
+    RELEASE_NOTES    Release body / Sparkle notes (optional; default: changelog since last release).
 USAGE
             exit 0
             ;;
@@ -39,6 +39,8 @@ USAGE
 done
 [[ "${SKIP_PUBLISH:-}" == "1" ]] && SKIP_PUBLISH=true
 
+INSTALL_NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
+
 bump_patch_version() {
     local major minor patch
     IFS=. read -r major minor patch < "$ROOT/VERSION"
@@ -49,6 +51,49 @@ bump_patch_version() {
     patch=$((patch + 1))
     printf '%s.%s.%s\n' "$major" "$minor" "$patch" > "$ROOT/VERSION"
     VERSION="${major}.${minor}.${patch}"
+}
+
+# Previous published release tag (local tags, then GitHub), excluding the current version.
+previous_release_tag() {
+    local tag="v$VERSION"
+    local prev
+    prev="$(git tag -l 'v*' --sort=-version:refname | grep -vxF "$tag" | head -1 || true)"
+    if [[ -z "$prev" ]] && command -v gh >/dev/null 2>&1; then
+        prev="$(gh release list --repo "$REPO" --limit 20 --json tagName \
+            --jq "[.[].tagName | select(. != \"$tag\")][0] // empty" 2>/dev/null || true)"
+    fi
+    printf '%s' "$prev"
+}
+
+# Bulleted summary of commits/PRs since the previous release (for GitHub + Sparkle).
+generate_release_notes() {
+    local tag="v$VERSION"
+    local prev
+    prev="$(previous_release_tag)"
+
+    if [[ -n "$prev" ]] && ! git rev-parse "$prev" >/dev/null 2>&1; then
+        git fetch --force origin "refs/tags/$prev:refs/tags/$prev" >/dev/null 2>&1 || true
+    fi
+
+    local range="HEAD"
+    [[ -n "$prev" ]] && git rev-parse "$prev" >/dev/null 2>&1 && range="${prev}..HEAD"
+    local bullets
+    bullets="$(git log "$range" --pretty=format:'- %s' --no-merges 2>/dev/null || true)"
+    if [[ -n "$bullets" ]]; then
+        printf '%s\n' "$bullets"
+        return 0
+    fi
+
+    if command -v gh >/dev/null 2>&1; then
+        local args=(api "repos/$REPO/releases/generate-notes" -f "tag_name=$tag")
+        [[ -n "$prev" ]] && args+=(-f "previous_tag_name=$prev")
+        local body
+        if body="$(gh "${args[@]}" --jq .body 2>/dev/null)" && [[ -n "$body" ]]; then
+            printf '%s\n' "$body"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 if [[ -n "${AIHAND_VERSION:-}" ]]; then
@@ -67,8 +112,16 @@ OUT="dist/release"
 APP="$OUT/$APP_NAME.app"
 DMG="$OUT/$APP_NAME-$VERSION.dmg"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
-DEFAULT_NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
-NOTES="${RELEASE_NOTES:-$DEFAULT_NOTES}"
+if [[ -n "${RELEASE_NOTES:-}" ]]; then
+    NOTES="$RELEASE_NOTES"
+else
+    NOTES="$(generate_release_notes || true)"
+    if [[ -z "$NOTES" ]]; then
+        NOTES="$INSTALL_NOTES"
+    else
+        echo "==> Release notes since previous tag"
+    fi
+fi
 
 notarize() {
     if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then

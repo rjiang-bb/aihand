@@ -16,6 +16,7 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 
 <p align="center">
   <a href="https://github.com/rjiang-bb/aihand/releases/latest/download/AiHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
+  <a href="https://github.com/rjiang-bb/aihand"><img src="https://img.shields.io/badge/GitHub-000000?style=for-the-badge&logo=github&logoColor=white" alt="GitHub" /></a>
 </p>
 
 ## What it does

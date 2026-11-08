@@ -494,20 +494,35 @@ private struct GeneralPage: View {
 
 private struct AgentPage: View {
     @ObservedObject var model: SettingsModel
+    @State private var missingCLI: AgentCLIKind?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             Card(title: "CLI") {
-                Row("Agent CLI", detail: "Cursor Agent, Claude Code, or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
-                    Picker("", selection: model.binding({ Preferences.agentCLI }, { Preferences.agentCLI = $0 })) {
-                        ForEach(AgentCLIKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
+                VStack(alignment: .leading, spacing: 0) {
+                    Row("Agent CLI", detail: "Cursor Agent, Claude Code, or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
+                        Picker("", selection: Binding(
+                            get: { Preferences.agentCLI },
+                            set: { kind in
+                                Preferences.agentCLI = kind
+                                model.refresh()
+                                refreshCLIAvailability()
+                            }
+                        )) {
+                            ForEach(AgentCLIKind.allCases) { kind in
+                                Text(kind.title).tag(kind)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .fixedSize()
+                        .focusable(false)
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .fixedSize()
-                    .focusable(false)
+                    if let missingCLI {
+                        CLIMissingBanner(kind: missingCLI)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 12)
+                    }
                 }
             }
             Card(title: "Favorites") {
@@ -518,6 +533,87 @@ private struct AgentPage: View {
                 WorkspaceFoldersBlock(model: model)
             }
         }
+        .onAppear { refreshCLIAvailability() }
+    }
+
+    private func refreshCLIAvailability() {
+        let kind = Preferences.agentCLI
+        missingCLI = AgentCLIFactory.make(kind).resolveExecutable() == nil ? kind : nil
+    }
+}
+
+private struct CLIMissingBanner: View {
+    let kind: AgentCLIKind
+    @State private var copied = false
+
+    private var summary: String {
+        if kind.installCommand != nil {
+            return "Couldn’t find `\(kind.commandName)`. Install \(kind.title) with:"
+        }
+        return "Couldn’t find `\(kind.commandName)`. \(kind.installHint)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.red)
+                    .padding(.top, 1)
+                Text(summary)
+                    .font(.system(size: 12))
+                    .foregroundColor(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            if let command = kind.installCommand {
+                ZStack(alignment: .topTrailing) {
+                    Text(command)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 10)
+                        .padding(.trailing, 28)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(command, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(copied ? .accentColor : .secondary)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .help(copied ? "Copied" : "Copy command")
+                    .padding(6)
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1)
+                )
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.red.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Color.red.opacity(0.28), lineWidth: 1)
+        )
     }
 }
 
@@ -1096,6 +1192,27 @@ private struct PointersPage: View {
                 }
             }
             YourHands(model: model)
+            Card(title: "Size") {
+                Row("Pointer size", detail: "How large the hand appears on screen.") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "hand.point.up.left.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                        Slider(
+                            value: model.binding(
+                                { Double(Preferences.pointerSize) },
+                                { Preferences.pointerSize = CGFloat($0) }
+                            ),
+                            in: Double(Preferences.pointerSizeRange.lowerBound)...Double(Preferences.pointerSizeRange.upperBound)
+                        )
+                        .frame(width: 180)
+                        .focusable(false)
+                        Image(systemName: "hand.point.up.left.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
         }
         .coordinateSpace(name: "pointersPage")
         .overlay(alignment: .topLeading) {
@@ -1431,16 +1548,6 @@ private struct AppearancePage: View {
 
     var body: some View {
         Card(title: "Pointer") {
-            Row("Size") {
-                HStack(spacing: 10) {
-                    Image(systemName: "hand.point.up.left.fill").font(.system(size: 10)).foregroundColor(.secondary)
-                    Slider(value: model.binding({ Double(Preferences.pointerSize) }, { Preferences.pointerSize = CGFloat($0) }),
-                           in: Double(Preferences.pointerSizeRange.lowerBound)...Double(Preferences.pointerSizeRange.upperBound))
-                        .frame(width: 180)
-                        .focusable(false)
-                    Image(systemName: "hand.point.up.left.fill").font(.system(size: 16)).foregroundColor(.secondary)
-                }
-            }
             Row("Shadow under the pointer") {
                 Toggle("", isOn: model.binding({ Preferences.showShadow }, { Preferences.showShadow = $0 }))
                     .toggleStyle(.switch).labelsHidden().focusable(false)
@@ -1466,39 +1573,42 @@ private struct AppearancePage: View {
 
 private struct DrawingPage: View {
     @ObservedObject var model: SettingsModel
-    private static let choices: [(String, Double)] = [
-        ("After 3 seconds", 3),
-        ("After 6 seconds", 6),
-        ("After 10 seconds", 10),
-        ("Keep until cleared", 0),
-    ]
 
     var body: some View {
-        Card(title: "Ink") {
-            Row("Ink colour", detail: Preferences.inkChoice == .match ? "Matches each pointer." : "All pointers draw in \(Preferences.inkChoice.title.lowercased()).") {
-                HStack(spacing: 8) {
-                    ForEach(InkChoice.allCases, id: \.self) { choice in
-                        InkSwatch(choice: choice, selected: Preferences.inkChoice == choice) {
-                            Preferences.inkChoice = choice
-                            model.refresh()
+        VStack(alignment: .leading, spacing: 22) {
+            Card(title: "Ink") {
+                Row("Ink colour", detail: Preferences.inkChoice == .match ? "Matches each pointer." : "All pointers draw in \(Preferences.inkChoice.title.lowercased()).") {
+                    HStack(spacing: 8) {
+                        ForEach(InkChoice.allCases, id: \.self) { choice in
+                            InkSwatch(choice: choice, selected: Preferences.inkChoice == choice) {
+                                Preferences.inkChoice = choice
+                                model.refresh()
+                            }
                         }
                     }
                 }
-            }
-            Row("Lines fade", detail: "Clear them any time with \(Preferences.clearShortcut.display).") {
-                Picker("", selection: model.binding({ Preferences.fadeSeconds }, { Preferences.fadeSeconds = $0 })) {
-                    ForEach(DrawingPage.choices, id: \.1) { choice in
-                        Text(choice.0).tag(choice.1)
-                    }
+                Row("Ink button in the toolbar", detail: "Change the colour while you present.") {
+                    Toggle("", isOn: model.binding({ Preferences.showInkButton }, { Preferences.showInkButton = $0 }))
+                        .toggleStyle(.switch).labelsHidden().focusable(false)
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
-                .focusable(false)
             }
-            Row("Ink button in the toolbar", detail: "Change the colour while you present.") {
-                Toggle("", isOn: model.binding({ Preferences.showInkButton }, { Preferences.showInkButton = $0 }))
-                    .toggleStyle(.switch).labelsHidden().focusable(false)
+            Card(title: "Screenshot") {
+                Row(
+                    "Capture",
+                    detail: Preferences.captureScope == .screen
+                        ? "Saves the whole display. Switch while drawing with ⌘/."
+                        : "Saves the frontmost window. Switch while drawing with ⌘/."
+                ) {
+                    Picker("", selection: model.binding({ Preferences.captureScope }, { Preferences.captureScope = $0 })) {
+                        ForEach(CaptureScope.allCases, id: \.self) { scope in
+                            Text(scope.title).tag(scope)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .focusable(false)
+                }
             }
         }
     }

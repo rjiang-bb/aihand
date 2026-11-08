@@ -376,7 +376,8 @@ final class Toolbar {
     func place(on screen: NSScreen) {
         setInkOpen(false)
         let f = panel.frame
-        panel.setFrameOrigin(CGPoint(x: screen.frame.midX - f.width / 2, y: screen.visibleFrame.minY + 14))
+        let visible = screen.visibleFrame
+        panel.setFrameOrigin(CGPoint(x: visible.midX - f.width / 2, y: visible.minY + 14))
     }
 
     func show() {

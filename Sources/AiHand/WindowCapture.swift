@@ -52,7 +52,8 @@ enum WindowCapture {
     static func captureAnnotated(
         strokes: [StrokeResult],
         strokeScreenBounds: CGRect,
-        overlayFrame: CGRect
+        overlayFrame: CGRect,
+        scope: CaptureScope = Preferences.captureScope
     ) async throws -> Outcome {
         if !ensureScreenRecordingAccess() {
             throw CaptureError.permissionDenied
@@ -64,9 +65,12 @@ enum WindowCapture {
         }
 
         let screenBounds = screen.frame
-        let image: CGImage
+        let target = resolveCaptureRegion(scope: scope, screen: screen, strokeScreenBounds: strokeScreenBounds)
+        let captureBounds = target.bounds
+
+        let full: CGImage
         do {
-            image = try await captureScreen(screen: screen)
+            full = try await captureScreen(screen: screen)
         } catch let error as CaptureError {
             throw error
         } catch {
@@ -77,7 +81,8 @@ enum WindowCapture {
             throw CaptureError.captureFailed
         }
 
-        let annotated = composite(image: image, strokes: strokes, captureBounds: screenBounds, overlayFrame: overlayFrame)
+        let image = crop(full, screenFrame: screenBounds, region: captureBounds) ?? full
+        let annotated = composite(image: image, strokes: strokes, captureBounds: captureBounds, overlayFrame: overlayFrame)
             ?? image
 
         let formatter = DateFormatter()
@@ -85,7 +90,89 @@ enum WindowCapture {
         let name = "\(formatter.string(from: Date())).png"
         let path = (folder as NSString).appendingPathComponent(name)
         try writePNG(annotated, to: path)
-        return Outcome(path: path, windowName: findWindow(intersecting: strokeScreenBounds)?.name)
+        return Outcome(path: path, windowName: target.name)
+    }
+
+    /// AppKit bounds of whatever the current capture scope targets on `screen`.
+    static func captureRegion(on screen: NSScreen, scope: CaptureScope = Preferences.captureScope) -> CGRect {
+        resolveCaptureRegion(scope: scope, screen: screen, strokeScreenBounds: screen.frame).bounds
+    }
+
+    private struct CaptureTarget {
+        let bounds: CGRect
+        let name: String?
+    }
+
+    private static func resolveCaptureRegion(
+        scope: CaptureScope,
+        screen: NSScreen,
+        strokeScreenBounds: CGRect
+    ) -> CaptureTarget {
+        switch scope {
+        case .screen:
+            return CaptureTarget(bounds: screen.frame, name: nil)
+        case .window:
+            if let win = frontmostWindow(on: screen) ?? findWindow(intersecting: strokeScreenBounds) {
+                let clipped = win.bounds.intersection(screen.frame)
+                if !clipped.isNull, clipped.width > 8, clipped.height > 8 {
+                    return CaptureTarget(bounds: clipped, name: win.name)
+                }
+            }
+            return CaptureTarget(bounds: screen.frame, name: nil)
+        }
+    }
+
+    /// Frontmost normal window that isn’t AiHand, preferably on `screen`.
+    static func frontmostWindow(on screen: NSScreen? = nil) -> TargetWindow? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                as? [[String: Any]] else {
+            return nil
+        }
+        let ourPID = ProcessInfo.processInfo.processIdentifier
+        let minArea: CGFloat = 80 * 80
+        var bestOnScreen: TargetWindow?
+        for info in list {
+            guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID != ourPID,
+                  let number = info[kCGWindowNumber as String] as? CGWindowID,
+                  let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let cgRect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
+                continue
+            }
+            let alpha = (info[kCGWindowAlpha as String] as? CGFloat) ?? 1
+            if alpha < 0.05 { continue }
+            let appKitRect = cgToAppKit(cgRect)
+            if appKitRect.width * appKitRect.height < minArea { continue }
+            let name = info[kCGWindowName as String] as? String
+                ?? info[kCGWindowOwnerName as String] as? String
+            let window = TargetWindow(windowID: number, bounds: appKitRect, name: name)
+            if let screen {
+                let overlap = appKitRect.intersection(screen.frame)
+                if !overlap.isNull, overlap.width > 8, overlap.height > 8 {
+                    return window
+                }
+                if bestOnScreen == nil { bestOnScreen = window }
+            } else {
+                return window
+            }
+        }
+        return bestOnScreen
+    }
+
+    private static func crop(_ image: CGImage, screenFrame: CGRect, region: CGRect) -> CGImage? {
+        let clipped = region.intersection(screenFrame)
+        guard !clipped.isNull, clipped.width > 1, clipped.height > 1 else { return nil }
+        if clipped == screenFrame { return image }
+        let scaleX = CGFloat(image.width) / screenFrame.width
+        let scaleY = CGFloat(image.height) / screenFrame.height
+        let cropRect = CGRect(
+            x: (clipped.minX - screenFrame.minX) * scaleX,
+            y: (screenFrame.maxY - clipped.maxY) * scaleY,
+            width: clipped.width * scaleX,
+            height: clipped.height * scaleY
+        ).integral
+        guard cropRect.width > 1, cropRect.height > 1 else { return nil }
+        return image.cropping(to: cropRect)
     }
 
     /// Full-screen capture excluding AiHand’s own windows.
@@ -188,7 +275,7 @@ enum WindowCapture {
             ?? NSScreen.main
     }
 
-    private struct TargetWindow {
+    struct TargetWindow {
         let windowID: CGWindowID
         let bounds: CGRect
         let name: String?
@@ -259,25 +346,36 @@ enum WindowCapture {
         }
 
         for stroke in strokes {
-            guard let first = stroke.points.first else { continue }
-            let path = CGMutablePath()
-            let p0 = toBitmap(first)
-            path.move(to: p0)
-            if stroke.points.count == 1 {
-                path.addLine(to: p0)
-            }
-            for i in 1..<stroke.points.count {
-                let p = toBitmap(stroke.points[i])
-                let prev = toBitmap(stroke.points[i - 1])
-                let mid = CGPoint(x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2)
-                path.addQuadCurve(to: mid, control: prev)
-            }
-            if stroke.points.count > 1, let last = stroke.points.last {
-                path.addLine(to: toBitmap(last))
+            guard !stroke.points.isEmpty else { continue }
+            let scale = (scaleX + scaleY) / 2
+
+            if stroke.tool == .text, let text = stroke.text, !text.isEmpty {
+                let topLeft = toBitmap(stroke.points[0])
+                let fontSize = max(10, stroke.width * scale)
+                let image = InkTextStyle.renderImage(
+                    text: text,
+                    background: stroke.color,
+                    fontSize: fontSize,
+                    maxTextWidth: 520 * scale
+                )
+                let box = CGRect(
+                    x: topLeft.x,
+                    y: topLeft.y - image.size.height,
+                    width: image.size.width,
+                    height: image.size.height
+                )
+                if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    ctx.draw(cg, in: box)
+                }
+                continue
             }
 
+            let mapped = stroke.points.map(toBitmap)
+            let width = max(2, stroke.width * scale)
+            let path = StrokePath.make(tool: stroke.tool, points: mapped, lineWidth: width)
+
             ctx.setStrokeColor(stroke.color)
-            ctx.setLineWidth(max(2, stroke.width * ((scaleX + scaleY) / 2)))
+            ctx.setLineWidth(width)
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
             ctx.addPath(path)
