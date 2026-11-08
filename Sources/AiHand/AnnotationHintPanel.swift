@@ -11,7 +11,32 @@ final class AnnotationHintPanel {
 
     var frame: CGRect { panel?.frame ?? .zero }
 
-    func show(on screen: NSScreen) {
+    static var drawingParts: [(String, String)] {
+        [
+            ("⌘Z", "undo"),
+            (Preferences.clearShortcut.display, "clear drawing"),
+            ("⌘⇧S", "save screenshot"),
+            ("⌘/", "screen / window"),
+            ("Enter", "comment"),
+            ("⌘↩", "send to agent"),
+            ("Right-drag", "video"),
+            ("Esc", "exit"),
+        ]
+    }
+
+    static let videoSelectingParts: [(String, String)] = [
+        ("Release", "start recording"),
+        ("Esc", "cancel"),
+    ]
+
+    static let videoRecordingParts: [(String, String)] = [
+        ("⌘S", "save + comment"),
+        ("⌘⇧S", "save video"),
+        ("⌘↩", "send to agent"),
+        ("Esc", "discard"),
+    ]
+
+    func show(on screen: NSScreen, parts: [(String, String)] = drawingParts) {
         hide()
         let p = Panel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 40),
@@ -51,15 +76,6 @@ final class AnnotationHintPanel {
 
         let fg = dark ? NSColor.white : NSColor.black
         let muted = fg.withAlphaComponent(0.55)
-        let parts: [(String, String)] = [
-            ("⌘Z", "undo"),
-            (Preferences.clearShortcut.display, "clear drawing"),
-            ("⌘⇧S", "save screenshot"),
-            ("⌘/", "screen / window"),
-            ("Enter", "comment"),
-            ("⌘↩", "send to agent"),
-            ("Esc", "exit"),
-        ]
         for part in parts {
             let text = NSMutableAttributedString(string: part.0, attributes: [
                 .font: NSFont.systemFont(ofSize: 11, weight: .semibold),

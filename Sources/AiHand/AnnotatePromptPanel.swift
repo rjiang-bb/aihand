@@ -74,13 +74,54 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         installKeyMonitor()
         onOpenChanged?(true)
+        focusPromptField()
 
         // SwiftUI needs a turn to apply requirePrompt / focus before fitting size is accurate.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.panel.isVisible else { return }
             self.position(on: screen, placement: placement)
             self.panel.makeKeyAndOrderFront(nil)
+            self.model.focusTick += 1
+            self.focusPromptField()
         }
+        // One more pass after layout settles (hosting view / field editor).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, self.panel.isVisible else { return }
+            self.model.focusTick += 1
+            self.focusPromptField()
+        }
+    }
+
+    /// Force the prompt NSTextField to become first responder (SwiftUI FocusState alone is flaky in panels).
+    private func focusPromptField() {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        guard let root = panel.contentView else { return }
+        if let field = findPromptTextField(in: root) {
+            panel.makeFirstResponder(field)
+            if let editor = panel.fieldEditor(true, for: field) as? NSTextView {
+                let end = (field.stringValue as NSString).length
+                editor.setSelectedRange(NSRange(location: end, length: 0))
+            }
+            return
+        }
+        // Fallback: whatever SwiftUI focused via FocusState.
+        if let textView = editableFieldEditor() {
+            let end = (textView.string as NSString).length
+            textView.setSelectedRange(NSRange(location: end, length: 0))
+        }
+    }
+
+    private func findPromptTextField(in view: NSView) -> NSTextField? {
+        if let field = view as? NSTextField, field.isEditable {
+            return field
+        }
+        for sub in view.subviews {
+            if let found = findPromptTextField(in: sub) {
+                return found
+            }
+        }
+        return nil
     }
 
     private func position(on screen: NSScreen, placement: Placement) {

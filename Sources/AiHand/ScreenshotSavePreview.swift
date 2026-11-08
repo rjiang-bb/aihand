@@ -1,6 +1,6 @@
 import AppKit
 
-/// Bottom-right floating thumbnail of a just-saved screenshot; drag it into other apps.
+/// Bottom-right floating thumbnail of a just-saved capture; click to open, drag into other apps.
 final class ScreenshotSavePreview {
     private final class Panel: NSPanel {
         override var canBecomeKey: Bool { false }
@@ -10,16 +10,36 @@ final class ScreenshotSavePreview {
     private final class DragImageView: NSImageView, NSDraggingSource {
         var fileURL: URL?
         var onInteract: (() -> Void)?
+        var onClick: (() -> Void)?
+        private var downPoint: NSPoint?
+        private var dragging = false
 
         override func mouseDown(with event: NSEvent) {
             onInteract?()
-            guard let fileURL, let image else {
-                super.mouseDown(with: event)
-                return
+            downPoint = event.locationInWindow
+            dragging = false
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let downPoint, let fileURL, let image else { return }
+            let p = event.locationInWindow
+            if !dragging {
+                if hypot(p.x - downPoint.x, p.y - downPoint.y) < 4 { return }
+                dragging = true
+                let item = NSDraggingItem(pasteboardWriter: fileURL as NSURL)
+                item.setDraggingFrame(bounds, contents: image)
+                beginDraggingSession(with: [item], event: event, source: self)
             }
-            let item = NSDraggingItem(pasteboardWriter: fileURL as NSURL)
-            item.setDraggingFrame(bounds, contents: image)
-            beginDraggingSession(with: [item], event: event, source: self)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            defer {
+                downPoint = nil
+                dragging = false
+            }
+            if !dragging {
+                onClick?()
+            }
         }
 
         func draggingSession(
@@ -30,6 +50,14 @@ final class ScreenshotSavePreview {
         }
 
         func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+            onInteract?()
+        }
+
+        func draggingSession(
+            _ session: NSDraggingSession,
+            endedAt screenPoint: NSPoint,
+            operation: NSDragOperation
+        ) {
             onInteract?()
         }
     }
@@ -58,8 +86,14 @@ final class ScreenshotSavePreview {
         let thumb = CGSize(width: max(48, imgSize.width * scale), height: max(48, imgSize.height * scale))
         let pad: CGFloat = 8
 
+        let closeBleed: CGFloat = 11
         let preview = Panel(
-            contentRect: NSRect(x: 0, y: 0, width: thumb.width + pad * 2, height: thumb.height + pad * 2),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: thumb.width + pad * 2 + closeBleed,
+                height: thumb.height + pad * 2 + closeBleed
+            ),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -73,6 +107,10 @@ final class ScreenshotSavePreview {
         preview.isReleasedWhenClosed = false
         preview.alphaValue = 0
 
+        let root = NSView(frame: .zero)
+        root.wantsLayer = true
+        preview.contentView = root
+
         let card = NSView(frame: .zero)
         card.wantsLayer = true
         card.layer?.backgroundColor = SoftChrome.cardNSColor(dark: dark).cgColor
@@ -80,30 +118,48 @@ final class ScreenshotSavePreview {
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 3
         card.layer?.borderColor = NSColor.systemBlue.cgColor
-        preview.contentView = card
+        card.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(card)
 
         let imageView = DragImageView(frame: .zero)
         imageView.image = image
         imageView.fileURL = fileURL
-        imageView.onInteract = { [weak self] in self?.cancelAutoDismiss() }
+        imageView.onInteract = { [weak self] in self?.bumpAutoDismiss() }
+        imageView.onClick = { [weak self] in self?.openFile() }
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = 8
         imageView.layer?.masksToBounds = true
         imageView.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(imageView)
+
+        let close = makeCloseButton(dark: dark)
+        root.addSubview(close)
+
         NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            card.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            card.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -closeBleed),
+            card.topAnchor.constraint(equalTo: root.topAnchor, constant: closeBleed),
+
             imageView.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: pad),
             imageView.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -pad),
             imageView.topAnchor.constraint(equalTo: card.topAnchor, constant: pad),
             imageView.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -pad),
             imageView.widthAnchor.constraint(equalToConstant: thumb.width),
             imageView.heightAnchor.constraint(equalToConstant: thumb.height),
-        ])
-        card.layoutSubtreeIfNeeded()
-        preview.setContentSize(card.fittingSize)
 
-        let hint = makeHint(dark: dark)
+            close.widthAnchor.constraint(equalToConstant: 22),
+            close.heightAnchor.constraint(equalToConstant: 22),
+            close.centerXAnchor.constraint(equalTo: card.trailingAnchor),
+            close.centerYAnchor.constraint(equalTo: card.topAnchor),
+        ])
+        root.layoutSubtreeIfNeeded()
+        preview.setContentSize(root.fittingSize)
+
+        let isVideo = fileURL.pathExtension.lowercased() == "mov"
+            || fileURL.pathExtension.lowercased() == "mp4"
+        let hint = makeHint(dark: dark, isVideo: isVideo)
         place(preview: preview, hint: hint, on: screen)
         preview.orderFrontRegardless()
         hint.orderFrontRegardless()
@@ -143,6 +199,12 @@ final class ScreenshotSavePreview {
         })
     }
 
+    private func openFile() {
+        guard let fileURL else { return }
+        NSWorkspace.shared.open(fileURL)
+        hide(animated: true)
+    }
+
     private func scheduleAutoDismiss() {
         cancelAutoDismiss()
         let work = DispatchWorkItem { [weak self] in
@@ -150,6 +212,11 @@ final class ScreenshotSavePreview {
         }
         dismissWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    /// Cancel the current countdown and start a fresh 5s window (after click/drag).
+    private func bumpAutoDismiss() {
+        scheduleAutoDismiss()
     }
 
     private func cancelAutoDismiss() {
@@ -181,7 +248,33 @@ final class ScreenshotSavePreview {
         })
     }
 
-    private func makeHint(dark: Bool) -> Panel {
+    private func makeCloseButton(dark: Bool) -> NSButton {
+        let b = NSButton(frame: .zero)
+        b.isBordered = false
+        b.bezelStyle = .regularSquare
+        b.wantsLayer = true
+        b.layer?.backgroundColor = (dark ? NSColor.white : NSColor.black).cgColor
+        b.layer?.cornerRadius = 11
+        b.layer?.borderWidth = 1
+        b.layer?.borderColor = (dark ? NSColor.black.withAlphaComponent(0.35) : NSColor.white.withAlphaComponent(0.55)).cgColor
+        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        b.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
+            .withSymbolConfiguration(config)
+        b.imagePosition = .imageOnly
+        b.contentTintColor = dark ? .black : .white
+        b.toolTip = "Dismiss"
+        b.setAccessibilityLabel("Dismiss")
+        b.translatesAutoresizingMaskIntoConstraints = false
+        b.target = self
+        b.action = #selector(closeTapped)
+        return b
+    }
+
+    @objc private func closeTapped() {
+        hide(animated: true)
+    }
+
+    private func makeHint(dark: Bool, isVideo: Bool) -> Panel {
         let p = Panel(
             contentRect: NSRect(x: 0, y: 0, width: 220, height: 36),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -207,14 +300,17 @@ final class ScreenshotSavePreview {
         p.contentView = card
 
         let fg = dark ? NSColor.white : NSColor.black
-        let text = NSMutableAttributedString(string: "Drag", attributes: [
+        let text = NSMutableAttributedString(string: "Click", attributes: [
             .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
             .foregroundColor: fg,
         ])
-        text.append(NSAttributedString(string: "  into any app", attributes: [
-            .font: NSFont.systemFont(ofSize: 12),
-            .foregroundColor: fg.withAlphaComponent(0.55),
-        ]))
+        text.append(NSAttributedString(
+            string: isVideo ? "  to play · Drag into any app" : "  to open · Drag into any app",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: fg.withAlphaComponent(0.55),
+            ]
+        ))
         let label = NSTextField(labelWithAttributedString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(label)

@@ -24,7 +24,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private lazy var sessionManager = AgentSessionManager(store: sessionStore)
     private lazy var sessionsPanel = SessionsSidePanel(store: sessionStore)
     private let annotatePanel = AnnotatePromptPanel()
+    private let videoAnnotatePreview = VideoAnnotatePreview()
     private var pendingStrokes: [StrokeResult] = []
+    /// Video waiting for an annotate comment (`⌘S` in video mode).
+    private var pendingVideoPath: String?
     private var sessionIconBag: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -112,10 +115,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         annotatePanel.onCancel = { [weak self] in
             // Keep drawings — Esc only closes the comment box.
-            self?.overlay.setAnnotationHintsVisible(true)
+            // Discarding a video comment also deletes the just-saved recording.
+            guard let self else { return }
+            let videoPath = self.pendingVideoPath
+            self.pendingVideoPath = nil
+            self.videoAnnotatePreview.hide()
+            if let videoPath {
+                try? FileManager.default.removeItem(atPath: videoPath)
+                Log.write("video discarded \(videoPath)")
+            }
+            self.overlay.setAnnotationHintsVisible(true)
         }
         annotatePanel.onSubmit = { [weak self] prompt in
-            self?.submitAnnotation(prompt: prompt)
+            guard let self else { return }
+            if self.pendingVideoPath != nil {
+                self.submitPendingVideo(prompt: prompt)
+            } else {
+                self.submitAnnotation(prompt: prompt)
+            }
         }
 
         overlay.onStrokeComplete = { [weak self] result, _, _ in
@@ -132,6 +149,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         overlay.onRequestSave = { [weak self] in
             guard let self, !self.annotatePanel.isVisible else { return }
             self.saveScreenshot()
+        }
+        overlay.onRequestVideoAnnotate = { [weak self] url, region in
+            self?.openVideoComment(path: url.path, region: region)
+        }
+        overlay.onRequestVideoSave = { [weak self] url in
+            self?.saveVideoPreview(url: url)
+        }
+        overlay.onRequestVideoSend = { [weak self] url in
+            self?.sendVideo(path: url.path, prompt: "")
+        }
+        overlay.onVideoCaptureFailed = { [weak self] error in
+            self?.presentCaptureFailure(error, kind: .video)
         }
         overlay.onInkCleared = { [weak self] in
             self?.pendingStrokes = []
@@ -171,6 +200,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             annotatePanel.show(on: screen, placement: .near(near), workspaceMissing: missing, requirePrompt: false)
         } else {
             annotatePanel.show(on: screen, placement: .bottom, workspaceMissing: missing, requirePrompt: false)
+        }
+    }
+
+    private func openVideoComment(path: String, region: CGRect) {
+        pendingVideoPath = path
+        overlay.exit()
+        let screen = NSScreen.screens.first(where: { $0.frame.intersects(region) })
+            ?? NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+            ?? NSScreen.main
+        guard let screen else { return }
+        let missing = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        if region.width > 8, region.height > 8 {
+            videoAnnotatePreview.show(fileURL: URL(fileURLWithPath: path), region: region, on: screen)
+            annotatePanel.show(
+                on: screen,
+                placement: .near(videoAnnotatePreview.frame),
+                workspaceMissing: missing,
+                requirePrompt: false
+            )
+        } else {
+            videoAnnotatePreview.hide()
+            annotatePanel.show(on: screen, placement: .bottom, workspaceMissing: missing, requirePrompt: false)
+        }
+    }
+
+    private func submitPendingVideo(prompt: String) {
+        guard let path = pendingVideoPath else { return }
+        pendingVideoPath = nil
+        videoAnnotatePreview.hide()
+        sendVideo(path: path, prompt: prompt)
+    }
+
+    private func saveVideoPreview(url: URL) {
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        overlay.exit()
+        let image = RegionRecorder.posterImage(for: url)
+            ?? NSImage(systemSymbolName: "video", accessibilityDescription: nil)
+            ?? NSImage(size: NSSize(width: 120, height: 80))
+        if let screen {
+            overlay.showSavePreview(fileURL: url, image: image, on: screen)
+        }
+        ScreenshotNotifier.notifySaved(path: url.path)
+        Log.write("video saved \(url.path)")
+    }
+
+    private func sendVideo(path: String, prompt: String) {
+        let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !workspace.isEmpty else {
+            pendingVideoPath = path
+            videoAnnotatePreview.hide()
+            overlay.exit()
+            settings.show(.agent)
+            return
+        }
+        annotatePanel.hide()
+        videoAnnotatePreview.hide()
+        overlay.exit()
+        if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: path) {
+            sessionsPanel.openChat(for: session.id)
         }
     }
 
@@ -232,7 +323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                     self.overlay.releaseStrokeHold(stroke, fadeNow: false)
                 }
                 self.overlay.exit()
-                self.presentCaptureFailure(error)
+                self.presentCaptureFailure(error, kind: .screenshot)
             }
         }
     }
@@ -280,7 +371,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 if self.overlay.isActive {
                     self.overlay.setAnnotationHintsVisible(true)
                 }
-                self.presentCaptureFailure(error)
+                self.presentCaptureFailure(error, kind: .screenshot)
             }
         }
     }
@@ -296,17 +387,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         )
     }
 
-    private func presentCaptureFailure(_ error: Error) {
+    private enum CaptureKind {
+        case screenshot
+        case video
+    }
+
+    private func presentCaptureFailure(_ error: Error, kind: CaptureKind) {
         Log.write("capture failed: \(error.localizedDescription)")
         let needsScreenRecording = (error as? WindowCapture.CaptureError) == .permissionDenied
+            || (error as? RegionRecorder.RecorderError) == .permissionDenied
             || error.localizedDescription.localizedCaseInsensitiveContains("Screen Recording")
         if needsScreenRecording {
             _ = WindowCapture.ensureScreenRecordingAccess()
         }
         let alert = NSAlert()
-        alert.messageText = "Couldn’t capture screenshot"
+        alert.messageText = kind == .video ? "Couldn’t record video" : "Couldn’t capture screenshot"
         alert.informativeText = needsScreenRecording
-            ? "Turn on AiHand under Privacy & Security → Screen Recording, then draw again."
+            ? "Turn on AiHand under Privacy & Security → Screen Recording, then try again."
             : error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")

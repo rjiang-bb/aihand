@@ -21,6 +21,8 @@ final class ArmView: NSView {
 
     let ink = Ink()
     private let captureOutline = CAShapeLayer()
+    private let videoSelectionOutline = CAShapeLayer()
+    private let videoRecordDot = CAShapeLayer()
     var held = false
     var inkWidth: CGFloat {
         let base = max(3, bounds.height * 0.0055)
@@ -73,6 +75,20 @@ final class ArmView: NSView {
         captureOutline.isHidden = true
         root.addSublayer(captureOutline)
 
+        videoSelectionOutline.fillColor = nil
+        videoSelectionOutline.strokeColor = Ink.red
+        videoSelectionOutline.lineWidth = 3
+        videoSelectionOutline.lineJoin = .miter
+        videoSelectionOutline.lineCap = .square
+        videoSelectionOutline.lineDashPattern = [8, 6]
+        videoSelectionOutline.isHidden = true
+        root.addSublayer(videoSelectionOutline)
+
+        videoRecordDot.fillColor = NSColor.systemRed.cgColor
+        videoRecordDot.strokeColor = nil
+        videoRecordDot.isHidden = true
+        root.addSublayer(videoRecordDot)
+
         group.masksToBounds = false
         group.addSublayer(rodLayer)
         group.addSublayer(handLayer)
@@ -104,23 +120,107 @@ final class ArmView: NSView {
 
     /// Thick red frame around the region that will be screenshotted (`local` overlay coords).
     func setCaptureOutline(localRect: CGRect?) {
+        applyOutline(captureOutline, localRect: localRect, minSize: 2)
+    }
+
+    /// Dashed marquee for video-region selection (`local` overlay coords).
+    func setVideoSelectionOutline(localRect: CGRect?) {
+        stopVideoRecordingFlash()
+        videoRecordDot.isHidden = true
+        applyOutline(videoSelectionOutline, localRect: localRect, minSize: 2)
+    }
+
+    /// Recording frame: dashed rect + red dot in the top-left corner. Pass `flashing: true` while capturing.
+    func setVideoRecordingIndicator(localRect: CGRect?, flashing: Bool) {
+        stopVideoRecordingFlash()
+        applyOutline(videoSelectionOutline, localRect: localRect, minSize: 2)
+        guard let localRect, localRect.width > 8, localRect.height > 8 else {
+            videoRecordDot.isHidden = true
+            return
+        }
+
+        let radius: CGFloat = 6
+        let inset: CGFloat = 10
+        // AppKit: y grows up — top-left of the selection.
+        let center = CGPoint(x: localRect.minX + inset + radius, y: localRect.maxY - inset - radius)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoRecordDot.path = CGPath(
+            ellipseIn: CGRect(x: -radius, y: -radius, width: radius * 2, height: radius * 2),
+            transform: nil
+        )
+        videoRecordDot.position = center
+        videoRecordDot.opacity = 1
+        videoRecordDot.isHidden = false
+        CATransaction.commit()
+
+        if flashing {
+            startVideoRecordingFlash()
+        }
+    }
+
+    func clearVideoRecordingIndicator() {
+        stopVideoRecordingFlash()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoSelectionOutline.isHidden = true
+        videoSelectionOutline.path = nil
+        videoRecordDot.isHidden = true
+        videoRecordDot.path = nil
+        CATransaction.commit()
+    }
+
+    private func startVideoRecordingFlash() {
+        let dash = CABasicAnimation(keyPath: "lineDashPhase")
+        dash.fromValue = 0
+        dash.toValue = 14
+        dash.duration = 0.45
+        dash.repeatCount = .infinity
+        videoSelectionOutline.add(dash, forKey: "videoDash")
+
+        let outlinePulse = CABasicAnimation(keyPath: "opacity")
+        outlinePulse.fromValue = 1
+        outlinePulse.toValue = 0.35
+        outlinePulse.duration = 0.7
+        outlinePulse.autoreverses = true
+        outlinePulse.repeatCount = .infinity
+        videoSelectionOutline.add(outlinePulse, forKey: "videoOutlinePulse")
+
+        let dotPulse = CABasicAnimation(keyPath: "opacity")
+        dotPulse.fromValue = 1
+        dotPulse.toValue = 0.2
+        dotPulse.duration = 0.7
+        dotPulse.autoreverses = true
+        dotPulse.repeatCount = .infinity
+        videoRecordDot.add(dotPulse, forKey: "videoDotPulse")
+    }
+
+    private func stopVideoRecordingFlash() {
+        videoSelectionOutline.removeAnimation(forKey: "videoDash")
+        videoSelectionOutline.removeAnimation(forKey: "videoOutlinePulse")
+        videoRecordDot.removeAnimation(forKey: "videoDotPulse")
+        videoSelectionOutline.opacity = 1
+        videoRecordDot.opacity = 1
+    }
+
+    private func applyOutline(_ layer: CAShapeLayer, localRect: CGRect?, minSize: CGFloat) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        guard let localRect, localRect.width > 2, localRect.height > 2 else {
-            captureOutline.isHidden = true
-            captureOutline.path = nil
+        guard let localRect, localRect.width > minSize, localRect.height > minSize else {
+            layer.isHidden = true
+            layer.path = nil
             return
         }
-        let inset = captureOutline.lineWidth / 2
+        let inset = layer.lineWidth / 2
         let stroked = localRect.insetBy(dx: inset, dy: inset)
         guard stroked.width > 1, stroked.height > 1 else {
-            captureOutline.isHidden = true
-            captureOutline.path = nil
+            layer.isHidden = true
+            layer.path = nil
             return
         }
-        captureOutline.path = CGPath(rect: stroked, transform: nil)
-        captureOutline.isHidden = false
+        layer.path = CGPath(rect: stroked, transform: nil)
+        layer.isHidden = false
     }
 
     func setStyle(_ newStyle: PointerStyle) {

@@ -27,6 +27,26 @@ final class OverlayController {
     /// Click-away that committed a text box should not open a new one on the same click.
     private var suppressNextTextPlacement = false
 
+    private enum VideoPhase {
+        case off
+        case selecting
+        case recording
+        case ready
+    }
+
+    private var videoPhase: VideoPhase = .off
+    private var videoAnchor: CGPoint?
+    private var videoLocalRect: CGRect?
+    private var videoScreenRect: CGRect?
+    private var videoScreen: NSScreen?
+    private var videoRightSeenDown = false
+    private var readyVideoURL: URL?
+    private var videoElapsedFrozen: TimeInterval = 0
+    private let regionRecorder = RegionRecorder()
+    private var videoSaveHotKey: UInt32?
+    private var videoSaveShiftHotKey: UInt32?
+    private var videoSendHotKey: UInt32?
+
     private let toolbar = Toolbar()
     private var revealUntil = Date.distantPast
     private var normalCursor = false
@@ -42,6 +62,7 @@ final class OverlayController {
     private var toolHotKeys: [UInt32] = []
     private let annotationHints = AnnotationHintPanel()
     private let drawingTools = DrawingToolsPanel()
+    private let videoToolbar = VideoToolbarPanel()
     private let textEditor = InkTextEditor()
     private let savePreview = ScreenshotSavePreview()
     private var lastPermissionCheck = Date.distantPast
@@ -69,8 +90,16 @@ final class OverlayController {
     var onInkCleared: (() -> Void)?
     /// Fired after undoing a finished stroke (layer removed from the overlay).
     var onStrokeUndone: ((CALayer) -> Void)?
+    /// Video saved then open comment / send to agent (`⌘S`). Region is AppKit screen coords.
+    var onRequestVideoAnnotate: ((URL, CGRect) -> Void)?
+    /// Video saved only (`⌘⇧S`).
+    var onRequestVideoSave: ((URL) -> Void)?
+    /// Video saved and sent to agent (`⌘↩`).
+    var onRequestVideoSend: ((URL) -> Void)?
+    var onVideoCaptureFailed: ((Error) -> Void)?
 
     var isEditingText: Bool { textEditor.isEditing }
+    var isVideoModeActive: Bool { videoPhase != .off }
 
     /// Screen the overlay currently tracks (mouse / active display).
     var activeScreen: NSScreen? { currentScreen() }
@@ -102,10 +131,11 @@ final class OverlayController {
             self.updateZones(mouse: NSEvent.mouseLocation, screen: screen)
         }
 
-        inputTap.onMouseDown = { [weak self] in
+        inputTap.onLeftMouseDown = { [weak self] in
             guard let self = self else {
                 return
             }
+            guard self.videoPhase == .off else { return }
             if self.textEditor.isEditing {
                 self.textEditor.commit()
                 self.suppressNextTextPlacement = true
@@ -120,13 +150,33 @@ final class OverlayController {
             self.noteButtonEvent()
         }
         inputTap.onLeftDragged = { [weak self] in
-            self?.dragEvents += 1
-            self?.drag()
+            guard let self, self.videoPhase == .off else { return }
+            self.dragEvents += 1
+            self.drag()
+            self.aimFrame()
+        }
+        inputTap.onLeftMouseUp = { [weak self] in
+            guard let self, self.videoPhase == .off else { return }
+            self.release()
+            self.noteButtonEvent()
+        }
+        inputTap.onRightMouseDown = { [weak self] in
+            self?.beginVideoSelect()
+        }
+        inputTap.onRightDragged = { [weak self] in
+            self?.updateVideoSelect()
             self?.aimFrame()
         }
-        inputTap.onMouseUp = { [weak self] in
-            self?.release()
-            self?.noteButtonEvent()
+        inputTap.onRightMouseUp = { [weak self] in
+            self?.finishVideoSelect()
+        }
+        videoToolbar.onStop = { [weak self] in
+            self?.stopVideoRecordingKeep()
+        }
+        regionRecorder.onElapsed = { [weak self] seconds in
+            guard let self else { return }
+            self.videoElapsedFrozen = seconds
+            self.videoToolbar.setElapsed(seconds)
         }
         inputTap.onInteractDown = { [weak self] in
             self?.armView.press()
@@ -217,9 +267,16 @@ final class OverlayController {
             return
         }
         ownMenuOpen = suspended
-        inputTap.setActive(!suspended)
+        // Keep the tap off while recording / ready so the real cursor stays usable.
+        if videoPhase == .recording || videoPhase == .ready {
+            inputTap.setActive(false)
+        } else {
+            inputTap.setActive(!suspended)
+        }
         // Drop Enter / ⌘↩ while the comment box is key so the field can use them.
-        setAnnotationHotKeysEnabled(!suspended)
+        if videoPhase == .off {
+            setAnnotationHotKeysEnabled(!suspended)
+        }
         if let screen = currentScreen() {
             updateZones(mouse: NSEvent.mouseLocation, screen: screen)
         }
@@ -366,16 +423,288 @@ final class OverlayController {
         if !visible, textEditor.isEditing {
             textEditor.commit()
         }
-        guard visible, isActive, let screen = currentScreen() else {
+        guard visible, isActive, let screen = videoScreen ?? currentScreen() else {
             annotationHints.hide()
             drawingTools.hide()
+            videoToolbar.hide()
             return
         }
-        annotationHints.show(on: screen)
-        drawingTools.show(on: screen, above: annotationHints.frame)
+        showChrome(on: screen)
+    }
+
+    private func showChrome(on screen: NSScreen) {
+        switch videoPhase {
+        case .off:
+            videoToolbar.hide()
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.drawingParts)
+            drawingTools.show(on: screen, above: annotationHints.frame)
+        case .selecting:
+            drawingTools.hide()
+            videoToolbar.hide()
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoSelectingParts)
+        case .recording:
+            drawingTools.hide()
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts)
+            videoToolbar.show(on: screen, above: annotationHints.frame, recording: true)
+            videoToolbar.setElapsed(videoElapsedFrozen)
+        case .ready:
+            drawingTools.hide()
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts)
+            videoToolbar.show(on: screen, above: annotationHints.frame, recording: false)
+            videoToolbar.setElapsed(videoElapsedFrozen)
+        }
+    }
+
+    private func beginVideoSelect() {
+        guard isActive, videoPhase == .off || videoPhase == .selecting else { return }
+        if textEditor.isEditing {
+            textEditor.cancel()
+        }
+        if armView.ink.isDrawing {
+            _ = armView.ink.end(holdFade: false)
+        }
+        downPoint = nil
+        buttonSeenDown = false
+        guard let local = localMouse(), let screen = currentScreen() else { return }
+        videoPhase = .selecting
+        videoAnchor = local
+        videoLocalRect = CGRect(origin: local, size: .zero)
+        videoScreen = screen
+        videoRightSeenDown = true
+        armView.setVideoSelectionOutline(localRect: videoLocalRect)
+        setAnnotationHotKeysEnabled(false)
+        setVideoHotKeysEnabled(false)
+        showChrome(on: screen)
+        toolbar.hideHint()
+        noteButtonEvent()
+        Log.write("video select start at \(Int(local.x)),\(Int(local.y))")
+    }
+
+    private func updateVideoSelect() {
+        guard videoPhase == .selecting, let anchor = videoAnchor, let p = localMouse() else { return }
+        let rect = CGRect(
+            x: min(anchor.x, p.x),
+            y: min(anchor.y, p.y),
+            width: abs(p.x - anchor.x),
+            height: abs(p.y - anchor.y)
+        )
+        videoLocalRect = rect
+        armView.setVideoSelectionOutline(localRect: rect)
+    }
+
+    private func finishVideoSelect() {
+        guard videoPhase == .selecting else { return }
+        videoRightSeenDown = false
+        updateVideoSelect()
+        guard let local = videoLocalRect, let frame = currentFrame, let screen = videoScreen ?? currentScreen() else {
+            Task { @MainActor in await abandonVideoSession(restoreDrawing: true) }
+            return
+        }
+        let screenRect = CGRect(
+            x: frame.origin.x + local.minX,
+            y: frame.origin.y + local.minY,
+            width: local.width,
+            height: local.height
+        )
+        videoAnchor = nil
+        if local.width < 20 || local.height < 20 {
+            Log.write("video select too small; cancel")
+            Task { @MainActor in await abandonVideoSession(restoreDrawing: true) }
+            return
+        }
+        videoScreenRect = screenRect
+        videoScreen = screen
+        armView.setVideoSelectionOutline(localRect: nil)
+        Task { @MainActor in
+            await self.startVideoRecording(region: screenRect, on: screen)
+        }
+    }
+
+    @MainActor
+    private func startVideoRecording(region: CGRect, on screen: NSScreen) async {
+        guard isActive else { return }
+        // Real cursor + pass-through clicks; keep overlay up so the recording frame is visible
+        // (AiHand windows are excluded from ScreenCaptureKit).
+        inputTap.setActive(false)
+        armView.pointerHidden = true
+        normalCursor = true
+        CursorHider.show()
+        toolbar.hide()
+        armView.setCaptureOutline(localRect: nil)
+        window.ignoresMouseEvents = true
+        window.orderFrontRegardless()
+
+        if let frame = currentFrame {
+            let local = CGRect(
+                x: region.minX - frame.minX,
+                y: region.minY - frame.minY,
+                width: region.width,
+                height: region.height
+            )
+            armView.setVideoRecordingIndicator(localRect: local, flashing: true)
+        }
+
+        videoPhase = .recording
+        setAnnotationHotKeysEnabled(false)
+        setVideoHotKeysEnabled(true)
+        setEscEnabled(true)
+        showChrome(on: screen)
+
+        do {
+            try await regionRecorder.start(region: region, on: screen)
+        } catch {
+            await abandonVideoSession(restoreDrawing: true)
+            onVideoCaptureFailed?(error)
+        }
+    }
+
+    private func stopVideoRecordingKeep() {
+        guard videoPhase == .recording else { return }
+        Task { @MainActor in
+            do {
+                let url = try await self.regionRecorder.stop()
+                self.readyVideoURL = url
+                self.videoPhase = .ready
+                // Keep the frame, stop the flash.
+                if let frame = self.currentFrame, let region = self.videoScreenRect {
+                    let local = CGRect(
+                        x: region.minX - frame.minX,
+                        y: region.minY - frame.minY,
+                        width: region.width,
+                        height: region.height
+                    )
+                    self.armView.setVideoRecordingIndicator(localRect: local, flashing: false)
+                }
+                if let screen = self.videoScreen ?? self.currentScreen() {
+                    self.showChrome(on: screen)
+                }
+            } catch {
+                await self.abandonVideoSession(restoreDrawing: true)
+                self.onVideoCaptureFailed?(error)
+            }
+        }
+    }
+
+    private func handleVideoSaveAnnotate() {
+        Task { @MainActor in
+            let region = self.videoScreenRect ?? .zero
+            guard let url = await self.finalizeVideoFile() else { return }
+            self.clearVideoUIState()
+            self.onRequestVideoAnnotate?(url, region)
+        }
+    }
+
+    private func handleVideoSaveOnly() {
+        Task { @MainActor in
+            guard let url = await self.finalizeVideoFile() else { return }
+            self.clearVideoUIState()
+            self.onRequestVideoSave?(url)
+        }
+    }
+
+    private func handleVideoSend() {
+        Task { @MainActor in
+            guard let url = await self.finalizeVideoFile() else { return }
+            self.clearVideoUIState()
+            self.onRequestVideoSend?(url)
+        }
+    }
+
+    @MainActor
+    private func finalizeVideoFile() async -> URL? {
+        switch videoPhase {
+        case .recording:
+            do {
+                let temp = try await regionRecorder.stop()
+                return try RegionRecorder.promoteToScreenshotsFolder(temp)
+            } catch {
+                await abandonVideoSession(restoreDrawing: true)
+                onVideoCaptureFailed?(error)
+                return nil
+            }
+        case .ready:
+            guard let temp = readyVideoURL else {
+                await abandonVideoSession(restoreDrawing: true)
+                return nil
+            }
+            readyVideoURL = nil
+            do {
+                return try RegionRecorder.promoteToScreenshotsFolder(temp)
+            } catch {
+                try? FileManager.default.removeItem(at: temp)
+                await abandonVideoSession(restoreDrawing: true)
+                onVideoCaptureFailed?(error)
+                return nil
+            }
+        default:
+            return nil
+        }
+    }
+
+    @MainActor
+    private func abandonVideoSession(restoreDrawing: Bool) async {
+        if regionRecorder.isRecording {
+            await regionRecorder.cancel()
+        }
+        if let url = readyVideoURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        readyVideoURL = nil
+        videoElapsedFrozen = 0
+        videoAnchor = nil
+        videoLocalRect = nil
+        videoScreenRect = nil
+        videoRightSeenDown = false
+        armView.clearVideoRecordingIndicator()
+        armView.setVideoSelectionOutline(localRect: nil)
+        let previous = videoPhase
+        videoPhase = .off
+        setVideoHotKeysEnabled(false)
+        videoToolbar.hide()
+
+        guard restoreDrawing, isActive else {
+            videoScreen = nil
+            return
+        }
+
+        if previous == .recording || previous == .ready {
+            window.orderFrontRegardless()
+            window.ignoresMouseEvents = true
+            inputTap.setActive(inputTap.isInstalled)
+            normalCursor = false
+            armView.pointerHidden = false
+            CursorHider.hide()
+            toolbar.show()
+        }
+        let screen = videoScreen ?? currentScreen()
+        videoScreen = nil
+        if let screen {
+            showChrome(on: screen)
+            updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+        }
+        setAnnotationHotKeysEnabled(true)
+        setEscEnabled(true)
+    }
+
+    /// Drop video chrome/hotkeys after a successful save handoff (AppDelegate exits next).
+    private func clearVideoUIState() {
+        readyVideoURL = nil
+        videoElapsedFrozen = 0
+        videoAnchor = nil
+        videoLocalRect = nil
+        videoScreenRect = nil
+        videoRightSeenDown = false
+        videoScreen = nil
+        armView.clearVideoRecordingIndicator()
+        armView.setVideoSelectionOutline(localRect: nil)
+        videoPhase = .off
+        setVideoHotKeysEnabled(false)
+        videoToolbar.hide()
+        annotationHints.hide()
     }
 
     private func drag() {
+        guard videoPhase == .off else { return }
         guard Preferences.drawTool != .text else { return }
         guard let start = downPoint, let p = localMouse() else {
             return
@@ -440,8 +769,7 @@ final class OverlayController {
 
         if let screen = currentScreen() {
             toolbar.place(on: screen)
-            annotationHints.show(on: screen)
-            drawingTools.show(on: screen, above: annotationHints.frame)
+            showChrome(on: screen)
         }
         toolbar.setNeedsPermission(!installed)
         toolbar.show()
@@ -483,22 +811,28 @@ final class OverlayController {
         }
         armView.held = false
         downPoint = nil
+        Task { @MainActor in
+            await self.abandonVideoSession(restoreDrawing: false)
+        }
         // Keep drawings across hand sessions; only clearInk() / undo removes them.
         if textEditor.isEditing {
             textEditor.commit()
         }
         armView.setCaptureOutline(localRect: nil)
+        armView.setVideoSelectionOutline(localRect: nil)
         savePreview.hide()
         window.ignoresMouseEvents = true
         window.orderOut(nil)
         toolbar.hide()
         annotationHints.hide()
         drawingTools.hide()
+        videoToolbar.hide()
         normalCursor = false
         armView.pointerHidden = false
         inputTap.passThroughRects = []
         setEscEnabled(false)
         setAnnotationHotKeysEnabled(false)
+        setVideoHotKeysEnabled(false)
         ownMenuOpen = false
         CursorHider.show()
         onActiveChanged?()
@@ -579,6 +913,10 @@ final class OverlayController {
         if toolsFrame.width > 0 {
             rects.append(OverlayController.cgRect(toolsFrame))
         }
+        let videoFrame = videoToolbar.frame
+        if videoFrame.width > 0 {
+            rects.append(OverlayController.cgRect(videoFrame))
+        }
         if textEditor.isEditing {
             rects.append(OverlayController.cgRect(textEditor.frame))
         }
@@ -597,6 +935,12 @@ final class OverlayController {
                     self.textEditor.cancel()
                     return
                 }
+                if self.videoPhase != .off {
+                    Task { @MainActor in
+                        await self.abandonVideoSession(restoreDrawing: true)
+                    }
+                    return
+                }
                 self.exit()
             }
         }
@@ -606,8 +950,50 @@ final class OverlayController {
         }
     }
 
-    private func setAnnotationHotKeysEnabled(_ enabled: Bool) {
+    private func setVideoHotKeysEnabled(_ enabled: Bool) {
         if enabled && isActive {
+            if videoSaveHotKey == nil {
+                videoSaveHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_ANSI_S),
+                    modifiers: UInt32(cmdKey)
+                ) { [weak self] in
+                    self?.handleVideoSaveAnnotate()
+                }
+            }
+            if videoSaveShiftHotKey == nil {
+                videoSaveShiftHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_ANSI_S),
+                    modifiers: UInt32(cmdKey | shiftKey)
+                ) { [weak self] in
+                    self?.handleVideoSaveOnly()
+                }
+            }
+            if videoSendHotKey == nil {
+                videoSendHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_Return),
+                    modifiers: UInt32(cmdKey)
+                ) { [weak self] in
+                    self?.handleVideoSend()
+                }
+            }
+            return
+        }
+        if let id = videoSaveHotKey {
+            HotKeyCenter.shared.unregister(id)
+            videoSaveHotKey = nil
+        }
+        if let id = videoSaveShiftHotKey {
+            HotKeyCenter.shared.unregister(id)
+            videoSaveShiftHotKey = nil
+        }
+        if let id = videoSendHotKey {
+            HotKeyCenter.shared.unregister(id)
+            videoSendHotKey = nil
+        }
+    }
+
+    private func setAnnotationHotKeysEnabled(_ enabled: Bool) {
+        if enabled && isActive && videoPhase == .off {
             if enterHotKey == nil {
                 enterHotKey = HotKeyCenter.shared.register(keyCode: UInt32(kVK_Return), modifiers: 0) { [weak self] in
                     guard let self, self.hasAnnotationInk else { return }
@@ -889,6 +1275,7 @@ final class OverlayController {
             toolbar.place(on: screen)
             annotationHints.reposition(on: screen)
             drawingTools.reposition(on: screen, above: annotationHints.frame)
+            videoToolbar.reposition(on: screen, above: annotationHints.frame)
             updateCaptureOutline()
             if let link = displayLink,
                let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
@@ -898,9 +1285,25 @@ final class OverlayController {
 
         lastMouse = mouse
         let local = CGPoint(x: mouse.x - screen.frame.origin.x, y: mouse.y - screen.frame.origin.y)
-        armView.aim(cursor: local)
+        // Keep the hand tracking while marquee-selecting a video region.
+        if videoPhase == .off || videoPhase == .selecting {
+            armView.aim(cursor: local)
+        }
 
-        guard downPoint != nil else { return }
+        if videoPhase == .selecting {
+            let down = CGEventSource.buttonState(.hidSystemState, button: .right)
+            if down {
+                videoRightSeenDown = true
+            }
+            if videoRightSeenDown && !down {
+                finishVideoSelect()
+                return
+            }
+            updateVideoSelect()
+            return
+        }
+
+        guard videoPhase == .off, downPoint != nil else { return }
         let down = CGEventSource.buttonState(.hidSystemState, button: .left)
         if down {
             buttonSeenDown = true
@@ -915,6 +1318,10 @@ final class OverlayController {
     /// Lower-rate maintenance: menus, toolbar, system cursor fighting.
     private func serviceTick() {
         guard isActive else { return }
+        // During recording the hand overlay is hidden; skip cursor/zone maintenance.
+        if videoPhase == .recording || videoPhase == .ready {
+            return
+        }
         let mouse = NSEvent.mouseLocation
         guard let screen = currentScreen() else { return }
 

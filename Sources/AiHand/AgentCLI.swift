@@ -22,16 +22,33 @@ protocol AgentCLI {
 }
 
 extension AgentCLI {
+    static func isVideoMedia(_ path: String) -> Bool {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "mov", "mp4", "m4v", "webm": return true
+        default: return false
+        }
+    }
+
+    /// `--image` is for raster stills; video paths go in the prompt so the agent can open the file.
+    static func shouldPassImageFlag(_ path: String) -> Bool {
+        !isVideoMedia(path)
+    }
+
     func composePrompt(_ prompt: String, imagePath: String?, includeImagePathInText: Bool) -> String {
         var parts: [String] = []
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let video = imagePath.map(Self.isVideoMedia) ?? false
         if !trimmed.isEmpty {
             parts.append(trimmed)
         } else if imagePath != nil {
-            parts.append("Look at the annotated screenshot and figure out what needs to change.")
+            parts.append(
+                video
+                    ? "Watch this screen recording and figure out what needs to change."
+                    : "Look at the annotated screenshot and figure out what needs to change."
+            )
         }
         if includeImagePathInText, let imagePath {
-            parts.append("Annotated screenshot: \(imagePath)")
+            parts.append(video ? "Screen recording: \(imagePath)" : "Annotated screenshot: \(imagePath)")
         }
         return parts.joined(separator: "\n\n")
     }
@@ -107,9 +124,10 @@ struct CursorAgentCLI: AgentCLI {
             "--stream-partial-output"
         ]
         appendCursorModel(&args, model: model, effort: effort)
-        if let imagePath {
+        if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
         }
+        // Screenshots also get the path in text; videos rely on the path (no --image).
         args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         return args
     }
@@ -132,10 +150,14 @@ struct CursorAgentCLI: AgentCLI {
             "--stream-partial-output"
         ]
         appendCursorModel(&args, model: model, effort: effort)
-        if let imagePath {
+        if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
         }
-        args.append(prompt)
+        if let imagePath, Self.isVideoMedia(imagePath) {
+            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        } else {
+            args.append(prompt)
+        }
         return args
     }
 
@@ -250,11 +272,13 @@ struct CodexAgentCLI: AgentCLI {
         if let effort, !effort.isEmpty {
             args += ["-c", "model_reasoning_effort=\(effort)"]
         }
-        if let imagePath {
+        if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
+            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
+        } else {
+            // Video (or unknown): path in prompt so Codex can open the file.
+            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         }
-        // Image is attached via --image; keep prompt text clean.
-        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
         return args
     }
 
@@ -280,10 +304,14 @@ struct CodexAgentCLI: AgentCLI {
             args += ["-c", "model_reasoning_effort=\(effort)"]
         }
         args += ["resume", chatId]
-        if let imagePath {
+        if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
+            args.append(prompt)
+        } else if let imagePath {
+            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        } else {
+            args.append(prompt)
         }
-        args.append(prompt)
         return args
     }
 }

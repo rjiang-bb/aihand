@@ -258,11 +258,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     func hide() {
         // Keep selected session/chat so the next show restores the same state.
-        // Only refresh the remembered origin while list-only. If a chat is open,
-        // keep the existing list-home — expanded geometry must not shift it.
-        if selection.selectedID == nil {
-            persistListPlacement()
+        // Always snapshot placement — after orderOut the live frame can reset, and
+        // send-to-agent reopens from prefs (not from a stale/zero origin).
+        if selection.selectedID != nil {
+            persistExpandedPlacement()
         }
+        persistListPlacement()
         removeShortcutMonitors()
         selection.showShortcutBadges = false
         panel.orderOut(nil)
@@ -344,31 +345,43 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         updateSizeLimits(visible: visible, expanded: expanded)
 
         let size = preferredSize(visible: visible, expanded: expanded)
-        // Expanded: pin the list’s leading edge so chat grows to the right.
-        // Collapsing passes `listOriginOverride` so the list’s trailing edge
-        // matches the chat’s former trailing edge. Otherwise prefer the live
-        // frame, then the saved list-home, then the default trailing dock.
-        let listOrigin: CGPoint = {
-            if let listOriginOverride {
-                return listOriginOverride
-            }
-            // Prefer the live frame even after orderOut so hide→show keeps chat geometry.
-            if panel.frame.width > 1 {
-                return listOnlyOrigin(from: panel.frame)
-            }
-            if hasCustomPlacement, let saved = Preferences.sessionsPanelOrigin {
-                return saved
-            }
-            return CGPoint(
-                x: visible.maxX - listWidth - 12,
-                y: visible.minY + (visible.height - listHeight) / 2
+        let restoringHidden = !panel.isVisible
+
+        // Reopening after hide (e.g. send-to-agent): restore the last expanded
+        // frame so clamp-from-list-home doesn’t shove the panel to a corner.
+        let frame: NSRect
+        if expanded, listOriginOverride == nil, restoringHidden,
+           let savedOrigin = Preferences.sessionsPanelExpandedOrigin {
+            frame = clampFrame(NSRect(origin: savedOrigin, size: size), to: visible)
+        } else {
+            // Expanded: pin the list’s leading edge so chat grows to the right.
+            // Collapsing passes `listOriginOverride` so the list’s trailing edge
+            // matches the chat’s former trailing edge. Otherwise prefer the live
+            // frame while visible, then the saved list-home, then the default dock.
+            let listOrigin: CGPoint = {
+                if let listOriginOverride {
+                    return listOriginOverride
+                }
+                if panel.isVisible, panel.frame.width > 1 {
+                    return listOnlyOrigin(from: panel.frame)
+                }
+                if hasCustomPlacement, let saved = Preferences.sessionsPanelOrigin {
+                    return saved
+                }
+                if panel.frame.width > 1 {
+                    return listOnlyOrigin(from: panel.frame)
+                }
+                return CGPoint(
+                    x: visible.maxX - listWidth - 12,
+                    y: visible.minY + (visible.height - listHeight) / 2
+                )
+            }()
+            frame = clampFramePreservingList(
+                frameAlignedToListOrigin(listOrigin, size: size),
+                listOrigin: listOrigin,
+                to: visible
             )
-        }()
-        let frame = clampFramePreservingList(
-            frameAlignedToListOrigin(listOrigin, size: size),
-            listOrigin: listOrigin,
-            to: visible
-        )
+        }
         let sizeChanged = abs(panel.frame.width - frame.width) > 0.5
             || abs(panel.frame.height - frame.height) > 0.5
         applyingLayout = true
@@ -376,6 +389,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         // AppKit window animation + SwiftUI together was the list-only jank.
         panel.setFrame(frame, display: true, animate: animateFrame && isVisible && sizeChanged)
         applyingLayout = false
+        if expanded, panel.isVisible {
+            Preferences.sessionsPanelExpandedOrigin = panel.frame.origin
+        }
     }
 
     /// Origin of the sessions list assuming chat is closed (list is leading in the HStack).
@@ -429,6 +445,16 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         )
         Preferences.sessionsPanelOrigin = listFrame.origin
         hasCustomPlacement = true
+    }
+
+    private func persistExpandedPlacement(from frame: NSRect? = nil) {
+        guard let screen = panel.screen ?? NSScreen.main else { return }
+        let source = frame ?? panel.frame
+        guard source.width > 1, source.height > 1 else { return }
+        let clamped = clampFrame(source, to: screen.visibleFrame)
+        Preferences.sessionsPanelExpandedOrigin = clamped.origin
+        Preferences.sessionsPanelWidth = clamped.width
+        Preferences.sessionsPanelHeight = clamped.height
     }
 
     private func preferredSize(visible: NSRect, expanded: Bool) -> NSSize {
@@ -497,6 +523,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         hasCustomPlacement = true
         clampToVisibleFrame()
         persistListPlacement()
+        if selection.selectedID != nil {
+            persistExpandedPlacement()
+        }
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -566,6 +595,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private func chatResizeEnded() {
         persistSizeIfNeeded()
         clampToVisibleFrame()
+        if selection.selectedID != nil {
+            persistExpandedPlacement()
+        }
         chatResizeStartFrame = nil
     }
 
