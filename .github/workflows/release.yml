@@ -45,7 +45,7 @@ jobs:
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           NOTES="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
           if [ -z "$NOTES" ]; then
-            NOTES="Download the DMG, open it and drag TinyHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
+            NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
           fi
           {
             echo 'RELEASE_NOTES<<RELEASE_NOTES_EOF'
@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TinyHand-dmg
+          name: AiHand-dmg
           path: |
             dist/release/*.dmg
             dist/release/*.sha256
@@ -77,8 +77,8 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
-            "dist/release/TinyHand-$VERSION.dmg" "dist/release/TinyHand-$VERSION.dmg.sha256" \
-            dist/release/TinyHand.dmg \
+            "dist/release/AiHand-$VERSION.dmg" "dist/release/AiHand-$VERSION.dmg.sha256" \
+            dist/release/AiHand.dmg \
             dist/release/appcast.xml \
             --title "$VERSION" --notes "$RELEASE_NOTES"
 

@@ -134,7 +134,7 @@ final class SettingsModel: ObservableObject {
             draftError = problem.message
         } catch {
             draft = nil
-            draftError = "TinyHand couldn't read that file."
+            draftError = "AiHand couldn't read that file."
         }
     }
 
@@ -161,7 +161,7 @@ final class SettingsModel: ObservableObject {
             handIdea = ""
             makingHand = false
         } catch {
-            draftError = "TinyHand couldn't save that hand."
+            draftError = "AiHand couldn't save that hand."
         }
     }
 
@@ -339,7 +339,7 @@ struct SettingsView: View {
                 if let icon = NSImage(named: "AppIcon") ?? NSApp.applicationIconImage {
                     Image(nsImage: icon).resizable().frame(width: 22, height: 22)
                 }
-                Text("TinyHand").font(.system(size: 12, weight: .semibold))
+                Text("AiHand").font(.system(size: 12, weight: .semibold))
                 Spacer()
             }
             .padding(.horizontal, 10)
@@ -425,7 +425,7 @@ private struct GeneralPage: View {
                 Row("Clear the drawing") {
                     ShortcutField(shortcut: Preferences.clearShortcut, model: model) { model.applyClearShortcut?($0) ?? false }
                 }
-                Row("Open Tinyhand sessions", detail: "Shows the sessions panel without turning the pointer on.") {
+                Row("Open AI sessions panel", detail: "Shows the AI sessions panel without turning the pointer on.") {
                     ShortcutField(shortcut: Preferences.sessionsShortcut, model: model) { model.applySessionsShortcut?($0) ?? false }
                 }
             }
@@ -474,7 +474,7 @@ private struct GeneralPage: View {
                 }
             }
             Card(title: "Startup") {
-                Row("Open TinyHand when you log in") {
+                Row("Open AiHand when you log in") {
                     Toggle("", isOn: model.binding({ Preferences.launchAtLogin }, { Preferences.launchAtLogin = $0 }))
                         .toggleStyle(.switch).labelsHidden().focusable(false)
                 }
@@ -510,26 +510,436 @@ private struct AgentPage: View {
                     .focusable(false)
                 }
             }
+            Card(title: "Favorites") {
+                AgentFavoritesBlock(model: model)
+                    .id(Preferences.agentCLI.rawValue)
+            }
             Card(title: "Workspace") {
-                Row("Folder for the agent", detail: Preferences.agentWorkspace.isEmpty
-                    ? "Required before starting a session."
-                    : Preferences.agentWorkspace) {
-                    PillButton(title: "Choose…") {
-                        let panel = NSOpenPanel()
-                        panel.canChooseFiles = false
-                        panel.canChooseDirectories = true
-                        panel.canCreateDirectories = true
-                        if !Preferences.agentWorkspace.isEmpty {
-                            panel.directoryURL = URL(fileURLWithPath: Preferences.agentWorkspace)
-                        }
-                        panel.prompt = "Choose"
-                        if panel.runModal() == .OK, let url = panel.url {
-                            Preferences.agentWorkspace = url.path
-                        }
+                WorkspaceFoldersBlock()
+            }
+        }
+    }
+}
+
+private struct AgentFavoritesBlock: View {
+    @ObservedObject var model: SettingsModel
+    @State private var families: [AgentModelFamily] = []
+    @State private var draftTitle = ""
+    @State private var draftFamilyId = ""
+    @State private var draftVariantId = ""
+    @State private var refreshing = false
+    @State private var isAdding = false
+    @State private var titleEdited = false
+
+    private var cli: AgentCLIKind { Preferences.agentCLI }
+    private var favorites: [AgentFavorite] { Preferences.favorites(for: cli) }
+    private var currentID: UUID { Preferences.currentAgentFavorite.id }
+    private var titleFilled: Bool {
+        !draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var selectedFamily: AgentModelFamily? {
+        families.first(where: { $0.id == draftFamilyId }) ?? families.first
+    }
+
+    private var selectedVariant: AgentModelVariant? {
+        guard let family = selectedFamily else { return nil }
+        return family.variants.first(where: { $0.id == draftVariantId }) ?? family.variants.first
+    }
+
+    private var suggestedTitle: String {
+        guard let family = selectedFamily, let variant = selectedVariant else { return "" }
+        if variant.title == "Default" { return family.title }
+        return "\(family.title) / \(variant.title)"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(favorites.enumerated()), id: \.element.id) { index, fav in
+                AgentFavoriteRow(
+                    favorite: fav,
+                    isCurrent: fav.id == currentID,
+                    canRemove: !fav.isBuiltIn && favorites.count > 1,
+                    onSelect: { Preferences.selectAgentFavorite(fav.id) },
+                    onRemove: { Preferences.removeAgentFavorite(fav.id) }
+                )
+                if index < favorites.count - 1 {
+                    divider
+                }
+            }
+
+            divider
+
+            if isAdding {
+                newFavoriteForm
+            } else {
+                Row(
+                    "Add a \(cli.title) preset",
+                    detail: "Favorites are per CLI — this list is only for \(cli.title)."
+                ) {
+                    PillButton(title: "Add favorite") {
+                        isAdding = true
+                        titleEdited = false
+                        refreshModels(force: false)
                     }
                 }
             }
         }
+        .onAppear {
+            Preferences.ensureAgentFavorites()
+            if isAdding {
+                refreshModels(force: false)
+            }
+        }
+    }
+
+    private var newFavoriteForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("New favorite")
+                    .font(.system(size: 13))
+                Spacer(minLength: 8)
+                TextButton(title: "Cancel") {
+                    isAdding = false
+                    resetDraft()
+                }
+            }
+
+            PlainField(
+                placeholder: "Title — e.g. Image Gen, Docs",
+                text: Binding(
+                    get: { draftTitle },
+                    set: {
+                        draftTitle = $0
+                        titleEdited = true
+                    }
+                ),
+                solidBackground: true
+            )
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Model")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $draftFamilyId) {
+                        if families.isEmpty {
+                            Text("Loading…").tag("")
+                        }
+                        ForEach(families) { family in
+                            Text(family.title).tag(family.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .focusable(false)
+                    .onChange(of: draftFamilyId) { _ in
+                        syncVariantToFamily()
+                        applySuggestedTitleIfNeeded()
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Effort")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Picker("", selection: $draftVariantId) {
+                        if let family = selectedFamily {
+                            ForEach(family.variants) { variant in
+                                Text(variant.title).tag(variant.id)
+                            }
+                        } else {
+                            Text("—").tag("")
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(minWidth: 120, alignment: .leading)
+                    .focusable(false)
+                    .onChange(of: draftVariantId) { _ in
+                        applySuggestedTitleIfNeeded()
+                    }
+                }
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                if let variant = selectedVariant {
+                    Text(variant.modelId)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                TextButton(title: refreshing ? "Refreshing…" : "Refresh models") {
+                    refreshModels(force: true)
+                }
+                .fixedSize()
+                PillButton(
+                    title: "Add favorite",
+                    enabled: titleFilled,
+                    disabledHelp: "Must fill in title"
+                ) { addFavorite() }
+                    .fixedSize()
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.07))
+            .frame(height: 1)
+            .padding(.leading, 14)
+    }
+
+    private func syncVariantToFamily() {
+        guard let family = selectedFamily else {
+            draftVariantId = ""
+            return
+        }
+        if !family.variants.contains(where: { $0.id == draftVariantId }) {
+            // Prefer High when available, else first.
+            draftVariantId = family.variants.first(where: { $0.title == "High" })?.id
+                ?? family.variants.first?.id
+                ?? ""
+        }
+    }
+
+    private func applySuggestedTitleIfNeeded() {
+        guard !titleEdited else { return }
+        draftTitle = suggestedTitle
+    }
+
+    private func refreshModels(force: Bool) {
+        refreshing = true
+        let kind = cli
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = AgentModelCatalog.families(for: kind, forceRefresh: force)
+            DispatchQueue.main.async {
+                families = list
+                if draftFamilyId.isEmpty || !list.contains(where: { $0.id == draftFamilyId }) {
+                    draftFamilyId = list.first?.id ?? ""
+                }
+                syncVariantToFamily()
+                applySuggestedTitleIfNeeded()
+                refreshing = false
+            }
+        }
+    }
+
+    private func resetDraft() {
+        titleEdited = false
+        draftFamilyId = families.first?.id ?? ""
+        syncVariantToFamily()
+        draftTitle = suggestedTitle
+    }
+
+    private func addFavorite() {
+        let title = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty,
+              let family = selectedFamily,
+              let variant = selectedVariant else { return }
+        let modelTitle: String
+        if variant.title == "Default" {
+            modelTitle = family.title
+        } else {
+            modelTitle = "\(family.title) · \(variant.title)"
+        }
+        Preferences.addAgentFavorite(
+            AgentFavorite(
+                title: title,
+                cliKind: cli,
+                modelId: variant.modelId,
+                modelTitle: modelTitle,
+                effort: variant.effort
+            )
+        )
+        isAdding = false
+        resetDraft()
+    }
+}
+
+private struct AgentFavoriteRow: View {
+    let favorite: AgentFavorite
+    let isCurrent: Bool
+    var canRemove: Bool = true
+    let onSelect: () -> Void
+    let onRemove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    Image(systemName: isCurrent ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundColor(isCurrent ? Color(red: 0.2, green: 0.55, blue: 0.98) : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(favorite.title).font(.system(size: 13)).foregroundColor(.primary)
+                            if isCurrent {
+                                Text("Current")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                            }
+                        }
+                        Text(favorite.detail)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(isCurrent ? "Current favorite for new sessions" : "Use for new sessions")
+
+            if canRemove, hovering || !isCurrent {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help("Remove favorite")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(minHeight: 44)
+        .background(Color.primary.opacity(hovering ? 0.03 : 0))
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct WorkspaceFoldersBlock: View {
+    private var folders: [String] { Preferences.agentWorkspaces }
+    private var current: String { Preferences.agentWorkspace }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if folders.isEmpty {
+                Row("Folders for the agent", detail: "Add at least one. New sessions use the current folder.") {
+                    PillButton(title: "Add…") { addFolder() }
+                }
+            } else {
+                ForEach(Array(folders.enumerated()), id: \.element) { index, path in
+                    WorkspaceFolderRow(
+                        path: path,
+                        isCurrent: path == current,
+                        onSelect: { Preferences.selectAgentWorkspace(path) },
+                        onRemove: { Preferences.removeAgentWorkspace(path) }
+                    )
+                    if index < folders.count - 1 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(height: 1)
+                            .padding(.leading, 14)
+                    }
+                }
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+                    .padding(.leading, 14)
+                Row("Add another folder", detail: "Sessions use the folder marked Current.") {
+                    PillButton(title: "Add…") { addFolder() }
+                }
+            }
+        }
+    }
+
+    private func addFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = true
+        if !current.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: current)
+        }
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls {
+            Preferences.addAgentWorkspace(url.path)
+        }
+    }
+}
+
+private struct WorkspaceFolderRow: View {
+    let path: String
+    let isCurrent: Bool
+    let onSelect: () -> Void
+    let onRemove: () -> Void
+    @State private var hovering = false
+
+    private var title: String {
+        URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    Image(systemName: isCurrent ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundColor(isCurrent ? Color(red: 0.2, green: 0.55, blue: 0.98) : .secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(title).font(.system(size: 13)).foregroundColor(.primary)
+                            if isCurrent {
+                                Text("Current")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                            }
+                        }
+                        Text(path)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(isCurrent ? "Current working folder" : "Use as current working folder")
+
+            if hovering || !isCurrent {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .help("Remove folder")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(minHeight: 44)
+        .background(Color.primary.opacity(hovering ? 0.03 : 0))
+        .onHover { hovering = $0 }
     }
 }
 
@@ -1017,6 +1427,21 @@ private struct AppearancePage: View {
                     .toggleStyle(.switch).labelsHidden().focusable(false)
             }
         }
+        Card(title: "Theme") {
+            Row("Appearance", detail: Preferences.theme == .system
+                ? "Follows macOS light or dark mode."
+                : "Always \(Preferences.theme.title.lowercased()).") {
+                Picker("", selection: model.binding({ Preferences.theme }, { Preferences.theme = $0 })) {
+                    ForEach(AppTheme.allCases) { theme in
+                        Text(theme.title).tag(theme)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .focusable(false)
+            }
+        }
     }
 }
 
@@ -1181,9 +1606,9 @@ private struct AboutPage: View {
                     Image(nsImage: icon).resizable().frame(width: 72, height: 72)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("TinyHand").font(.system(size: 18, weight: .bold))
+                    Text("AiHand").font(.system(size: 18, weight: .bold))
                     Text("Version \(version)").font(.system(size: 12)).foregroundColor(.secondary)
-                    Text("A tiny hand for your Mac. Free and open source.").font(.system(size: 12)).foregroundColor(.secondary)
+                    Text("A tiny (AI) hand for your Mac. Free and open source.").font(.system(size: 12)).foregroundColor(.secondary)
                 }
                 Spacer()
                 if let updater = model.updater {
@@ -1361,6 +1786,8 @@ private struct TextButton: View {
 
 private struct PillButton: View {
     let title: String
+    var enabled: Bool = true
+    var disabledHelp: String? = nil
     let action: () -> Void
     @State private var hovering = false
 
@@ -1370,10 +1797,15 @@ private struct PillButton: View {
                 .font(.system(size: 12, weight: .medium))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Capsule().fill(Color.primary.opacity(hovering ? 0.14 : 0.09)))
+                .background(
+                    Capsule().fill(Color.primary.opacity(enabled ? (hovering ? 0.14 : 0.09) : 0.05))
+                )
+                .foregroundColor(enabled ? .primary : .secondary)
         }
         .buttonStyle(.plain)
         .focusable(false)
+        .disabled(!enabled)
+        .help(enabled ? "" : (disabledHelp ?? ""))
         .onHover { hovering = $0 }
     }
 }
@@ -1472,7 +1904,7 @@ private struct MakeHandPage: View {
                     PlainField(placeholder: "My hand", text: Binding(get: { model.handName }, set: { model.handName = String($0.prefix(16)) }))
                         .frame(width: 220)
                 }
-                Text("It should show the back of the hand, like the ones in TinyHand. If you see the palm, try another image.")
+                Text("It should show the back of the hand, like the ones in AiHand. If you see the palm, try another image.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1515,20 +1947,30 @@ private struct Step<Content: View>: View {
 private struct PlainField: View {
     let placeholder: String
     @Binding var text: String
+    var solidBackground: Bool = false
+    @FocusState private var focused: Bool
+
+    private var borderColor: Color {
+        if solidBackground && focused {
+            return Color(red: 0.2, green: 0.55, blue: 0.98)
+        }
+        return Color.primary.opacity(solidBackground ? 0.45 : 0.1)
+    }
 
     var body: some View {
         TextField(placeholder, text: $text)
             .textFieldStyle(.plain)
             .font(.system(size: 13))
+            .focused($focused)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
+                    .fill(solidBackground ? Color(nsColor: .textBackgroundColor) : Color.primary.opacity(0.06))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.1), lineWidth: 1)
+                    .strokeBorder(borderColor, lineWidth: solidBackground && focused ? 1.5 : 1)
             )
             .modifier(NoFocusEffect())
     }

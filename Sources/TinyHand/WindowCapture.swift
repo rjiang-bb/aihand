@@ -21,13 +21,13 @@ enum WindowCapture {
             case .noScreen: return "Couldn’t find the screen that contains the drawing."
             case .captureFailed: return "Screen capture failed."
             case .permissionDenied:
-                return "Allow Screen Recording for TinyHand in System Settings, then try again."
+                return "Allow Screen Recording for AiHand in System Settings, then try again."
             case .writeFailed(let msg): return "Couldn’t save screenshot: \(msg)"
             }
         }
     }
 
-    /// Registers TinyHand with TCC and prompts if needed so it appears under
+    /// Registers AiHand with TCC and prompts if needed so it appears under
     /// System Settings → Privacy & Security → Screen Recording.
     @discardableResult
     static func ensureScreenRecordingAccess() -> Bool {
@@ -88,7 +88,7 @@ enum WindowCapture {
         return Outcome(path: path, windowName: findWindow(intersecting: strokeScreenBounds)?.name)
     }
 
-    /// Full-screen capture excluding TinyHand’s own windows.
+    /// Full-screen capture excluding AiHand’s own windows.
     /// Uses ScreenCaptureKit on macOS 14+ (required on current OS); CG fallback on 13.
     private static func captureScreen(screen: NSScreen) async throws -> CGImage {
         if #available(macOS 14.0, *) {

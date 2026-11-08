@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and launch TinyHand from ~/Applications with a pinned Apple Development
+# Build and launch AiHand from ~/Applications with a pinned Apple Development
 # signature so Accessibility / Screen Recording grants survive rebuilds.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -40,8 +40,8 @@ TEAM="$(codesign -dv "$APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
 echo "Installed $APP"
 echo "Signed with: $IDENTITY (Team $TEAM)"
 echo "If Accessibility still prompts: System Settings → Privacy & Security → Accessibility"
-echo "  • Remove any old TinyHand rows"
-echo "  • Enable the TinyHand entry (from Applications), then re-run"
+echo "  • Remove any old AiHand rows"
+echo "  • Enable the AiHand entry (from Applications), then re-run"
 
 open "$APP"
 echo "Launched $APP"

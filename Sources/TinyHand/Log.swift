@@ -2,7 +2,7 @@ import Foundation
 
 enum Log {
     private static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/TinyHand.log")
+        .appendingPathComponent("Library/Logs/AiHand.log")
     private static let formatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"

@@ -100,6 +100,26 @@ final class Ink {
         layer.sublayers?.forEach { $0.removeFromSuperlayer() }
     }
 
+    /// Cancel an in-progress drag, or remove the most recently finished stroke.
+    /// Returns the removed finished layer (nil when cancelling a live stroke or nothing to undo).
+    @discardableResult
+    func undoLast() -> CAShapeLayer? {
+        if let s = stroke {
+            s.removeAllAnimations()
+            s.removeFromSuperlayer()
+            stroke = nil
+            points = []
+            return nil
+        }
+        guard let last = layer.sublayers?.last as? CAShapeLayer else {
+            return nil
+        }
+        heldLayers.remove(ObjectIdentifier(last))
+        last.removeAllAnimations()
+        last.removeFromSuperlayer()
+        return last
+    }
+
     private func freeze(_ s: CAShapeLayer) {
         guard let path = s.path else {
             return

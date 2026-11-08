@@ -1,11 +1,13 @@
 import AppKit
 import Carbon.HIToolbox
+import Combine
 import SwiftUI
 
 final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onFollowUp: ((UUID, String, FollowUpSubmit) -> Void)?
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
+    var onManageWorkspaces: (() -> Void)?
     var onDismiss: (() -> Void)?
 
     private final class Panel: NSPanel {
@@ -23,16 +25,23 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var chatResizeStartFrame: NSRect?
     private var panelMoveStartOrigin: CGPoint?
     private var hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
+    private var cancellables = Set<AnyCancellable>()
+    private var lastLaidOutListHeight: CGFloat = 0
 
     private let listWidth: CGFloat = 360
-    /// Fixed outer height for the sessions list alone — only the chat pane is user-resizable.
-    private let listHeight: CGFloat = 640
-    /// Top + bottom padding around the HStack in `SessionsSidePanelView`.
-    private let listChromeVertical: CGFloat = 68 + 14
+    /// Grows with session count up to 10 rows + pagination (+ ⌘ hints when shown).
+    private var listHeight: CGFloat {
+        SessionsListMetrics.panelHeight(
+            sessionCount: store.sessions.count,
+            showShortcutHints: selection.showShortcutBadges
+        )
+    }
     /// Floor at the default expanded size — users can only grow the chat from here.
     private var minExpandedWidth: CGFloat { Preferences.sessionsPanelDefaultWidth }
-    private var minExpandedHeight: CGFloat { Preferences.sessionsPanelDefaultHeight }
-    private let maxShortcutSlots = SessionStore.maxSessions
+    private var minExpandedHeight: CGFloat {
+        max(Preferences.sessionsPanelDefaultHeight, SessionsListMetrics.maxPanelHeight)
+    }
+    private let maxShortcutSlots = 9
 
     fileprivate struct ChatResizeEdges: OptionSet {
         let rawValue: Int
@@ -43,6 +52,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     var isVisible: Bool { panel.isVisible }
+    var selectedSessionID: UUID? { selection.selectedID }
+
+    /// Archive the open session and select the next one (⌘W).
+    func archiveSelectedSession() {
+        guard isVisible, let id = selection.selectedID else { return }
+        archive(id)
+    }
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
 
     /// Collapse the open chat so a New prompt can take focus cleanly.
@@ -51,10 +67,68 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     private func archive(_ id: UUID) {
-        if selection.selectedID == id {
-            closeChat()
+        let sessions = store.sessions
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        // Prefer the next (older) row; otherwise the previous (newer) one.
+        let nextID: UUID? = {
+            if idx + 1 < sessions.count { return sessions[idx + 1].id }
+            if idx > 0 { return sessions[idx - 1].id }
+            return nil
+        }()
+        let wasSelected = selection.selectedID == id
+        if wasSelected {
+            // Clear before remove so blank-draft cleanup doesn't race.
+            selection.selectedID = nil
         }
         store.remove(id)
+        if wasSelected {
+            if let nextID, store.session(id: nextID) != nil {
+                openChat(for: nextID)
+            } else {
+                layout()
+            }
+        }
+    }
+
+    /// Archive every session listed below `id` (older rows when newest-first).
+    private func archiveAllBelow(_ id: UUID) {
+        let sessions = store.sessions
+        guard let idx = sessions.firstIndex(where: { $0.id == id }),
+              idx + 1 < sessions.count else { return }
+        archiveMany(sessions[(idx + 1)...].map(\.id))
+    }
+
+    private func archiveAll() {
+        archiveMany(store.sessions.map(\.id))
+    }
+
+    private func archiveMany(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        let selected = selection.selectedID
+        let removingSelected = selected.map(ids.contains) ?? false
+        let selectingNext: UUID? = {
+            guard let selected, removingSelected else { return nil }
+            let sessions = store.sessions
+            guard let idx = sessions.firstIndex(where: { $0.id == selected }) else { return nil }
+            for j in (idx + 1)..<sessions.count where !ids.contains(sessions[j].id) {
+                return sessions[j].id
+            }
+            for j in stride(from: idx - 1, through: 0, by: -1) where !ids.contains(sessions[j].id) {
+                return sessions[j].id
+            }
+            return nil
+        }()
+        if removingSelected {
+            selection.selectedID = nil
+        }
+        for id in ids {
+            store.remove(id)
+        }
+        if let selectingNext, store.session(id: selectingNext) != nil {
+            openChat(for: selectingNext)
+        } else if removingSelected {
+            layout()
+        }
     }
 
     init(store: SessionStore) {
@@ -101,8 +175,17 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onNew: { [weak self] in
                 self?.onNew?()
             },
+            onManageWorkspaces: { [weak self] in
+                self?.onManageWorkspaces?()
+            },
             onArchive: { [weak self] id in
                 self?.archive(id)
+            },
+            onArchiveAllBelow: { [weak self] id in
+                self?.archiveAllBelow(id)
+            },
+            onArchiveAll: { [weak self] in
+                self?.archiveAll()
             },
             onSend: { [weak self] id, text, submit in
                 self?.onFollowUp?(id, text, submit)
@@ -121,8 +204,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             },
             onPanelDragEnded: { [weak self] in
                 self?.panelMoveEnded()
-            },
-            listContentHeight: max(1, listHeight - listChromeVertical)
+            }
         )
         let host = NSHostingView(rootView: root)
         host.wantsLayer = true
@@ -130,18 +212,47 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         host.layer?.backgroundColor = NSColor.clear.cgColor
         hosting = host
         panel.contentView = host
+
+        store.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.relayoutForSessionCountIfNeeded() }
+            }
+            .store(in: &cancellables)
+        lastLaidOutListHeight = listHeight
+    }
+
+    /// Grow / shrink the list-only panel as sessions are added or archived.
+    private func relayoutForSessionCountIfNeeded() {
+        let height = listHeight
+        guard abs(height - lastLaidOutListHeight) > 0.5 else { return }
+        lastLaidOutListHeight = height
+        guard isVisible, selection.selectedID == nil else { return }
+        layout()
     }
 
     func show(on screen: NSScreen? = nil) {
+        lastLaidOutListHeight = listHeight
         layout(on: screen)
-        panel.orderFrontRegardless()
+        // Become key so ⌘N / ⌘1–9 work immediately after the global sessions shortcut.
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
         installShortcutMonitors()
+        // Nonactivating panels sometimes need a second pass after ordering front.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isVisible else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            self.panel.makeKeyAndOrderFront(nil)
+        }
     }
 
     func hide() {
-        // Remember where the sessions list sits with chat closed, even if a chat is open.
-        persistListPlacement()
         discardBlankDraftIfLeaving()
+        // Only refresh the remembered origin while list-only. If a chat is open,
+        // keep the existing list-home — expanded geometry must not shift it.
+        if selection.selectedID == nil {
+            persistListPlacement()
+        }
         removeShortcutMonitors()
         selection.showShortcutBadges = false
         selection.selectedID = nil
@@ -164,7 +275,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         // Only relayout when expanding from the list; switching sessions must not
         // move the panel (that was the animated "jump" on each select).
         let needsExpand = selection.selectedID == nil
+        if needsExpand, isVisible {
+            // Lock in the list-only home before the panel grows for chat.
+            persistListPlacement()
+        }
         selection.selectedID = id
+        selection.revealSessionInList(id, sessions: store.sessions)
         if isVisible {
             if needsExpand {
                 layout()
@@ -187,9 +303,18 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private func closeChat() {
         guard selection.selectedID != nil else { return }
+        // Keep the expanded panel’s trailing edge; the list slides right into
+        // where the chat card was (instead of staying pinned to the left).
+        let expanded = panel.frame
         discardBlankDraftIfLeaving()
         selection.selectedID = nil
-        layout()
+        layout(
+            listOriginOverride: CGPoint(
+                x: expanded.maxX - listWidth,
+                y: expanded.maxY - listHeight
+            )
+        )
+        persistListPlacement()
     }
 
     /// Drop an untouched "New session" when leaving it (switch, Esc, click away, hide).
@@ -202,7 +327,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         store.remove(id)
     }
 
-    private func layout(on screen: NSScreen? = nil) {
+    private func layout(on screen: NSScreen? = nil, listOriginOverride: CGPoint? = nil) {
         let screen = screen ?? panel.screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         let visible = screen.visibleFrame
@@ -210,9 +335,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         updateSizeLimits(visible: visible, expanded: expanded)
 
         let size = preferredSize(visible: visible, expanded: expanded)
-        // Prefer the live panel position when visible so layout never snaps back
-        // to a stale saved origin. Fall back to prefs / default trailing dock.
+        // Expanded: pin the list’s leading edge so chat grows to the right.
+        // Collapsing passes `listOriginOverride` so the list’s trailing edge
+        // matches the chat’s former trailing edge. Otherwise prefer the live
+        // frame, then the saved list-home, then the default trailing dock.
         let listOrigin: CGPoint = {
+            if let listOriginOverride {
+                return listOriginOverride
+            }
             if isVisible, panel.frame.width > 1 {
                 return listOnlyOrigin(from: panel.frame)
             }
@@ -432,8 +562,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        // Do not close chat here — menu key equivalents (⌘/) and the favorite
+        // picker briefly resign key; collapsing would clear the selection and
+        // make model cycling a no-op. Esc / the chat close button dismiss chat.
         selection.showShortcutBadges = false
-        closeChat()
     }
 
     private func installShortcutMonitors() {
@@ -467,7 +599,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             && !flags.contains(.shift)
             && !flags.contains(.option)
             && !flags.contains(.control)
-        selection.showShortcutBadges = cmdAlone && !store.sessions.isEmpty
+        let show = cmdAlone && !store.sessions.isEmpty
+        guard selection.showShortcutBadges != show else { return }
+        selection.showShortcutBadges = show
+        // List-only: grow/shrink the panel downward (top edge stays put) so hints
+        // extend out of the bottom without shifting the session rows.
+        guard selection.selectedID == nil else { return }
+        lastLaidOutListHeight = -1
+        relayoutForSessionCountIfNeeded()
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
@@ -504,17 +643,51 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return event
         }
 
+        // ⌘/ → cycle favorite models for the open chat (panel owns this while key).
+        if panel.isKeyWindow,
+           Self.isModelCycleKey(event),
+           let id = selection.selectedID,
+           let session = store.session(id: id) {
+            session.cycleFavorite()
+            return nil
+        }
+
         if Int(event.keyCode) == kVK_ANSI_N, panel.isKeyWindow {
             onNew?()
             return nil
         }
 
+        // ⌘W → archive the selected session (including blank "New session") and open the next.
+        if Int(event.keyCode) == kVK_ANSI_W, panel.isKeyWindow,
+           let id = selection.selectedID {
+            archive(id)
+            return nil
+        }
+
+        // ⌘↑ / ⌘↓ → previous / next session while a chat is open.
+        if panel.isKeyWindow,
+           selection.selectedID != nil,
+           Int(event.keyCode) == kVK_UpArrow || Int(event.keyCode) == kVK_DownArrow {
+            selectAdjacentSession(delta: Int(event.keyCode) == kVK_UpArrow ? -1 : 1)
+            return nil
+        }
+
         guard let index = shortcutIndex(for: event) else { return event }
-        let sessions = store.sessions
-        guard index >= 0, index < sessions.count, index < maxShortcutSlots else { return event }
-        openChat(for: sessions[index].id)
+        let pageSessions = selection.pagedSessions(store.sessions)
+        guard index >= 0, index < pageSessions.count, index < maxShortcutSlots else { return event }
+        openChat(for: pageSessions[index].id)
         selection.showShortcutBadges = true
         return nil
+    }
+
+    /// Move selection by `delta` in the newest-first sessions list (−1 = above, +1 = below).
+    private func selectAdjacentSession(delta: Int) {
+        let sessions = store.sessions
+        guard let id = selection.selectedID,
+              let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let next = idx + delta
+        guard sessions.indices.contains(next) else { return }
+        openChat(for: sessions[next].id)
     }
 
     private func shortcutIndex(for event: NSEvent) -> Int? {
@@ -535,11 +708,101 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return nil
         }
     }
+
+    private static func isModelCycleKey(_ event: NSEvent) -> Bool {
+        if Int(event.keyCode) == kVK_ANSI_Slash { return true }
+        if event.charactersIgnoringModifiers == "/" { return true }
+        return false
+    }
+}
+
+private enum SessionsListPaging {
+    static let pageSize = 10
+    /// Show the pager once the list grows past the old hard cap of 9.
+    static let threshold = 9
+
+    static func needsPagination(_ count: Int) -> Bool { count > threshold }
+
+    static func pageCount(total: Int) -> Int {
+        guard needsPagination(total) else { return 1 }
+        return max(1, (total + pageSize - 1) / pageSize)
+    }
+
+    static func clampedPage(_ page: Int, total: Int) -> Int {
+        min(max(0, page), max(0, pageCount(total: total) - 1))
+    }
+
+    static func slice(page: Int, total: Int) -> Range<Int> {
+        guard total > 0 else { return 0..<0 }
+        if !needsPagination(total) { return 0..<total }
+        let p = clampedPage(page, total: total)
+        let start = p * pageSize
+        let end = min(start + pageSize, total)
+        return start..<end
+    }
+}
+
+/// List panel height grows with session count up to one full page + pagination.
+private enum SessionsListMetrics {
+    static let chromeVertical: CGFloat = 68 + 14
+    /// Workspace picker: 13+13 pad + ~34pt title/path stack.
+    private static let picker: CGFloat = 60
+    private static let columnGap: CGFloat = 16
+    /// Embedded session row: 8+8 pad + 14pt title + 4 gap + 13pt single-line preview.
+    private static let row: CGFloat = 54
+    private static let rowGap: CGFloat = 4
+    private static let listPadTop: CGFloat = 8
+    private static let listPadBottom: CGFloat = 8
+    private static let listPadBottomPaginated: CGFloat = 4
+    private static let footer: CGFloat = 40
+    private static let emptyHint: CGFloat = 92
+
+    static var maxPanelHeight: CGFloat {
+        panelHeight(sessionCount: SessionsListPaging.pageSize + 1)
+    }
+
+    static func panelHeight(sessionCount: Int, showShortcutHints: Bool = false) -> CGFloat {
+        chromeVertical + columnHeight(sessionCount: sessionCount, showShortcutHints: showShortcutHints)
+    }
+
+    static func columnHeight(sessionCount: Int, showShortcutHints: Bool = false) -> CGFloat {
+        if sessionCount <= 0 {
+            return picker + columnGap + emptyHint
+        }
+        let paginate = SessionsListPaging.needsPagination(sessionCount)
+        // Paginated lists already reserve a footer; ⌘ hints reuse that slot.
+        // Otherwise grow for the hints so they extend below the last session.
+        let showFooter = paginate || showShortcutHints
+        let rows = CGFloat(paginate ? SessionsListPaging.pageSize : sessionCount)
+        let stack = rows * row + max(0, rows - 1) * rowGap
+        let bottomPad = showFooter ? listPadBottomPaginated : listPadBottom
+        return picker + columnGap + listPadTop + bottomPad + stack + (showFooter ? footer : 0)
+    }
 }
 
 private final class SessionsPanelSelection: ObservableObject {
     @Published var selectedID: UUID?
     @Published var showShortcutBadges = false
+    @Published var listPage = 0
+
+    func pagedSessions(_ sessions: [AgentSession]) -> [AgentSession] {
+        let range = SessionsListPaging.slice(page: listPage, total: sessions.count)
+        guard !range.isEmpty else { return [] }
+        return Array(sessions[range])
+    }
+
+    func revealSessionInList(_ id: UUID, sessions: [AgentSession]) {
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        if SessionsListPaging.needsPagination(sessions.count) {
+            listPage = idx / SessionsListPaging.pageSize
+        } else {
+            listPage = 0
+        }
+    }
+
+    func clampListPage(total: Int) {
+        listPage = SessionsListPaging.clampedPage(listPage, total: total)
+    }
 }
 
 private struct SessionsSidePanelView: View {
@@ -549,27 +812,46 @@ private struct SessionsSidePanelView: View {
     var onCloseChat: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
+    var onManageWorkspaces: () -> Void
     var onArchive: (UUID) -> Void
+    var onArchiveAllBelow: (UUID) -> Void
+    var onArchiveAll: () -> Void
     var onSend: (UUID, String, FollowUpSubmit) -> Void
     var onStop: (UUID) -> Void
     var onChatResizeBegan: () -> Void
     var onChatResizeChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
     var onChatResizeEnded: () -> Void
     var onPanelDragEnded: () -> Void
-    /// Height of the sessions list column (panel height minus vertical chrome).
-    var listContentHeight: CGFloat
 
     private let listColumnWidth: CGFloat = 344
 
     @Environment(\.colorScheme) private var colorScheme
 
     private var headerFG: Color { colorScheme == .dark ? .white : .black }
-    private var headerBG: Color { colorScheme == .dark ? .black : .white }
+    private var headerBG: Color { SoftChrome.cardFill(dark: colorScheme == .dark) }
+
+    private var allSessions: [AgentSession] { store.sessions }
+    private var pageSessions: [AgentSession] { selection.pagedSessions(allSessions) }
+    private var needsPagination: Bool { SessionsListPaging.needsPagination(allSessions.count) }
+    private var pageRange: Range<Int> {
+        SessionsListPaging.slice(page: selection.listPage, total: allSessions.count)
+    }
+    private var listContentHeight: CGFloat {
+        SessionsListMetrics.columnHeight(
+            sessionCount: allSessions.count,
+            showShortcutHints: selection.showShortcutBadges
+        )
+    }
+
+    private var showListFooter: Bool {
+        needsPagination || selection.showShortcutBadges
+    }
 
     var body: some View {
         // Clear panel chrome; cards use solid white/black for readable contrast.
         HStack(alignment: .top, spacing: 12) {
             sessionsColumn
+                // Always hug session content — never stretch the list to the chat height.
                 .frame(width: listColumnWidth, height: listContentHeight, alignment: .top)
             if let id = selection.selectedID, let session = store.session(id: id) {
                 SessionChatView(
@@ -601,7 +883,15 @@ private struct SessionsSidePanelView: View {
             floatingHeader
         }
         .onChange(of: store.sessions.map(\.id)) { ids in
+            selection.clampListPage(total: ids.count)
             if let id = selection.selectedID, !ids.contains(id) {
+                onCloseChat()
+            }
+        }
+        .onChange(of: store.currentWorkspace) { _ in
+            selection.listPage = 0
+            if let id = selection.selectedID,
+               !store.sessions.contains(where: { $0.id == id }) {
                 onCloseChat()
             }
         }
@@ -609,11 +899,11 @@ private struct SessionsSidePanelView: View {
 
     private var floatingHeader: some View {
         HStack(alignment: .center) {
-            Text("Tinyhand sessions")
-                .font(.system(size: 20, weight: .semibold))
+            Text("AI sessions")
+                .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 5)
                 .background(
                     Capsule(style: .continuous)
                         .fill(Color.black)
@@ -655,45 +945,250 @@ private struct SessionsSidePanelView: View {
             .focusable(false)
             .help("Close")
         }
-        .padding(.horizontal, 22)
+        // Match the list column’s leading inset (content HStack uses 14).
+        .padding(.horizontal, 14)
         .padding(.top, 16)
         .padding(.bottom, 14)
     }
 
     private var sessionsColumn: some View {
-        Group {
+        VStack(spacing: 16) {
+            WorkspacePicker(
+                folders: store.workspaceFolders,
+                current: store.currentWorkspace,
+                onSelect: { Preferences.selectAgentWorkspace($0) },
+                onManage: onManageWorkspaces
+            )
             if store.sessions.isEmpty {
-                VStack {
-                    Spacer()
-                    Text("Tap New to start a prompt, or draw on screen to annotate.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.primary.opacity(0.72))
-                        .multilineTextAlignment(.center)
-                        .padding(20)
-                        .frame(maxWidth: .infinity)
-                        .background(SolidCardBackground(cornerRadius: 22, selected: false))
-                    Spacer()
-                }
+                Text(store.currentWorkspace.isEmpty
+                     ? "Add a working folder to start sessions here."
+                     : "Tap New to start a prompt, or draw on screen to annotate.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .padding(20)
+                    .frame(maxWidth: .infinity)
+                    .background(SolidCardBackground(cornerRadius: 22, selected: false))
+                Spacer(minLength: 0)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(Array(store.sessions.enumerated()), id: \.element.id) { index, session in
-                            SessionCardView(
-                                session: session,
-                                isSelected: selection.selectedID == session.id,
-                                shortcutNumber: index < 9 ? index + 1 : nil,
-                                showShortcutBadge: selection.showShortcutBadges && index < 9,
-                                onTap: { onSelect(session.id) },
-                                onArchive: { onArchive(session.id) }
-                            )
-                        }
-                    }
-                    .padding(.bottom, 8)
-                }
-                .scrollContentBackground(.hidden)
-                .background(Color.clear)
+                sessionsListContainer
             }
         }
+    }
+
+    private var sessionsListRows: some View {
+        LazyVStack(spacing: 4) {
+            ForEach(Array(pageSessions.enumerated()), id: \.element.id) { index, session in
+                let globalIndex = pageRange.lowerBound + index
+                SessionCardView(
+                    session: session,
+                    isSelected: selection.selectedID == session.id,
+                    shortcutNumber: index < 9 ? index + 1 : nil,
+                    showShortcutBadge: selection.showShortcutBadges && index < 9,
+                    embedded: true,
+                    canArchiveBelow: globalIndex + 1 < allSessions.count,
+                    onTap: { onSelect(session.id) },
+                    onArchive: { onArchive(session.id) },
+                    onArchiveAllBelow: { onArchiveAllBelow(session.id) },
+                    onArchiveAll: onArchiveAll
+                )
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.top, 8)
+        .padding(.bottom, showListFooter ? 4 : 8)
+    }
+
+    private var sessionsListContainer: some View {
+        VStack(spacing: 0) {
+            // Only scroll once pagination kicks in; otherwise hug content so the
+            // white card doesn’t leave empty space under a short list.
+            if needsPagination {
+                ScrollView {
+                    sessionsListRows
+                }
+                .scrollContentBackground(.hidden)
+            } else {
+                sessionsListRows
+            }
+            // Footer grows out of the bottom; panel resizes downward so rows stay put.
+            if selection.showShortcutBadges {
+                sessionsShortcutHintsFooter
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if needsPagination {
+                sessionsPaginationFooter
+                    .transition(.opacity)
+            }
+        }
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: needsPagination ? .infinity : nil,
+            alignment: .top
+        )
+        .background(SolidCardBackground(cornerRadius: 22, selected: false))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .animation(.easeOut(duration: 0.14), value: selection.showShortcutBadges)
+    }
+
+    /// Shown while ⌘ is held — pairs with the ⌘1…9 badges.
+    private var sessionsShortcutHintsFooter: some View {
+        HStack(spacing: 14) {
+            shortcutHint(key: "⌘1–9", label: "select")
+            shortcutHint(key: "⌘↑↓", label: "navigate")
+            shortcutHint(key: "⌘W", label: "archive")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+        }
+    }
+
+    private func shortcutHint(key: String, label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(key)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.primary.opacity(0.72))
+            Text(label)
+                .font(.system(size: 10.5))
+                .foregroundStyle(Color.secondary)
+        }
+    }
+
+    private var sessionsPaginationFooter: some View {
+        let total = allSessions.count
+        let start = pageRange.lowerBound + 1
+        let end = pageRange.upperBound
+        let page = selection.listPage
+        let pages = SessionsListPaging.pageCount(total: total)
+        return HStack(spacing: 10) {
+            Button {
+                selection.listPage = max(0, page - 1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 28, height: 24)
+            }
+            .buttonStyle(.plain)
+            .disabled(page <= 0)
+            .opacity(page <= 0 ? 0.35 : 1)
+            .help("Previous page")
+
+            Text("\(start)–\(end) of \(total)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+
+            Button {
+                selection.listPage = min(pages - 1, page + 1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 28, height: 24)
+            }
+            .buttonStyle(.plain)
+            .disabled(page >= pages - 1)
+            .opacity(page >= pages - 1 ? 0.35 : 1)
+            .help("Next page")
+        }
+        .foregroundStyle(.primary.opacity(0.75))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+        }
+    }
+}
+
+private struct WorkspacePicker: View {
+    let folders: [String]
+    let current: String
+    var onSelect: (String) -> Void
+    var onManage: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fg: Color { colorScheme == .dark ? .white : .black }
+
+    private var title: String {
+        if current.isEmpty { return "No folder" }
+        return URL(fileURLWithPath: current).lastPathComponent
+    }
+
+    var body: some View {
+        // Draw the card ourselves — Menu’s borderless label swallows custom backgrounds.
+        HStack(spacing: 12) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 30, height: 30)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(fg)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(current.isEmpty ? "Choose a working folder" : current)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(fg.opacity(0.55))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(fg.opacity(0.45))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WorkspacePickerBackground(cornerRadius: 22))
+        .overlay {
+            Menu {
+                if folders.isEmpty {
+                    Button("Add folders…", action: onManage)
+                } else {
+                    ForEach(folders, id: \.self) { path in
+                        Button {
+                            onSelect(path)
+                        } label: {
+                            // Title + path: macOS menus render the second Text as a subtitle.
+                            if SessionStore.sameWorkspace(path, current) {
+                                Label {
+                                    Text(menuTitle(for: path))
+                                    Text(path)
+                                } icon: {
+                                    Image(systemName: "checkmark")
+                                }
+                            } else {
+                                Text(menuTitle(for: path))
+                                Text(path)
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Manage folders…", action: onManage)
+                }
+            } label: {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+        }
+        .help(current.isEmpty ? "Choose a working folder" : current)
+    }
+
+    private func menuTitle(for path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
     }
 }
 
@@ -852,7 +1347,7 @@ private struct SolidCardBackground: View {
 
     var body: some View {
         let dark = colorScheme == .dark
-        let base = dark ? Color.black : Color.white
+        let base = SoftChrome.cardFill(dark: dark)
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(base)
             .overlay(
@@ -878,13 +1373,41 @@ private struct SolidCardBackground: View {
     }
 }
 
+/// Same chrome as session cards, but a muted fill so the folder picker reads as chrome.
+private struct WorkspacePickerBackground: View {
+    var cornerRadius: CGFloat
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        let dark = colorScheme == .dark
+        let base = dark
+            ? Color(white: 0.16)
+            : Color(white: 0.94)
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(base)
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .strokeBorder(
+                        dark ? Color.white.opacity(0.12) : Color.black.opacity(0.06),
+                        lineWidth: 0.5
+                    )
+            )
+            .shadow(color: .black.opacity(dark ? 0.4 : 0.12), radius: 10, y: 4)
+    }
+}
+
 private struct SessionCardView: View {
     @ObservedObject var session: AgentSession
     var isSelected: Bool
     var shortcutNumber: Int?
     var showShortcutBadge: Bool
+    /// Flat row chrome when nested inside the opaque list container.
+    var embedded: Bool = false
+    var canArchiveBelow: Bool = false
     var onTap: () -> Void
     var onArchive: () -> Void
+    var onArchiveAllBelow: (() -> Void)? = nil
+    var onArchiveAll: (() -> Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
     @State private var hovering = false
 
@@ -899,7 +1422,7 @@ private struct SessionCardView: View {
                             .frame(width: 30, height: 30)
                         if showShortcutBadge, let shortcutNumber {
                             ShortcutBadge(number: shortcutNumber)
-                                .transition(.opacity.combined(with: .scale(scale: 0.85)))
+                                .transition(.opacity)
                         }
                     }
                     .frame(width: 30, height: 30)
@@ -917,38 +1440,81 @@ private struct SessionCardView: View {
                         Text(session.preview.isEmpty ? "Type a message to start" : session.preview)
                             .font(.system(size: 13))
                             .foregroundStyle(fg.opacity(session.preview.isEmpty ? 0.45 : 0.82))
-                            .lineLimit(2)
+                            // Single line keeps list row height stable so the panel can hug content.
+                            .lineLimit(embedded ? 1 : 2)
                             .multilineTextAlignment(.leading)
-                            .padding(.trailing, hovering ? 36 : 0)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 13)
+                .padding(.horizontal, embedded ? 10 : 14)
+                .padding(.vertical, embedded ? 8 : 13)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(SolidCardBackground(cornerRadius: 22, selected: isSelected))
+                .background(cardBackground)
             }
             .buttonStyle(.plain)
 
+            // Float over the card — do not pad/reflow text when it appears.
             if hovering {
                 Button(action: onArchive) {
                     Image(systemName: "archivebox")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(fg)
                         .frame(width: 28, height: 28)
-                        .background(
+                        .background {
+                            let dark = colorScheme == .dark
                             Circle()
-                                .fill(fg.opacity(0.1))
-                        )
+                                .fill(SoftChrome.cardFill(dark: dark))
+                                .overlay(
+                                    Circle().fill(Color.accentColor.opacity(isSelected ? (dark ? 0.22 : 0.12) : 0))
+                                )
+                                .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
+                        }
                 }
                 .buttonStyle(.plain)
                 .help("Archive session")
                 .padding(.trailing, 10)
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                .transition(.opacity)
+            }
+        }
+        .contextMenu {
+            Button("Archive", role: .destructive, action: onArchive)
+            Button("Archive All Below") {
+                onArchiveAllBelow?()
+            }
+            .disabled(!canArchiveBelow)
+            Divider()
+            Button("Archive All", role: .destructive) {
+                onArchiveAll?()
             }
         }
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: showShortcutBadge)
+        .animation(.easeOut(duration: 0.1), value: showShortcutBadge)
         .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    @ViewBuilder
+    private var cardBackground: some View {
+        if embedded {
+            let dark = colorScheme == .dark
+            let idle = dark ? Color(white: 0.18) : Color(white: 0.94)
+            let hover = dark ? Color(white: 0.22) : Color(white: 0.90)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(
+                    isSelected
+                        ? Color.accentColor.opacity(dark ? 0.22 : 0.14)
+                        : (hovering ? hover : idle)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(
+                            isSelected
+                                ? Color.accentColor
+                                : (dark ? Color.white.opacity(0.08) : Color.black.opacity(0.05)),
+                            lineWidth: isSelected ? 1.5 : 0.5
+                        )
+                )
+        } else {
+            SolidCardBackground(cornerRadius: 22, selected: isSelected)
+        }
     }
 
     @ViewBuilder

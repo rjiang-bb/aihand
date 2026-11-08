@@ -170,10 +170,10 @@ struct SkillSuggestionList: View {
                 }
             }
         }
-        .frame(maxHeight: 260)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxHeight: 240)
         .padding(4)
         .frame(minWidth: 280, maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color(nsColor: .controlBackgroundColor))

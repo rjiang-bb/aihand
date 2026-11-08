@@ -73,7 +73,7 @@ if [[ -n "${SPARKLE_PRIVATE_KEY:-}" ]]; then
 else
     ENCLOSURE="$("$TOOLS/sign_update" --account tinyhand "$DMG")"
 fi
-NOTES_HTML="$(printf '%s' "${RELEASE_NOTES:-TinyHand $VERSION}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' | sed -e 's/$/<br>/')"
+NOTES_HTML="$(printf '%s' "${RELEASE_NOTES:-AiHand $VERSION}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' | sed -e 's/$/<br>/')"
 cat > "$OUT/appcast.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">

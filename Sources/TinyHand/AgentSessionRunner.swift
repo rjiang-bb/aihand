@@ -32,7 +32,13 @@ final class AgentSessionRunner {
             }
             return
         }
-        let args = cli.startArguments(workspace: workspace, prompt: prompt, imagePath: imagePath)
+        let args = cli.startArguments(
+            workspace: workspace,
+            prompt: prompt,
+            imagePath: imagePath,
+            model: session.modelId,
+            effort: session.effort
+        )
         launch(exe: exe, args: args, session: session)
     }
 
@@ -66,7 +72,14 @@ final class AgentSessionRunner {
         } else {
             DispatchQueue.main.sync(execute: appendUser)
         }
-        let args = cli.followUpArguments(workspace: workspace, chatId: chatId, prompt: prompt, imagePath: imagePath)
+        let args = cli.followUpArguments(
+            workspace: workspace,
+            chatId: chatId,
+            prompt: prompt,
+            imagePath: imagePath,
+            model: session.modelId,
+            effort: session.effort
+        )
         launch(exe: exe, args: args, session: session)
     }
 
@@ -105,9 +118,8 @@ final class AgentSessionRunner {
         let path = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         env["PATH"] = (extras + [path]).joined(separator: ":")
         process.environment = env
-        process.currentDirectoryURL = URL(fileURLWithPath: Preferences.agentWorkspace.isEmpty
-            ? NSHomeDirectory()
-            : Preferences.agentWorkspace)
+        let cwd = session.workspace.isEmpty ? NSHomeDirectory() : session.workspace
+        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
 
         let out = Pipe()
         let err = Pipe()
@@ -573,6 +585,8 @@ final class AgentSessionRunner {
 final class AgentSessionManager {
     private let store: SessionStore
     private var runners: [UUID: AgentSessionRunner] = [:]
+    /// Fired on the main queue when a turn finishes idle (`.finished`, no queued follow-ups).
+    var onSessionCompleted: ((AgentSession) -> Void)?
 
     init(store: SessionStore) {
         self.store = store
@@ -602,16 +616,23 @@ final class AgentSessionManager {
             title = String(trimmed.prefix(48))
         }
         let cliKind = Preferences.agentCLI
+        // Prefer the latest session that used this CLI (list is workspace-scoped, mixed CLIs).
+        let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI)
         let session = AgentSession(
             title: title,
             prompt: prompt,
             screenshotPath: screenshotPath,
-            cliKind: cliKind
+            workspace: workspace,
+            cliKind: cliKind,
+            favoriteId: favorite.id,
+            modelId: favorite.usesCLIDefaultModel ? nil : favorite.modelId,
+            effort: favorite.effort
         )
         store.prepend(session)
         let runner = AgentSessionRunner(cli: AgentCLIFactory.make(cliKind))
         wireRunner(runner, sessionID: session.id)
-        runner.start(session: session, workspace: workspace, prompt: prompt, imagePath: screenshotPath)
+        runner.start(session: session, workspace: session.workspace, prompt: prompt, imagePath: screenshotPath)
         return session
     }
 
@@ -619,11 +640,18 @@ final class AgentSessionManager {
     func createBlankSession() -> AgentSession? {
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return nil }
+        let cliKind = Preferences.agentCLI
+        let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI)
         let session = AgentSession(
             title: "New session",
             prompt: "",
             screenshotPath: nil,
-            cliKind: Preferences.agentCLI,
+            workspace: workspace,
+            cliKind: cliKind,
+            favoriteId: favorite.id,
+            modelId: favorite.usesCLIDefaultModel ? nil : favorite.modelId,
+            effort: favorite.effort,
             status: .waiting,
             blank: true
         )
@@ -633,7 +661,7 @@ final class AgentSessionManager {
 
     func followUp(sessionID: UUID, text: String, submit: FollowUpSubmit = .sendNow) {
         guard let session = store.session(id: sessionID) else { return }
-        let workspace = Preferences.agentWorkspace
+        let workspace = session.workspace
         guard !workspace.isEmpty else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -687,7 +715,12 @@ final class AgentSessionManager {
     private func wireRunner(_ runner: AgentSessionRunner, sessionID: UUID) {
         runners[sessionID] = runner
         runner.onFinished = { [weak self] in
-            self?.drainQueue(sessionID: sessionID)
+            guard let self else { return }
+            self.drainQueue(sessionID: sessionID)
+            guard let session = self.store.session(id: sessionID),
+                  session.status == .finished,
+                  session.queuedFollowUps.isEmpty else { return }
+            self.onSessionCompleted?(session)
         }
     }
 

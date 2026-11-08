@@ -35,6 +35,7 @@ final class OverlayController {
     private var escHotKey: UInt32?
     private var enterHotKey: UInt32?
     private var sendHotKey: UInt32?
+    private var undoHotKey: UInt32?
     private let annotationHints = AnnotationHintPanel()
     private var lastPermissionCheck = Date.distantPast
 
@@ -57,6 +58,8 @@ final class OverlayController {
     /// ⌘↩ while ink is on screen — send the annotated screenshot immediately.
     var onRequestSend: (() -> Void)?
     var onInkCleared: (() -> Void)?
+    /// Fired after undoing a finished stroke (layer removed from the overlay).
+    var onStrokeUndone: ((CAShapeLayer) -> Void)?
 
     init() {
         let frame = (NSScreen.main ?? NSScreen.screens.first).map { $0.frame }
@@ -250,6 +253,13 @@ final class OverlayController {
         onInkCleared?()
     }
 
+    /// Undo the current drag or the last finished stroke (⌘Z).
+    func undoLastStroke() {
+        if let layer = armView.ink.undoLast() {
+            onStrokeUndone?(layer)
+        }
+    }
+
     /// Finished strokes on the overlay (not including an in-progress drag).
     var hasAnnotationInk: Bool {
         !armView.ink.isDrawing && inkStrokes > 0
@@ -319,7 +329,7 @@ final class OverlayController {
         serviceTick()
 
         activity = ProcessInfo.processInfo.beginActivity(
-            options: [.userInitiated, .latencyCritical], reason: "TinyHand pointer is on")
+            options: [.userInitiated, .latencyCritical], reason: "AiHand pointer is on")
         let installed = inputTap.install()
         inputTap.interactKey = Preferences.interactKey.cgFlags
         inputTap.setActive(installed)
@@ -461,6 +471,14 @@ final class OverlayController {
                     self.onRequestSend?()
                 }
             }
+            if undoHotKey == nil {
+                undoHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_ANSI_Z),
+                    modifiers: UInt32(cmdKey)
+                ) { [weak self] in
+                    self?.undoLastStroke()
+                }
+            }
             return
         }
         if let id = enterHotKey {
@@ -470,6 +488,10 @@ final class OverlayController {
         if let id = sendHotKey {
             HotKeyCenter.shared.unregister(id)
             sendHotKey = nil
+        }
+        if let id = undoHotKey {
+            HotKeyCenter.shared.unregister(id)
+            undoHotKey = nil
         }
     }
 
