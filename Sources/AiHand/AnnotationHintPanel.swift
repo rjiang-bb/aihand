@@ -23,7 +23,8 @@ final class AnnotationHintPanel {
         p.backgroundColor = .clear
         p.hasShadow = true
         p.ignoresMouseEvents = true
-        p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+        // Match drawing tools / toolbar — below the hand overlay.
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         p.isReleasedWhenClosed = false
         p.alphaValue = 0
@@ -32,20 +33,20 @@ final class AnnotationHintPanel {
         let card = NSView(frame: .zero)
         card.wantsLayer = true
         card.layer?.backgroundColor = SoftChrome.cardNSColor(dark: dark).cgColor
-        card.layer?.cornerRadius = 14
+        card.layer?.cornerRadius = 10
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 0.5
         card.layer?.borderColor = (dark ? NSColor.white.withAlphaComponent(0.14) : NSColor.black.withAlphaComponent(0.08)).cgColor
         card.layer?.shadowColor = NSColor.black.cgColor
         card.layer?.shadowOpacity = Float(dark ? 0.5 : 0.16)
-        card.layer?.shadowRadius = 12
-        card.layer?.shadowOffset = CGSize(width: 0, height: -6)
+        card.layer?.shadowRadius = 10
+        card.layer?.shadowOffset = CGSize(width: 0, height: -4)
         p.contentView = card
 
         let row = NSStackView()
         row.orientation = .horizontal
-        row.spacing = 16
-        row.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
+        row.spacing = 12
+        row.edgeInsets = NSEdgeInsets(top: 5, left: 12, bottom: 5, right: 12)
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let fg = dark ? NSColor.white : NSColor.black
@@ -53,17 +54,19 @@ final class AnnotationHintPanel {
         let parts: [(String, String)] = [
             ("⌘Z", "undo"),
             (Preferences.clearShortcut.display, "clear drawing"),
+            ("⌘⇧S", "save screenshot"),
+            ("⌘/", "screen / window"),
             ("Enter", "comment"),
             ("⌘↩", "send to agent"),
             ("Esc", "exit"),
         ]
         for part in parts {
             let text = NSMutableAttributedString(string: part.0, attributes: [
-                .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold),
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
                 .foregroundColor: fg,
             ])
             text.append(NSAttributedString(string: "  " + part.1, attributes: [
-                .font: NSFont.systemFont(ofSize: 12.5),
+                .font: NSFont.systemFont(ofSize: 11),
                 .foregroundColor: muted,
             ]))
             row.addArrangedSubview(NSTextField(labelWithAttributedString: text))

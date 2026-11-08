@@ -9,7 +9,8 @@ enum SessionNotifier {
     static func requestAuthorization() {
         let center = UNUserNotificationCenter.current()
         center.setNotificationCategories([
-            UNNotificationCategory(identifier: categoryID, actions: [], intentIdentifiers: [])
+            UNNotificationCategory(identifier: categoryID, actions: [], intentIdentifiers: []),
+            UNNotificationCategory(identifier: ScreenshotNotifier.categoryID, actions: [], intentIdentifiers: []),
         ])
         center.requestAuthorization(options: [.alert, .sound]) { granted, error in
             if let error {

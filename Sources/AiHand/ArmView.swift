@@ -20,6 +20,7 @@ final class ArmView: NSView {
     private let liftFrac: CGFloat = 0.06
 
     let ink = Ink()
+    private let captureOutline = CAShapeLayer()
     var held = false
     var inkWidth: CGFloat {
         let base = max(3, bounds.height * 0.0055)
@@ -64,6 +65,14 @@ final class ArmView: NSView {
 
         root.addSublayer(dotLayer)
 
+        captureOutline.fillColor = nil
+        captureOutline.strokeColor = Ink.red
+        captureOutline.lineWidth = 6
+        captureOutline.lineJoin = .miter
+        captureOutline.lineCap = .square
+        captureOutline.isHidden = true
+        root.addSublayer(captureOutline)
+
         group.masksToBounds = false
         group.addSublayer(rodLayer)
         group.addSublayer(handLayer)
@@ -91,6 +100,27 @@ final class ArmView: NSView {
 
     func updateInkColor() {
         ink.color = Preferences.inkChoice.resolved(for: style)
+    }
+
+    /// Thick red frame around the region that will be screenshotted (`local` overlay coords).
+    func setCaptureOutline(localRect: CGRect?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard let localRect, localRect.width > 2, localRect.height > 2 else {
+            captureOutline.isHidden = true
+            captureOutline.path = nil
+            return
+        }
+        let inset = captureOutline.lineWidth / 2
+        let stroked = localRect.insetBy(dx: inset, dy: inset)
+        guard stroked.width > 1, stroked.height > 1 else {
+            captureOutline.isHidden = true
+            captureOutline.path = nil
+            return
+        }
+        captureOutline.path = CGPath(rect: stroked, transform: nil)
+        captureOutline.isHidden = false
     }
 
     func setStyle(_ newStyle: PointerStyle) {

@@ -99,6 +99,15 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
+    /// Shell command shown in Settings when this CLI is missing (copyable).
+    var installCommand: String? {
+        switch self {
+        case .cursor: return nil
+        case .claude: return nil
+        case .codex: return "curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+        }
+    }
+
     /// Short label for the CLI’s default model when AiHand doesn’t pass `--model`.
     var defaultModelTitle: String {
         switch self {
@@ -220,6 +229,35 @@ enum StrokeThickness: Int, CaseIterable {
     }
 }
 
+enum CaptureScope: String, CaseIterable {
+    case screen, window
+
+    var title: String {
+        switch self {
+        case .screen: return "Entire screen"
+        case .window: return "Focused window"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .screen: return "Screen"
+        case .window: return "Window"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .screen: return "rectangle.dashed"
+        case .window: return "macwindow"
+        }
+    }
+
+    var toggled: CaptureScope {
+        self == .screen ? .window : .screen
+    }
+}
+
 enum Preferences {
     static let changed = Notification.Name("AiHandPreferencesChanged")
     private static let defaults = UserDefaults.standard
@@ -317,6 +355,12 @@ enum Preferences {
             return raw.flatMap(StrokeThickness.init(rawValue:)) ?? .medium
         }
         set { set(newValue.rawValue, "strokeThickness") }
+    }
+
+    /// What the annotate screenshot includes: the full display or the frontmost window.
+    static var captureScope: CaptureScope {
+        get { defaults.string(forKey: "captureScope").flatMap(CaptureScope.init(rawValue:)) ?? .screen }
+        set { set(newValue.rawValue, "captureScope") }
     }
 
     static var agentCLI: AgentCLIKind {
@@ -691,7 +735,7 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "drawTool", "strokeThickness", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
+                    "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)

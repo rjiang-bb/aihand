@@ -17,6 +17,8 @@ final class DrawingToolsPanel {
     private var thicknessButtons: [StrokeThickness: Button] = [:]
     private var thicknessStrokes: [StrokeThickness: NSView] = [:]
     private var thicknessBadges: [StrokeThickness: NSTextField] = [:]
+    private var scopeButton: Button?
+    private var scopeBadge: NSTextField?
     private var actions: [Button: () -> Void] = [:]
     private var prefsObserver: NSObjectProtocol?
 
@@ -35,7 +37,8 @@ final class DrawingToolsPanel {
         p.backgroundColor = .clear
         p.hasShadow = true
         p.ignoresMouseEvents = false
-        p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 2)
+        // Below the hand overlay (screenSaver + 2) so the pointer draws over the strip.
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         p.isReleasedWhenClosed = false
         p.alphaValue = 0
@@ -85,6 +88,11 @@ final class DrawingToolsPanel {
             widths.addArrangedSubview(b)
         }
         row.addArrangedSubview(widths)
+        row.addArrangedSubview(divider(dark: dark))
+
+        let scope = makeScopeButton(dark: dark)
+        scopeButton = scope
+        row.addArrangedSubview(scope)
 
         card.addSubview(row)
         NSLayoutConstraint.activate([
@@ -124,6 +132,8 @@ final class DrawingToolsPanel {
         thicknessButtons = [:]
         thicknessStrokes = [:]
         thicknessBadges = [:]
+        scopeButton = nil
+        scopeBadge = nil
         actions = [:]
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.2
@@ -170,6 +180,54 @@ final class DrawingToolsPanel {
             thicknessStrokes[thickness]?.layer?.backgroundColor = fg.withAlphaComponent(on ? 0.9 : 0.35).cgColor
             thicknessBadges[thickness]?.textColor = fg.withAlphaComponent(on ? 0.85 : 0.4)
         }
+        if let scopeButton {
+            let scope = Preferences.captureScope
+            scopeButton.layer?.backgroundColor = selectedFill.cgColor
+            scopeButton.contentTintColor = fg.withAlphaComponent(0.95)
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            scopeButton.image = NSImage(systemSymbolName: scope.symbol, accessibilityDescription: scope.title)?
+                .withSymbolConfiguration(config)
+            scopeButton.toolTip = "\(scope.title) (⌘/)"
+            scopeButton.setAccessibilityLabel(scope.title)
+            scopeBadge?.textColor = fg.withAlphaComponent(0.85)
+        }
+    }
+
+    private func makeScopeButton(dark: Bool) -> Button {
+        let scope = Preferences.captureScope
+        let b = Button()
+        b.isBordered = false
+        b.bezelStyle = .regularSquare
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 10
+        b.toolTip = "\(scope.title) (⌘/)"
+        b.setAccessibilityLabel(scope.title)
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        b.image = NSImage(systemSymbolName: scope.symbol, accessibilityDescription: scope.title)?
+            .withSymbolConfiguration(config)
+        b.imagePosition = .imageOnly
+        b.contentTintColor = dark ? .white : .black
+
+        let badge = NSTextField(labelWithString: "⌘/")
+        badge.font = .systemFont(ofSize: 9, weight: .semibold)
+        badge.textColor = (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.45)
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        b.addSubview(badge)
+        scopeBadge = badge
+
+        b.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        b.heightAnchor.constraint(equalToConstant: 36).isActive = true
+        NSLayoutConstraint.activate([
+            badge.trailingAnchor.constraint(equalTo: b.trailingAnchor, constant: -3),
+            badge.bottomAnchor.constraint(equalTo: b.bottomAnchor, constant: -3),
+        ])
+
+        b.target = self
+        b.action = #selector(tapped(_:))
+        actions[b] = {
+            Preferences.captureScope = Preferences.captureScope.toggled
+        }
+        return b
     }
 
     private func makeToolButton(_ tool: DrawTool, dark: Bool) -> Button {

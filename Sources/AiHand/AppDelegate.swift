@@ -124,6 +124,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             guard let self, !self.annotatePanel.isVisible else { return }
             self.submitAnnotation(prompt: "")
         }
+        overlay.onRequestSave = { [weak self] in
+            guard let self, !self.annotatePanel.isVisible else { return }
+            self.saveScreenshot()
+        }
         overlay.onInkCleared = { [weak self] in
             self?.pendingStrokes = []
             self?.annotatePanel.hide()
@@ -195,14 +199,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             return
         }
 
-        let pad: CGFloat = 8
-        let union = strokes.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
-        let strokeScreen = CGRect(
-            x: overlayFrame.origin.x + union.minX - pad,
-            y: overlayFrame.origin.y + union.minY - pad,
-            width: union.width + pad * 2,
-            height: union.height + pad * 2
-        )
+        let strokeScreen = Self.strokeScreenBounds(strokes: strokes, overlayFrame: overlayFrame)
 
         // Keep stroke geometry; hide interactive UI so ScreenCaptureKit exclusion is clean.
         annotatePanel.hide()
@@ -219,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                     overlayFrame: overlayFrame
                 )
                 for stroke in strokes {
-                    self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                    self.overlay.releaseStrokeHold(stroke, fadeNow: false)
                 }
                 self.overlay.exit()
                 if let session = self.sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
@@ -227,30 +224,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 }
             } catch {
                 for stroke in strokes {
-                    self.overlay.releaseStrokeHold(stroke, fadeNow: true)
+                    self.overlay.releaseStrokeHold(stroke, fadeNow: false)
                 }
                 self.overlay.exit()
-                Log.write("capture failed: \(error.localizedDescription)")
-                let needsScreenRecording = (error as? WindowCapture.CaptureError) == .permissionDenied
-                    || error.localizedDescription.localizedCaseInsensitiveContains("Screen Recording")
-                if needsScreenRecording {
-                    _ = WindowCapture.ensureScreenRecordingAccess()
-                }
-                let alert = NSAlert()
-                alert.messageText = "Couldn’t capture screenshot"
-                alert.informativeText = needsScreenRecording
-                    ? "Turn on AiHand under Privacy & Security → Screen Recording, then draw again."
-                    : error.localizedDescription
-                alert.alertStyle = .warning
-                alert.addButton(withTitle: "OK")
-                if needsScreenRecording {
-                    alert.addButton(withTitle: "Open Settings")
-                }
-                let response = alert.runModal()
-                if needsScreenRecording, response == .alertSecondButtonReturn {
-                    WindowCapture.openScreenRecordingSettings()
-                }
+                self.presentCaptureFailure(error)
             }
+        }
+    }
+
+    /// ⌘⇧S — write an annotated capture to the screenshots folder without starting an agent.
+    private func saveScreenshot() {
+        guard overlay.isActive, let overlayFrame = overlay.overlayFrame else { return }
+        let screen = overlay.activeScreen
+            ?? NSScreen.screens.first(where: { $0.frame.intersects(overlayFrame) })
+            ?? NSScreen.main
+        guard let screen else { return }
+
+        let strokes = pendingStrokes
+        let strokeScreen = strokes.isEmpty
+            ? WindowCapture.captureRegion(on: screen)
+            : Self.strokeScreenBounds(strokes: strokes, overlayFrame: overlayFrame)
+
+        annotatePanel.hide()
+        overlay.setAnnotationHintsVisible(false)
+        for stroke in strokes {
+            overlay.releaseStrokeHold(stroke, fadeNow: false)
+        }
+
+        Task { @MainActor in
+            do {
+                let outcome = try await WindowCapture.captureAnnotated(
+                    strokes: strokes,
+                    strokeScreenBounds: strokeScreen,
+                    overlayFrame: overlayFrame
+                )
+                let url = URL(fileURLWithPath: outcome.path)
+                let image = NSImage(contentsOf: url)
+                self.pendingStrokes = []
+                self.overlay.clearInk()
+                self.overlay.exit()
+                if let image {
+                    self.overlay.showSavePreview(fileURL: url, image: image, on: screen)
+                }
+                ScreenshotNotifier.notifySaved(path: outcome.path)
+                Log.write("screenshot saved \(outcome.path)")
+            } catch {
+                for stroke in strokes {
+                    self.overlay.releaseStrokeHold(stroke, fadeNow: false)
+                }
+                if self.overlay.isActive {
+                    self.overlay.setAnnotationHintsVisible(true)
+                }
+                self.presentCaptureFailure(error)
+            }
+        }
+    }
+
+    private static func strokeScreenBounds(strokes: [StrokeResult], overlayFrame: CGRect) -> CGRect {
+        let pad: CGFloat = 8
+        let union = strokes.map(\.bounds).reduce(CGRect.null) { $0.union($1) }
+        return CGRect(
+            x: overlayFrame.origin.x + union.minX - pad,
+            y: overlayFrame.origin.y + union.minY - pad,
+            width: union.width + pad * 2,
+            height: union.height + pad * 2
+        )
+    }
+
+    private func presentCaptureFailure(_ error: Error) {
+        Log.write("capture failed: \(error.localizedDescription)")
+        let needsScreenRecording = (error as? WindowCapture.CaptureError) == .permissionDenied
+            || error.localizedDescription.localizedCaseInsensitiveContains("Screen Recording")
+        if needsScreenRecording {
+            _ = WindowCapture.ensureScreenRecordingAccess()
+        }
+        let alert = NSAlert()
+        alert.messageText = "Couldn’t capture screenshot"
+        alert.informativeText = needsScreenRecording
+            ? "Turn on AiHand under Privacy & Security → Screen Recording, then draw again."
+            : error.localizedDescription
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        if needsScreenRecording {
+            alert.addButton(withTitle: "Open Settings")
+        }
+        let response = alert.runModal()
+        if needsScreenRecording, response == .alertSecondButtonReturn {
+            WindowCapture.openScreenRecordingSettings()
         }
     }
 
@@ -466,6 +526,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let id = SessionNotifier.sessionID(from: response) {
             DispatchQueue.main.async { [weak self] in
                 self?.revealSession(id)
+            }
+        } else if let path = ScreenshotNotifier.path(from: response) {
+            DispatchQueue.main.async {
+                NSWorkspace.shared.open(URL(fileURLWithPath: path))
             }
         }
         completionHandler()

@@ -205,8 +205,8 @@ enum InkTextStyle {
 
 final class Ink {
     let layer = CALayer()
-    /// Strokes always fade; clear early with the clear-drawing shortcut.
-    var keep: Bool { false }
+    /// Drawings stay until the clear-drawing shortcut (or undo); exiting the hand keeps them.
+    var keep: Bool { true }
 
     static let purple = CGColor(srgbRed: 0.53, green: 0.33, blue: 0.95, alpha: 1)
     static let red = CGColor(srgbRed: 1.0, green: 0.16, blue: 0.12, alpha: 1)
@@ -217,7 +217,6 @@ final class Ink {
     }
     var color = Ink.purple
     var scale: CGFloat = 2
-    private let fadeDelay: CFTimeInterval = 3
     private let fadeDuration: CFTimeInterval = 0.6
 
     private var stroke: CAShapeLayer?
@@ -300,11 +299,10 @@ final class Ink {
             text: nil,
             layer: s
         )
-        if holdFade || keep {
-            heldLayers.insert(ObjectIdentifier(s))
-            return result
+        heldLayers.insert(ObjectIdentifier(s))
+        if !(holdFade || keep) {
+            fade(s, after: 0, over: fadeDuration)
         }
-        fade(s, after: fadeDelay, over: fadeDuration)
         return result
     }
 
@@ -348,17 +346,17 @@ final class Ink {
             text: text,
             layer: s
         )
-        if holdFade || keep {
-            heldLayers.insert(ObjectIdentifier(s))
-            return result
+        heldLayers.insert(ObjectIdentifier(s))
+        if !(holdFade || keep) {
+            fade(s, after: 0, over: fadeDuration)
         }
-        fade(s, after: fadeDelay, over: fadeDuration)
         return result
     }
 
     func releaseHold(_ result: StrokeResult, fadeNow: Bool = true) {
         let id = ObjectIdentifier(result.layer)
         heldLayers.remove(id)
+        // Kept drawings stay until clear/undo — ignore fade requests from capture flow.
         guard fadeNow, !keep else {
             return
         }
