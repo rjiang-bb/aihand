@@ -8,7 +8,7 @@ if let idx = CommandLine.arguments.firstIndex(of: "--render-test") {
 }
 
 if let idx = CommandLine.arguments.firstIndex(of: "--ax-status") {
-    let out = CommandLine.arguments.count > idx + 1 ? CommandLine.arguments[idx + 1] : "/tmp/tinyhand-ax.txt"
+    let out = CommandLine.arguments.count > idx + 1 ? CommandLine.arguments[idx + 1] : "/tmp/aihand-ax.txt"
     let mask: CGEventMask = 1 << CGEventType.leftMouseDown.rawValue
     let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
                                 eventsOfInterest: mask, callback: { _, _, e, _ in Unmanaged.passUnretained(e) }, userInfo: nil)

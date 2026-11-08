@@ -9,13 +9,18 @@ enum ChatImageActions {
         guard let image = NSImage(contentsOfFile: path),
               image.size.width > 0, image.size.height > 0 else { return }
 
-        let screen = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.insetBy(dx: 36, dy: 36)
+        let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
             ?? NSRect(x: 40, y: 40, width: 900, height: 700)
+        // Cap the preview window at half the screen; scale the image to fit.
+        let maxW = max(240, visible.width * 0.5)
+        let maxH = max(180, visible.height * 0.5)
         let imgSize = image.size
+        let scale = min(1, min(maxW / imgSize.width, maxH / imgSize.height))
+        let displaySize = NSSize(width: max(1, imgSize.width * scale), height: max(1, imgSize.height * scale))
 
-        let imageView = NSImageView(frame: NSRect(origin: .zero, size: imgSize))
+        let imageView = NSImageView(frame: NSRect(origin: .zero, size: displaySize))
         imageView.image = image
-        imageView.imageScaling = .scaleNone
+        imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.imageAlignment = .alignCenter
 
         let scroll = NSScrollView(frame: .zero)
@@ -27,16 +32,16 @@ enum ChatImageActions {
         scroll.backgroundColor = .windowBackgroundColor
         scroll.documentView = imageView
 
-        let winW = min(max(imgSize.width, 240), screen.width)
-        let winH = min(max(imgSize.height, 180), screen.height)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: winW, height: winH),
+            contentRect: NSRect(x: 0, y: 0, width: displaySize.width, height: displaySize.height),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = (path as NSString).lastPathComponent
         window.contentView = scroll
+        window.contentMinSize = NSSize(width: 200, height: 150)
+        window.contentMaxSize = NSSize(width: maxW, height: maxH)
         window.isReleasedWhenClosed = false
         window.center()
         window.makeKeyAndOrderFront(nil)

@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TinyHand-dmg
+          name: AiHand-dmg
           path: |
             dist/release/*.dmg
             dist/release/*.sha256
@@ -77,8 +77,8 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
-            "dist/release/TinyHand-$VERSION.dmg" "dist/release/TinyHand-$VERSION.dmg.sha256" \
-            dist/release/TinyHand.dmg \
+            "dist/release/AiHand-$VERSION.dmg" "dist/release/AiHand-$VERSION.dmg.sha256" \
+            dist/release/AiHand.dmg \
             dist/release/appcast.xml \
             --title "$VERSION" --notes "$RELEASE_NOTES"
 

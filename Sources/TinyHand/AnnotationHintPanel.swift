@@ -29,7 +29,7 @@ final class AnnotationHintPanel {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let card = NSView(frame: .zero)
         card.wantsLayer = true
-        card.layer?.backgroundColor = (dark ? NSColor.black : NSColor.white).cgColor
+        card.layer?.backgroundColor = SoftChrome.cardNSColor(dark: dark).cgColor
         card.layer?.cornerRadius = 14
         card.layer?.cornerCurve = .continuous
         card.layer?.borderWidth = 0.5

@@ -7,9 +7,34 @@ struct Shortcut: Equatable {
     var modifiers: UInt32
     var display: String
 
-    static let toggleDefault = Shortcut(keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(controlKey | optionKey), display: "⌃⌥H")
-    static let clearDefault = Shortcut(keyCode: UInt32(kVK_ANSI_X), modifiers: UInt32(controlKey | optionKey), display: "⌃⌥X")
+    static let toggleDefault = Shortcut(keyCode: UInt32(kVK_ANSI_H), modifiers: UInt32(cmdKey | shiftKey), display: "⌘⇧H")
+    static let clearDefault = Shortcut(keyCode: UInt32(kVK_ANSI_X), modifiers: UInt32(cmdKey | shiftKey), display: "⌘⇧X")
     static let sessionsDefault = Shortcut(keyCode: UInt32(kVK_ANSI_G), modifiers: UInt32(cmdKey | shiftKey), display: "⌘⇧G")
+}
+
+enum AppTheme: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    /// `nil` follows the macOS appearance.
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 enum InteractKey: String, CaseIterable {
@@ -74,7 +99,7 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// Short label for the CLI’s default model when TinyHand doesn’t pass `--model`.
+    /// Short label for the CLI’s default model when AiHand doesn’t pass `--model`.
     var defaultModelTitle: String {
         switch self {
         case .cursor: return "Auto"
@@ -138,7 +163,7 @@ enum InkChoice: String, CaseIterable {
 }
 
 enum Preferences {
-    static let changed = Notification.Name("TinyHandPreferencesChanged")
+    static let changed = Notification.Name("AiHandPreferencesChanged")
     private static let defaults = UserDefaults.standard
 
     static var toggleShortcut: Shortcut {
@@ -166,6 +191,19 @@ enum Preferences {
     static var showShadow: Bool {
         get { defaults.object(forKey: "showShadow") as? Bool ?? true }
         set { set(newValue, "showShadow") }
+    }
+
+    /// App chrome theme for settings, sessions, annotate prompts, etc.
+    static var theme: AppTheme {
+        get { defaults.string(forKey: "theme").flatMap(AppTheme.init(rawValue:)) ?? .system }
+        set {
+            set(newValue.rawValue, "theme")
+            applyTheme()
+        }
+    }
+
+    static func applyTheme() {
+        NSApp.appearance = theme.nsAppearance
     }
 
     static var fadeSeconds: Double {
@@ -502,12 +540,12 @@ enum Preferences {
     }
 
     static var defaultScreenshotsFolder: String {
-        NSString(string: "~/Documents/tinyhand").expandingTildeInPath
+        NSString(string: "~/Documents/AiHand").expandingTildeInPath
     }
 
     /// Preferred size when a chat is open (total panel width + height). List-only mode is fixed.
     static let sessionsPanelDefaultWidth: CGFloat = 800
-    static let sessionsPanelDefaultHeight: CGFloat = 640
+    static let sessionsPanelDefaultHeight: CGFloat = 900
 
     /// Persisted expanded (chat open) panel width. Caps applied at layout time.
     static var sessionsPanelWidth: CGFloat {
@@ -551,6 +589,11 @@ enum Preferences {
 
     @discardableResult
     static func ensureScreenshotsFolder() -> String {
+        AppSupport.migrateDocumentsFolderIfNeeded()
+        let legacy = NSString(string: "~/Documents/tinyhand").expandingTildeInPath
+        if let stored = defaults.string(forKey: "screenshotsFolder"), stored == legacy {
+            defaults.set(defaultScreenshotsFolder, forKey: "screenshotsFolder")
+        }
         let path = screenshotsFolder
         let fm = FileManager.default
         if !fm.fileExists(atPath: path) {
@@ -590,13 +633,14 @@ enum Preferences {
     }
 
     static func resetAll() {
-        for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "fadeSeconds",
+        for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
                     "inkChoice", "showInkButton", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
             defaults.removeObject(forKey: key)
         }
+        applyTheme()
         NotificationCenter.default.post(name: changed, object: nil)
     }
 

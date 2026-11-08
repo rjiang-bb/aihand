@@ -316,15 +316,13 @@ struct CustomHand: Codable {
 }
 
 enum CustomHands {
-    static let changed = Notification.Name("TinyHandCustomHandsChanged")
+    static let changed = Notification.Name("AiHandCustomHandsChanged")
 
     static var directory: URL {
         if let override = ProcessInfo.processInfo.environment["TH_HANDS_DIR"] {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("TinyHand/Hands", isDirectory: true)
+        return AppSupport.directory(subpath: "Hands")
     }
 
     private static var listURL: URL {

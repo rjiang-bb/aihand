@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 
 final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
@@ -14,12 +15,13 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
     private let panel: Panel
     private let model = AnnotatePromptModel()
     private var hosting: NSHostingView<AnnotatePromptView>?
+    private var keyMonitor: Any?
 
     var isVisible: Bool { panel.isVisible }
 
     override init() {
         panel = Panel(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 132),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 180),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -63,14 +65,14 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         model.text = ""
         model.workspaceMissing = workspaceMissing
         model.requirePrompt = requirePrompt
-        let kind = Preferences.agentCLI
-        model.agentSummary = "\(kind.title) · \(kind.defaultModelTitle)"
+        model.reloadFavorites()
         model.focusTick += 1
 
         position(on: screen, placement: placement)
         panel.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        installKeyMonitor()
         onOpenChanged?(true)
 
         // SwiftUI needs a turn to apply requirePrompt / focus before fitting size is accurate.
@@ -86,7 +88,7 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             host.layoutSubtreeIfNeeded()
             let fitting = host.fittingSize
             if fitting.width > 10, fitting.height > 10 {
-                panel.setContentSize(NSSize(width: max(360, fitting.width), height: fitting.height))
+                panel.setContentSize(NSSize(width: max(460, fitting.width), height: fitting.height))
             }
         }
 
@@ -128,11 +130,20 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
 
     func hide() {
         guard panel.isVisible else { return }
+        removeKeyMonitor()
         panel.orderOut(nil)
         onOpenChanged?(false)
     }
 
+    func cycleFavorite() {
+        model.cycleFavorite()
+    }
+
     private func submit(_ text: String) {
+        // Ensure the chosen favorite is Current before the session is created.
+        if let id = model.selectedFavoriteID {
+            Preferences.selectAgentFavorite(id)
+        }
         hide()
         onSubmit?(text)
     }
@@ -145,13 +156,72 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
     func windowDidResignKey(_ notification: Notification) {
         // Keep open; Esc / Cmd+Enter handle dismiss.
     }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.panel.isVisible else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+            // ⌘/ → cycle favorite models (keyCode: ⌘ makes charactersIgnoringModifiers flaky).
+            if flags.contains(.command),
+               !flags.contains(.shift),
+               !flags.contains(.option),
+               !flags.contains(.control),
+               (Int(event.keyCode) == kVK_ANSI_Slash || event.charactersIgnoringModifiers == "/") {
+                DispatchQueue.main.async {
+                    self.model.cycleFavorite()
+                }
+                return nil
+            }
+
+            let code = Int(event.keyCode)
+            guard code == 36 || code == 76 else { return event }
+            // ⇧↩ → newline in the prompt field.
+            guard flags.contains(.shift),
+                  !flags.contains(.command),
+                  !flags.contains(.option),
+                  !flags.contains(.control) else {
+                return event
+            }
+            guard let textView = self.editableFieldEditor() else { return event }
+            textView.insertText("\n", replacementRange: textView.selectedRange())
+            // Keep SwiftUI binding in sync with the field editor.
+            if let value = textView.string as String? {
+                self.model.text = value
+            }
+            return nil
+        }
+    }
+
+    private func editableFieldEditor() -> NSTextView? {
+        let responder = panel.firstResponder ?? NSApp.keyWindow?.firstResponder
+        if let textView = responder as? NSTextView, textView.isEditable {
+            return textView
+        }
+        if let field = responder as? NSTextField,
+           let editor = panel.fieldEditor(false, for: field) as? NSTextView,
+           editor.isEditable {
+            return editor
+        }
+        return nil
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
+        keyMonitor = nil
+    }
 }
 
 final class AnnotatePromptModel: ObservableObject {
     @Published var text = ""
     @Published var workspaceMissing = false
     @Published var requirePrompt = false
-    @Published var agentSummary = ""
+    @Published var cliTitle = ""
+    @Published var favorites: [AgentFavorite] = []
+    @Published var selectedFavoriteID: UUID?
     @Published var focusTick = 0
     var onSubmit: ((String) -> Void)?
     var onCancel: (() -> Void)?
@@ -163,6 +233,33 @@ final class AnnotatePromptModel: ObservableObject {
         }
         return true
     }
+
+    var favoriteMenuTitle: String {
+        let name = favorites.first(where: { $0.id == selectedFavoriteID })?.title
+            ?? favorites.first?.title
+            ?? "Default"
+        if cliTitle.isEmpty { return name }
+        return "\(cliTitle) · \(name)"
+    }
+
+    func reloadFavorites() {
+        Preferences.ensureAgentFavorites()
+        let kind = Preferences.agentCLI
+        cliTitle = kind.title
+        favorites = Preferences.favorites(for: kind)
+        selectedFavoriteID = Preferences.currentAgentFavorite.id
+    }
+
+    func selectFavorite(_ fav: AgentFavorite) {
+        selectedFavoriteID = fav.id
+        Preferences.setCurrentAgentFavoriteID(fav.id, for: fav.cliKind)
+    }
+
+    func cycleFavorite() {
+        guard !favorites.isEmpty else { return }
+        let idx = favorites.firstIndex(where: { $0.id == selectedFavoriteID }) ?? -1
+        selectFavorite(favorites[(idx + 1) % favorites.count])
+    }
 }
 
 private struct AnnotatePromptView: View {
@@ -170,33 +267,28 @@ private struct AnnotatePromptView: View {
     @FocusState private var focused: Bool
     @Environment(\.colorScheme) private var colorScheme
 
-    private var solidBG: Color { colorScheme == .dark ? .black : .white }
+    private var solidBG: Color { SoftChrome.cardFill(dark: colorScheme == .dark) }
     private var fieldFill: Color {
         colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("Ask the agent")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.secondary)
                 Spacer(minLength: 8)
-                if !model.agentSummary.isEmpty {
-                    Text(model.agentSummary)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
+                favoriteMenu
             }
             TextField(model.requirePrompt ? "Prompt…" : "Optional prompt…", text: $model.text, axis: .vertical)
                 .font(.system(size: 14))
-                .lineLimit(2...10)
+                .lineLimit(4...10)
                 .textFieldStyle(.plain)
                 .focused($focused)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 7)
-                .frame(minHeight: 52, maxHeight: 120, alignment: .topLeading)
+                .frame(minHeight: 96, maxHeight: 160, alignment: .topLeading)
                 .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(fieldFill))
                 .onChange(of: model.focusTick) { _ in
                     focused = true
@@ -207,7 +299,7 @@ private struct AnnotatePromptView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.orange)
                 } else {
-                    Text("⇧↩ newline · ⌘↩ send · Esc to close")
+                    Text("⇧↩ newline · ⌘↩ send · ⌘/ model · Esc")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -223,7 +315,7 @@ private struct AnnotatePromptView: View {
             }
         }
         .padding(14)
-        .frame(width: 360)
+        .frame(width: 460)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(solidBG)
@@ -240,5 +332,33 @@ private struct AnnotatePromptView: View {
             model.onCancel?()
         }
         .onAppear { focused = true }
+    }
+
+    private var favoriteMenu: some View {
+        Menu {
+            ForEach(model.favorites) { fav in
+                Button {
+                    model.selectFavorite(fav)
+                } label: {
+                    if fav.id == model.selectedFavoriteID {
+                        Label(fav.title, systemImage: "checkmark")
+                    } else {
+                        Text(fav.title)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(model.favoriteMenuTitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundColor(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Favorite model for this send — ⌘/ to cycle")
     }
 }

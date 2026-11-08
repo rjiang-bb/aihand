@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build and launch TinyHand from ~/Applications with a pinned Apple Development
+# Build and launch AiHand from ~/Applications with a pinned Apple Development
 # signature so Accessibility / Screen Recording grants survive rebuilds.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"

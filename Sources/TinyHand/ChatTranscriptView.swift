@@ -70,8 +70,9 @@ struct ChatTranscriptView: NSViewRepresentable {
                 guard let webView else { return }
                 let clientX = CGFloat((body["x"] as? Double) ?? (body["x"] as? Int).map(Double.init) ?? 0)
                 let clientY = CGFloat((body["y"] as? Double) ?? (body["y"] as? Int).map(Double.init) ?? 0)
-                // JS client coords are top-left; AppKit view coords are bottom-left.
-                let point = NSPoint(x: clientX, y: webView.bounds.height - clientY)
+                // WKWebView is flipped — JS client coords already match view coords.
+                let y = webView.isFlipped ? clientY : (webView.bounds.height - clientY)
+                let point = NSPoint(x: clientX, y: y)
                 ChatImageActions.showMenu(path: key, at: point, in: webView)
             default:
                 break

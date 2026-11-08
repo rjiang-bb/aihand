@@ -111,6 +111,11 @@ final class WelcomeWindow: NSObject {
         tip.font = NSFont.systemFont(ofSize: 11)
         tip.textColor = .secondaryLabelColor
         tip.alignment = .center
+        tip.maximumNumberOfLines = 0
+        tip.lineBreakMode = .byWordWrapping
+        tip.usesSingleLineMode = false
+        tip.cell?.wraps = true
+        tip.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let stack = NSStackView(views: [icon, title, subtitle, button, tip])
         stack.orientation = .vertical
@@ -132,6 +137,9 @@ final class WelcomeWindow: NSObject {
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: card.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: card.centerYAnchor, constant: 4),
+            stack.leadingAnchor.constraint(greaterThanOrEqualTo: card.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: card.trailingAnchor, constant: -24),
+            tip.widthAnchor.constraint(equalTo: stack.widthAnchor),
             closeButton.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
             closeButton.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
         ])

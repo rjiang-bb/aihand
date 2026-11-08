@@ -1427,6 +1427,21 @@ private struct AppearancePage: View {
                     .toggleStyle(.switch).labelsHidden().focusable(false)
             }
         }
+        Card(title: "Theme") {
+            Row("Appearance", detail: Preferences.theme == .system
+                ? "Follows macOS light or dark mode."
+                : "Always \(Preferences.theme.title.lowercased()).") {
+                Picker("", selection: model.binding({ Preferences.theme }, { Preferences.theme = $0 })) {
+                    ForEach(AppTheme.allCases) { theme in
+                        Text(theme.title).tag(theme)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .fixedSize()
+                .focusable(false)
+            }
+        }
     }
 }
 

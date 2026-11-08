@@ -585,6 +585,8 @@ final class AgentSessionRunner {
 final class AgentSessionManager {
     private let store: SessionStore
     private var runners: [UUID: AgentSessionRunner] = [:]
+    /// Fired on the main queue when a turn finishes idle (`.finished`, no queued follow-ups).
+    var onSessionCompleted: ((AgentSession) -> Void)?
 
     init(store: SessionStore) {
         self.store = store
@@ -713,7 +715,12 @@ final class AgentSessionManager {
     private func wireRunner(_ runner: AgentSessionRunner, sessionID: UUID) {
         runners[sessionID] = runner
         runner.onFinished = { [weak self] in
-            self?.drainQueue(sessionID: sessionID)
+            guard let self else { return }
+            self.drainQueue(sessionID: sessionID)
+            guard let session = self.store.session(id: sessionID),
+                  session.status == .finished,
+                  session.queuedFollowUps.isEmpty else { return }
+            self.onSessionCompleted?(session)
         }
     }
 

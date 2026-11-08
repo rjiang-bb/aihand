@@ -18,7 +18,7 @@ struct SessionChatView: View {
     @State private var keyMonitor: Any?
     @State private var prefsTick = 0
 
-    private var solidBG: Color { colorScheme == .dark ? .black : .white }
+    private var solidBG: Color { SoftChrome.cardFill(dark: colorScheme == .dark) }
     private var solidFG: Color { colorScheme == .dark ? .white : .black }
     private var isWorking: Bool { session.status == .working }
     private var workspace: String { session.workspace }
@@ -85,22 +85,10 @@ struct SessionChatView: View {
 
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [session] event in
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-
-            // ⌘/ → cycle favorite models for this session’s CLI.
-            if flags.contains(.command),
-               !flags.contains(.shift),
-               !flags.contains(.option),
-               !flags.contains(.control),
-               event.charactersIgnoringModifiers == "/" {
-                DispatchQueue.main.async {
-                    session.cycleFavorite()
-                }
-                return nil
-            }
-
             // Shift+Return → newline; plain Return still submits via onSubmit.
+            // ⌘/ model cycling lives on SessionsSidePanel + the app menu.
             let code = Int(event.keyCode)
             guard code == 36 || code == 76 else { return event }
             guard flags.contains(.shift),

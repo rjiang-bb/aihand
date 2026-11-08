@@ -82,7 +82,7 @@ final class InputTap {
             ready.signal()
             CFRunLoopRun()
         }
-        thread.name = "TinyHand event tap"
+        thread.name = "AiHand event tap"
         thread.qualityOfService = .userInteractive
         thread.start()
         ready.wait()

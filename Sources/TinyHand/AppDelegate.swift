@@ -2,8 +2,9 @@ import AppKit
 import ApplicationServices
 import Carbon.HIToolbox
 import Combine
+import UserNotifications
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private let overlay = OverlayController()
     private let settings = SettingsWindow()
@@ -28,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.mainMenu = editingMenu()
+        Preferences.applyTheme()
         Preferences.ensureScreenshotsFolder()
         HandAsset.preloadThumbnails(PointerStyle.allCases.compactMap(\.assetName))
         Log.write("launch \(Bundle.main.bundlePath) trusted=\(AXIsProcessTrusted())")
@@ -55,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupStatusItem()
         setupSettings()
         registerHotKeys()
+        setupSessionNotifications()
         sessionIconBag = sessionStore.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -90,6 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         sessionsPanel.onManageWorkspaces = { [weak self] in
             self?.settings.show(.agent)
+        }
+        sessionManager.onSessionCompleted = { session in
+            SessionNotifier.notifyCompleted(session: session)
         }
 
         annotatePanel.onOpenChanged = { [weak self] open in
@@ -425,6 +431,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sessionsPanel.toggle()
     }
 
+    private func setupSessionNotifications() {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+        SessionNotifier.requestAuthorization()
+    }
+
+    /// Bring the sessions panel forward with this chat (e.g. from a notification click).
+    private func revealSession(_ id: UUID) {
+        guard let session = sessionStore.session(id: id) else { return }
+        let path = session.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !path.isEmpty, !SessionStore.sameWorkspace(path, Preferences.agentWorkspace) {
+            Preferences.agentWorkspace = path
+        }
+        sessionsPanel.openChat(for: id)
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound, .list])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if let id = SessionNotifier.sessionID(from: response) {
+            DispatchQueue.main.async { [weak self] in
+                self?.revealSession(id)
+            }
+        }
+        completionHandler()
+    }
+
     @objc private func openSettings() {
         pendingStrokes = []
         annotatePanel.hide()
@@ -535,7 +578,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        // ⌘W archives the selected AI session when that panel is key (see SessionsSidePanel).
+        appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
+        let archiveSession = appMenu.addItem(
+            withTitle: "Archive Session",
+            action: #selector(archiveSelectedSession),
+            keyEquivalent: "w"
+        )
+        archiveSession.keyEquivalentModifierMask = [.command]
+        appMenu.addItem(.separator())
+        // ⌘, must live on the main menu — status-item key equivalents only fire while that menu is open.
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(openSettings),
+            keyEquivalent: ","
+        )
+        settingsItem.keyEquivalentModifierMask = [.command]
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit AiHand", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
         main.addItem(appItem)
@@ -549,8 +608,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        // Menu key equivalent is the reliable path for ⌘/ (local monitors miss it with ⌘ held).
+        let cycle = edit.addItem(
+            withTitle: "Cycle Agent Model",
+            action: #selector(cycleAgentModel),
+            keyEquivalent: "/"
+        )
+        cycle.keyEquivalentModifierMask = [.command]
         editItem.submenu = edit
         main.addItem(editItem)
         return main
+    }
+
+    @objc private func cycleAgentModel() {
+        if annotatePanel.isVisible {
+            annotatePanel.cycleFavorite()
+            return
+        }
+        guard sessionsPanel.isVisible,
+              let id = sessionsPanel.selectedSessionID,
+              let session = sessionStore.session(id: id) else { return }
+        session.cycleFavorite()
+    }
+
+    @objc private func archiveSelectedSession() {
+        sessionsPanel.archiveSelectedSession()
     }
 }

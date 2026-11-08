@@ -1,9 +1,8 @@
 #!/bin/bash
 
-APP_NAME="TinyHand"
-# Finder / menu display name. Binary and .app folder stay APP_NAME.
+APP_NAME="AiHand"
 DISPLAY_NAME="AiHand"
-BUNDLE_ID="com.kamranahmed.tinyhand"
+BUNDLE_ID="net.penguinlabs.aihand"
 REPO="nilbuild/tinyhand"
 FEED_URL="https://github.com/$REPO/releases/latest/download/appcast.xml"
 SPARKLE_PUBLIC_KEY="FWubybHeS/qieOQ9ITnuaIcIpFXz/TPEWPLA7P2C5Yw="
@@ -12,11 +11,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${TINYHAND_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}"
 
 quit_running_app() {
-    if pgrep -x "$APP_NAME" >/dev/null; then
+    local running=0
+    pgrep -x "$APP_NAME" >/dev/null && running=1
+    # Legacy binary name from before the AiHand rename.
+    pgrep -x TinyHand >/dev/null && running=1
+    if [[ "$running" -eq 1 ]]; then
         echo "Quitting the running $APP_NAME first..."
         osascript -e "quit app id \"$BUNDLE_ID\"" >/dev/null 2>&1 || true
+        osascript -e 'quit app id "com.kamranahmed.tinyhand"' >/dev/null 2>&1 || true
         sleep 1
         pkill -x "$APP_NAME" || true
+        pkill -x TinyHand || true
         sleep 0.5
     fi
 }
@@ -76,7 +81,7 @@ make_bundle() {
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>NSHumanReadableCopyright</key>
-    <string>© $(date +%Y) Kamran Ahmed. MIT License.</string>
+    <string>© $(date +%Y) Penguin Labs. MIT License.</string>
 $update_keys
 </dict>
 </plist>
@@ -142,6 +147,8 @@ debug_codesign_identity() {
 }
 
 debug_install_app() {
+    # Drop the pre-rename bundle so notifications / TCC don't keep showing TinyHand.
+    rm -rf "$HOME/Applications/TinyHand.app"
     echo "$HOME/Applications/$APP_NAME.app"
 }
 

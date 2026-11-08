@@ -192,8 +192,8 @@ final class AgentSession: ObservableObject, Identifiable {
 }
 
 final class SessionStore: ObservableObject {
-    /// Hard cap for the sessions list (also matches ⌘1…⌘9 shortcuts).
-    static let maxSessions = 9
+    /// Soft cap per workspace (UI paginates at 10; ⌘1…⌘9 still target the current page).
+    static let maxSessions = 100
 
     /// Called after older sessions are dropped past `maxSessions`.
     var onDiscard: (([AgentSession]) -> Void)?
@@ -232,7 +232,7 @@ final class SessionStore: ObservableObject {
     private var bags: [UUID: AnyCancellable] = [:]
     private var prefsObserver: Any?
     private var saveWork: DispatchWorkItem?
-    private let saveQueue = DispatchQueue(label: "com.kamranahmed.tinyhand.sessions", qos: .utility)
+    private let saveQueue = DispatchQueue(label: "net.penguinlabs.aihand.sessions", qos: .utility)
 
     /// Sessions for the current working directory (panel list / ⌘1…9).
     var sessions: [AgentSession] {
@@ -409,11 +409,7 @@ final class SessionStore: ObservableObject {
     }
 
     private static var fileURL: URL {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let dir = root.appendingPathComponent("TinyHand", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("sessions.json")
+        AppSupport.directory().appendingPathComponent("sessions.json")
     }
 
     private func load() {

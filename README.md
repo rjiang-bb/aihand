@@ -15,7 +15,7 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 <img src="./.github/readme-hero.jpg" alt="AiHand: a tiny (AI) hand for your Mac" />
 
 <p align="center">
-  <a href="https://github.com/nilbuild/tinyhand/releases/latest/download/TinyHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
+  <a href="https://github.com/nilbuild/tinyhand/releases/latest/download/AiHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
   <a href="https://tinyhand.app"><img src="https://img.shields.io/badge/Visit_website-ffffff?style=for-the-badge&logo=safari&logoColor=black" alt="Visit website" /></a>
 </p>
 
@@ -32,7 +32,7 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 
 <p align="center"><strong>AI sessions</strong></p>
 
-<img src="./.github/readme-sessions.jpg" alt="AI sessions panel with chat open" />
+<img src="./.github/readme-sessions-v3.jpg" alt="AI sessions list with working folder picker and chat open" />
 
 <img src="./.github/readme-hands.png" alt="A selection of AiHand pointers" />
 
@@ -40,9 +40,9 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 
 | | |
 |---|---|
-| **⌃⌥H** | Pointer on / off |
+| **⌘⇧H** | Pointer on / off |
 | Click / drag | Tap / draw |
-| **⌃⌥X** | Clear drawing |
+| **⌘⇧X** | Clear drawing |
 | **⌘⇧G** | AI sessions panel |
 | **Esc** | Clear and turn off |
 
