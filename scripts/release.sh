@@ -158,18 +158,17 @@ publish_github_release() {
         exit 1
     fi
     local tag="v$VERSION"
+    local assets=("$OUT/$APP_NAME.dmg" "$OUT/appcast.xml")
     local args=(
         release create "$tag"
-        "$DMG" "$DMG.sha256" "$OUT/$APP_NAME.dmg" "$OUT/appcast.xml"
+        "${assets[@]}"
         --repo "$REPO"
         --title "$VERSION"
         --notes "$NOTES"
     )
     if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
         echo "==> Release $tag already exists; uploading assets"
-        gh release upload "$tag" \
-            "$DMG" "$DMG.sha256" "$OUT/$APP_NAME.dmg" "$OUT/appcast.xml" \
-            --repo "$REPO" --clobber
+        gh release upload "$tag" "${assets[@]}" --repo "$REPO" --clobber
         gh release edit "$tag" --repo "$REPO" --title "$VERSION" --notes "$NOTES"
     else
         echo "==> Creating GitHub release $tag"
@@ -251,14 +250,13 @@ cat > "$OUT/appcast.xml" <<XML
       <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
       <description><![CDATA[$NOTES_HTML]]></description>
-      <enclosure url="https://github.com/$REPO/releases/download/v$VERSION/$APP_NAME-$VERSION.dmg"
+      <enclosure url="https://github.com/$REPO/releases/download/v$VERSION/$APP_NAME.dmg"
                  type="application/octet-stream" $ENCLOSURE />
     </item>
   </channel>
 </rss>
 XML
 
-(cd "$OUT" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
 cp "$DMG" "$OUT/$APP_NAME.dmg"
 
 if [[ "$SKIP_PUBLISH" == false ]]; then
@@ -268,6 +266,5 @@ else
 fi
 
 echo
-echo "Done: $DMG  (VERSION $VERSION)"
-cat "$DMG.sha256"
+echo "Done: $OUT/$APP_NAME.dmg  (VERSION $VERSION)"
 echo "Commit and push the VERSION bump when you are ready."
