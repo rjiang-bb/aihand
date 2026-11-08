@@ -10,7 +10,8 @@ struct StrokeResult {
 
 final class Ink {
     let layer = CALayer()
-    var keep: Bool { Preferences.fadeSeconds <= 0 }
+    /// Strokes always fade; clear early with the clear-drawing shortcut.
+    var keep: Bool { false }
 
     static let purple = CGColor(srgbRed: 0.53, green: 0.33, blue: 0.95, alpha: 1)
     static let red = CGColor(srgbRed: 1.0, green: 0.16, blue: 0.12, alpha: 1)
@@ -21,7 +22,7 @@ final class Ink {
     }
     var color = Ink.purple
     var scale: CGFloat = 2
-    private var fadeDelay: CFTimeInterval { max(0.5, Preferences.fadeSeconds) }
+    private let fadeDelay: CFTimeInterval = 3
     private let fadeDuration: CFTimeInterval = 0.6
 
     private var stroke: CAShapeLayer?

@@ -1096,6 +1096,27 @@ private struct PointersPage: View {
                 }
             }
             YourHands(model: model)
+            Card(title: "Size") {
+                Row("Pointer size", detail: "How large the hand appears on screen.") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "hand.point.up.left.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                        Slider(
+                            value: model.binding(
+                                { Double(Preferences.pointerSize) },
+                                { Preferences.pointerSize = CGFloat($0) }
+                            ),
+                            in: Double(Preferences.pointerSizeRange.lowerBound)...Double(Preferences.pointerSizeRange.upperBound)
+                        )
+                        .frame(width: 180)
+                        .focusable(false)
+                        Image(systemName: "hand.point.up.left.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
         }
         .coordinateSpace(name: "pointersPage")
         .overlay(alignment: .topLeading) {
@@ -1431,16 +1452,6 @@ private struct AppearancePage: View {
 
     var body: some View {
         Card(title: "Pointer") {
-            Row("Size") {
-                HStack(spacing: 10) {
-                    Image(systemName: "hand.point.up.left.fill").font(.system(size: 10)).foregroundColor(.secondary)
-                    Slider(value: model.binding({ Double(Preferences.pointerSize) }, { Preferences.pointerSize = CGFloat($0) }),
-                           in: Double(Preferences.pointerSizeRange.lowerBound)...Double(Preferences.pointerSizeRange.upperBound))
-                        .frame(width: 180)
-                        .focusable(false)
-                    Image(systemName: "hand.point.up.left.fill").font(.system(size: 16)).foregroundColor(.secondary)
-                }
-            }
             Row("Shadow under the pointer") {
                 Toggle("", isOn: model.binding({ Preferences.showShadow }, { Preferences.showShadow = $0 }))
                     .toggleStyle(.switch).labelsHidden().focusable(false)
@@ -1466,12 +1477,6 @@ private struct AppearancePage: View {
 
 private struct DrawingPage: View {
     @ObservedObject var model: SettingsModel
-    private static let choices: [(String, Double)] = [
-        ("After 3 seconds", 3),
-        ("After 6 seconds", 6),
-        ("After 10 seconds", 10),
-        ("Keep until cleared", 0),
-    ]
 
     var body: some View {
         Card(title: "Ink") {
@@ -1484,17 +1489,6 @@ private struct DrawingPage: View {
                         }
                     }
                 }
-            }
-            Row("Lines fade", detail: "Clear them any time with \(Preferences.clearShortcut.display).") {
-                Picker("", selection: model.binding({ Preferences.fadeSeconds }, { Preferences.fadeSeconds = $0 })) {
-                    ForEach(DrawingPage.choices, id: \.1) { choice in
-                        Text(choice.0).tag(choice.1)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .fixedSize()
-                .focusable(false)
             }
             Row("Ink button in the toolbar", detail: "Change the colour while you present.") {
                 Toggle("", isOn: model.binding({ Preferences.showInkButton }, { Preferences.showInkButton = $0 }))

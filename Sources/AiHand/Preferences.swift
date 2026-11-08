@@ -181,11 +181,18 @@ enum Preferences {
         set { saveShortcut(newValue, "shortcut.sessions") }
     }
 
-    static let pointerSizeRange: ClosedRange<CGFloat> = 0.08...0.20
+    /// Hand length as a fraction of screen height. Max 0.20 (= 20%); min ≈ 36pt on a typical display.
+    static let pointerSizeRange: ClosedRange<CGFloat> = 0.04...0.20
 
     static var pointerSize: CGFloat {
-        get { (defaults.object(forKey: "pointerSize") as? Double).map { CGFloat($0) } ?? 0.13 }
-        set { set(Double(newValue), "pointerSize") }
+        get {
+            let raw = (defaults.object(forKey: "pointerSize") as? Double).map { CGFloat($0) } ?? 0.13
+            return min(max(raw, pointerSizeRange.lowerBound), pointerSizeRange.upperBound)
+        }
+        set {
+            let clamped = min(max(newValue, pointerSizeRange.lowerBound), pointerSizeRange.upperBound)
+            set(Double(clamped), "pointerSize")
+        }
     }
 
     static var showShadow: Bool {
@@ -204,11 +211,6 @@ enum Preferences {
 
     static func applyTheme() {
         NSApp.appearance = theme.nsAppearance
-    }
-
-    static var fadeSeconds: Double {
-        get { defaults.object(forKey: "fadeSeconds") as? Double ?? 3 }
-        set { set(newValue, "fadeSeconds") }
     }
 
     static var handSound: Bool {

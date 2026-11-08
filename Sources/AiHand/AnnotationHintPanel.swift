@@ -50,6 +50,7 @@ final class AnnotationHintPanel {
         let muted = fg.withAlphaComponent(0.55)
         let parts: [(String, String)] = [
             ("⌘Z", "undo"),
+            (Preferences.clearShortcut.display, "clear drawing"),
             ("Enter", "comment"),
             ("⌘↩", "send to agent"),
             ("Esc", "exit"),
