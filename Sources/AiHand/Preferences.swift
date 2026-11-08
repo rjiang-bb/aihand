@@ -692,6 +692,27 @@ enum Preferences {
         }
     }
 
+    /// Origin of the expanded list+chat panel (AppKit coords). Used when reopening
+    /// after drawing mode hides the panel so chat doesn’t jump to a clamped corner.
+    static var sessionsPanelExpandedOrigin: CGPoint? {
+        get {
+            guard let x = defaults.object(forKey: "sessionsPanelExpandedOriginX") as? Double,
+                  let y = defaults.object(forKey: "sessionsPanelExpandedOriginY") as? Double else {
+                return nil
+            }
+            return CGPoint(x: x, y: y)
+        }
+        set {
+            if let newValue {
+                defaults.set(Double(newValue.x), forKey: "sessionsPanelExpandedOriginX")
+                defaults.set(Double(newValue.y), forKey: "sessionsPanelExpandedOriginY")
+            } else {
+                defaults.removeObject(forKey: "sessionsPanelExpandedOriginX")
+                defaults.removeObject(forKey: "sessionsPanelExpandedOriginY")
+            }
+        }
+    }
+
     @discardableResult
     static func ensureScreenshotsFolder() -> String {
         let path = screenshotsFolder
@@ -737,7 +758,8 @@ enum Preferences {
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
                     "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
-                    "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY"] {
+                    "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY",
+                    "sessionsPanelExpandedOriginX", "sessionsPanelExpandedOriginY"] {
             defaults.removeObject(forKey: key)
         }
         applyTheme()

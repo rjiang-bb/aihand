@@ -1,11 +1,14 @@
 import AppKit
 
 final class InputTap {
-    var onMouseDown: (() -> Void)?
+    var onLeftMouseDown: (() -> Void)?
+    var onLeftMouseUp: (() -> Void)?
+    var onRightMouseDown: (() -> Void)?
+    var onRightMouseUp: (() -> Void)?
     var onInteractDown: (() -> Void)?
     var onInteractUp: (() -> Void)?
-    var onMouseUp: (() -> Void)?
     var onLeftDragged: (() -> Void)?
+    var onRightDragged: (() -> Void)?
     var onPassThroughPress: ((CGPoint) -> Void)?
 
     private let lock = NSLock()
@@ -176,16 +179,26 @@ final class InputTap {
         }
 
         switch type {
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            DispatchQueue.main.async { [weak self] in self?.onMouseDown?() }
+        case .leftMouseDown, .otherMouseDown:
+            DispatchQueue.main.async { [weak self] in self?.onLeftMouseDown?() }
             return nil
-        case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-            DispatchQueue.main.async { [weak self] in self?.onMouseUp?() }
+        case .rightMouseDown:
+            DispatchQueue.main.async { [weak self] in self?.onRightMouseDown?() }
             return nil
-        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            if type == .leftMouseDragged {
-                DispatchQueue.main.async { [weak self] in self?.onLeftDragged?() }
-            }
+        case .leftMouseUp, .otherMouseUp:
+            DispatchQueue.main.async { [weak self] in self?.onLeftMouseUp?() }
+            return nil
+        case .rightMouseUp:
+            DispatchQueue.main.async { [weak self] in self?.onRightMouseUp?() }
+            return nil
+        case .leftMouseDragged, .otherMouseDragged:
+            DispatchQueue.main.async { [weak self] in self?.onLeftDragged?() }
+            // Rewrite to mouseMoved so the cursor keeps tracking while we consume the click.
+            event.type = .mouseMoved
+            return Unmanaged.passUnretained(event)
+        case .rightMouseDragged:
+            DispatchQueue.main.async { [weak self] in self?.onRightDragged?() }
+            // Same as left: swallowing the drag freezes cursor position (and the hand).
             event.type = .mouseMoved
             return Unmanaged.passUnretained(event)
         default:

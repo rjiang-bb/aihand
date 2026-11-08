@@ -104,11 +104,20 @@ struct ChatTranscriptView: NSViewRepresentable {
                 ]
                 if let path = msg.imagePath {
                     dict["imageKey"] = path
-                    if imageDataURLs[path] == nil,
-                       let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
-                        let mime = path.lowercased().hasSuffix(".jpg") || path.lowercased().hasSuffix(".jpeg")
-                            ? "image/jpeg" : "image/png"
-                        imageDataURLs[path] = "data:\(mime);base64,\(data.base64EncodedString())"
+                    let video = Self.isVideoPath(path)
+                    if video {
+                        dict["mediaKind"] = "video"
+                    }
+                    if imageDataURLs[path] == nil {
+                        if video {
+                            if let poster = Self.videoPosterDataURL(path: path) {
+                                imageDataURLs[path] = poster
+                            }
+                        } else if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                            let mime = path.lowercased().hasSuffix(".jpg") || path.lowercased().hasSuffix(".jpeg")
+                                ? "image/jpeg" : "image/png"
+                            imageDataURLs[path] = "data:\(mime);base64,\(data.base64EncodedString())"
+                        }
                     }
                     if let url = imageDataURLs[path], !imagesSentToPage.contains(path) {
                         imagesSentToPage.insert(path)
@@ -142,6 +151,23 @@ struct ChatTranscriptView: NSViewRepresentable {
             case .tool: return "tool"
             case .system: return "system"
             }
+        }
+
+        private static func isVideoPath(_ path: String) -> Bool {
+            switch (path as NSString).pathExtension.lowercased() {
+            case "mov", "mp4", "m4v", "webm": return true
+            default: return false
+            }
+        }
+
+        private static func videoPosterDataURL(path: String) -> String? {
+            guard let image = RegionRecorder.posterImage(for: URL(fileURLWithPath: path)),
+                  let tiff = image.tiffRepresentation,
+                  let rep = NSBitmapImageRep(data: tiff),
+                  let png = rep.representation(using: .png, properties: [:]) else {
+                return nil
+            }
+            return "data:image/png;base64,\(png.base64EncodedString())"
         }
     }
 
@@ -288,6 +314,39 @@ struct ChatTranscriptView: NSViewRepresentable {
         margin-bottom: 8px;
         object-fit: contain;
         cursor: zoom-in;
+      }
+      .msg .video-shot {
+        position: relative;
+        display: inline-block;
+        max-width: min(280px, 100%);
+        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      .msg .video-shot img.shot {
+        margin-bottom: 0;
+        cursor: pointer;
+      }
+      .msg .video-shot .play {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: 36px;
+        height: 36px;
+        border-radius: 18px;
+        background: rgba(0,0,0,0.55);
+        border: 1.5px solid rgba(255,255,255,0.85);
+        box-sizing: border-box;
+        pointer-events: none;
+      }
+      .msg .video-shot .play::after {
+        content: '';
+        position: absolute;
+        left: 13px;
+        top: 10px;
+        border-style: solid;
+        border-width: 8px 0 8px 12px;
+        border-color: transparent transparent transparent #fff;
       }
       .md > *:first-child { margin-top: 0; }
       .md > *:last-child { margin-bottom: 0; }
@@ -562,7 +621,17 @@ struct ChatTranscriptView: NSViewRepresentable {
         const image = m.image || (m.imageKey ? window.__images[m.imageKey] : null);
         if (image) {
           const keyAttr = m.imageKey ? ' data-key="' + esc(m.imageKey) + '"' : '';
-          body += '<img class="shot" src="' + image + '"' + keyAttr + ' alt="Screenshot" title="Click to open · Right-click to copy">';
+          if (m.mediaKind === 'video') {
+            body += '<div class="video-shot"' + keyAttr + ' title="Click to play">'
+              + '<img class="shot" src="' + image + '" alt="Screen recording">'
+              + '<span class="play"></span></div>';
+          } else {
+            body += '<img class="shot" src="' + image + '"' + keyAttr + ' alt="Screenshot" title="Click to open · Right-click to copy">';
+          }
+        } else if (m.imageKey && m.mediaKind === 'video') {
+          body += '<div class="video-shot" data-key="' + esc(m.imageKey) + '" title="Click to play">'
+            + '<div class="shot" style="width:160px;height:90px;background:rgba(0,0,0,0.35);border-radius:8px;"></div>'
+            + '<span class="play"></span></div>';
         }
         if (kind === 'assistant' || kind === 'user') {
           body += '<div class="md">' + markdownToHTML(m.text || '') + '</div>';
@@ -585,19 +654,19 @@ struct ChatTranscriptView: NSViewRepresentable {
           if (id) window.__expandedGroups[id] = next;
         });
       });
-      root.querySelectorAll('img.shot[data-key]').forEach(function(img) {
-        img.addEventListener('click', function(e) {
+      function bindMediaOpen(el) {
+        el.addEventListener('click', function(e) {
           e.preventDefault();
           e.stopPropagation();
-          var key = img.getAttribute('data-key');
+          var key = el.getAttribute('data-key');
           if (key && window.webkit && window.webkit.messageHandlers.openImage) {
             window.webkit.messageHandlers.openImage.postMessage({ key: key });
           }
         });
-        img.addEventListener('contextmenu', function(e) {
+        el.addEventListener('contextmenu', function(e) {
           e.preventDefault();
           e.stopPropagation();
-          var key = img.getAttribute('data-key');
+          var key = el.getAttribute('data-key');
           if (key && window.webkit && window.webkit.messageHandlers.imageMenu) {
             window.webkit.messageHandlers.imageMenu.postMessage({
               key: key,
@@ -606,7 +675,9 @@ struct ChatTranscriptView: NSViewRepresentable {
             });
           }
         });
-      });
+      }
+      root.querySelectorAll('img.shot[data-key]').forEach(bindMediaOpen);
+      root.querySelectorAll('.video-shot[data-key]').forEach(bindMediaOpen);
       if (forceScroll || nearBottom) {
         const goBottom = function() { window.scrollTo(0, document.body.scrollHeight); };
         goBottom();

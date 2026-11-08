@@ -15,8 +15,17 @@ enum ChatImageActions {
     }
 
     static func open(path: String) {
+        let ext = (path as NSString).pathExtension.lowercased()
+        if ["mov", "mp4", "m4v", "webm"].contains(ext) {
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
         guard let image = NSImage(contentsOfFile: path),
-              image.size.width > 0, image.size.height > 0 else { return }
+              image.size.width > 0, image.size.height > 0 else {
+            // Fallback: open with the default app (Preview, etc.).
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
+            return
+        }
 
         let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
             ?? NSRect(x: 40, y: 40, width: 900, height: 700)
@@ -92,22 +101,34 @@ enum ChatImageActions {
     }
 
     static func copy(path: String) {
-        guard let image = NSImage(contentsOfFile: path) else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.writeObjects([image])
+        if let image = NSImage(contentsOfFile: path), image.size.width > 0 {
+            pb.writeObjects([image])
+            return
+        }
+        pb.writeObjects([URL(fileURLWithPath: path) as NSURL])
     }
 
-    /// Pop up Open / Copy Image at a point in `view`’s coordinates.
+    /// Pop up Open / Copy at a point in `view`’s coordinates.
     static func showMenu(path: String, at pointInView: NSPoint, in view: NSView) {
         let target = MenuTarget(path: path)
         menuTarget = target
 
-        let menu = NSMenu(title: "Image")
-        let openItem = NSMenuItem(title: "Open", action: #selector(MenuTarget.open), keyEquivalent: "")
+        let isVideo = ["mov", "mp4", "m4v", "webm"].contains((path as NSString).pathExtension.lowercased())
+        let menu = NSMenu(title: isVideo ? "Video" : "Image")
+        let openItem = NSMenuItem(
+            title: isVideo ? "Play" : "Open",
+            action: #selector(MenuTarget.open),
+            keyEquivalent: ""
+        )
         openItem.target = target
         menu.addItem(openItem)
-        let copyItem = NSMenuItem(title: "Copy Image", action: #selector(MenuTarget.copyImage), keyEquivalent: "")
+        let copyItem = NSMenuItem(
+            title: isVideo ? "Copy File" : "Copy Image",
+            action: #selector(MenuTarget.copyImage),
+            keyEquivalent: ""
+        )
         copyItem.target = target
         menu.addItem(copyItem)
         menu.popUp(positioning: nil, at: pointInView, in: view)
