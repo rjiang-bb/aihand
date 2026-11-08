@@ -260,8 +260,30 @@ enum WindowCapture {
 
         for stroke in strokes {
             guard !stroke.points.isEmpty else { continue }
-            let mapped = stroke.points.map(toBitmap)
             let scale = (scaleX + scaleY) / 2
+
+            if stroke.tool == .text, let text = stroke.text, !text.isEmpty {
+                let topLeft = toBitmap(stroke.points[0])
+                let fontSize = max(10, stroke.width * scale)
+                let image = InkTextStyle.renderImage(
+                    text: text,
+                    background: stroke.color,
+                    fontSize: fontSize,
+                    maxTextWidth: 520 * scale
+                )
+                let box = CGRect(
+                    x: topLeft.x,
+                    y: topLeft.y - image.size.height,
+                    width: image.size.width,
+                    height: image.size.height
+                )
+                if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                    ctx.draw(cg, in: box)
+                }
+                continue
+            }
+
+            let mapped = stroke.points.map(toBitmap)
             let width = max(2, stroke.width * scale)
             let path = StrokePath.make(tool: stroke.tool, points: mapped, lineWidth: width)
 

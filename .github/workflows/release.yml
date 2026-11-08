@@ -43,9 +43,25 @@ jobs:
         run: |
           echo "AIHAND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          git fetch --tags --force origin
           NOTES="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
+          # Empty tag message → changelog since the previous release (same idea as release.sh).
           if [ -z "$NOTES" ]; then
-            NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
+            PREV="$(git tag -l 'v*' --sort=-version:refname | grep -vxF "$GITHUB_REF_NAME" | head -1 || true)"
+            if [ -z "$PREV" ]; then
+              PREV="$(gh release list --limit 20 --json tagName \
+                --jq "[.[].tagName | select(. != \"$GITHUB_REF_NAME\")][0] // empty" || true)"
+            fi
+            if NOTES="$(gh api "repos/${{ github.repository }}/releases/generate-notes" \
+                -f "tag_name=$GITHUB_REF_NAME" \
+                ${PREV:+-f "previous_tag_name=$PREV"} \
+                --jq .body 2>/dev/null)" && [ -n "$NOTES" ]; then
+              :
+            elif [ -n "$PREV" ]; then
+              NOTES="$(git log "${PREV}..$GITHUB_REF_NAME" --pretty=format:'- %s' --no-merges)"
+            else
+              NOTES="$(git log "$GITHUB_REF_NAME" --pretty=format:'- %s' --no-merges | head -40)"
+            fi
           fi
           {
             echo 'RELEASE_NOTES<<RELEASE_NOTES_EOF'

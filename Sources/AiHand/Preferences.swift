@@ -163,13 +163,14 @@ enum InkChoice: String, CaseIterable {
 }
 
 enum DrawTool: String, CaseIterable {
-    case freehand, rectangle, arrow
+    case freehand, rectangle, arrow, text
 
     var title: String {
         switch self {
         case .freehand: return "Freehand"
         case .rectangle: return "Rectangle"
         case .arrow: return "Arrow"
+        case .text: return "Text"
         }
     }
 
@@ -178,6 +179,7 @@ enum DrawTool: String, CaseIterable {
         case .freehand: return "F"
         case .rectangle: return "R"
         case .arrow: return "A"
+        case .text: return "T"
         }
     }
 
@@ -186,6 +188,7 @@ enum DrawTool: String, CaseIterable {
         case .freehand: return "scribble"
         case .rectangle: return "rectangle"
         case .arrow: return "arrow.up.right"
+        case .text: return "textformat"
         }
     }
 }
