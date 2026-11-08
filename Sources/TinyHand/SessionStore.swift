@@ -243,14 +243,14 @@ final class SessionStore: ObservableObject {
         allSessions.first { $0.id == selectedSessionID }
     }
 
-    /// Still running or blocked on the user (any workspace — menu badge).
+    /// Still running or blocked on the user (current workspace — menu badge).
     var activeCount: Int {
-        allSessions.filter { $0.status == .working || $0.status == .waiting }.count
+        sessions.filter { $0.status == .working || $0.status == .waiting }.count
     }
 
-    /// Successfully finished sessions (any workspace — menu badge).
+    /// Successfully finished sessions (current workspace — menu badge).
     var completedCount: Int {
-        allSessions.filter { $0.status == .finished }.count
+        sessions.filter { $0.status == .finished }.count
     }
 
     init() {

@@ -60,6 +60,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard isVisible, let id = selection.selectedID else { return }
         archive(id)
     }
+
+    /// Return key focus to the sessions panel (e.g. after closing a chat image preview).
+    func focus() {
+        guard isVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
 
     /// Collapse the open chat so a New prompt can take focus cleanly.
@@ -685,11 +693,16 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌘W → archive the selected session (including blank "New session") and open the next.
-        if Int(event.keyCode) == kVK_ANSI_W, panel.isKeyWindow,
-           let id = selection.selectedID {
-            archive(id)
-            return nil
+        // ⌘W → close a focused image preview, else archive the selected session.
+        if Int(event.keyCode) == kVK_ANSI_W, panel.isKeyWindow || ChatImageActions.isPreviewKey {
+            if ChatImageActions.closeKeyPreviewIfNeeded() {
+                focus()
+                return nil
+            }
+            if panel.isKeyWindow, let id = selection.selectedID {
+                archive(id)
+                return nil
+            }
         }
 
         // ⌘↑ / ⌘↓ → previous / next session while a chat is open.
