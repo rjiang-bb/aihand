@@ -1,8 +1,12 @@
 .DS_Store
 .build/
 .swiftpm/
-dist/
+# Ignore build output, but keep checked-in signed release artifacts.
+dist/*
+!dist/release/
+!dist/release/**
 *.dmg
+!dist/release/*.dmg
 *.zip
 assets/unused/
 .debug-codesign-identity

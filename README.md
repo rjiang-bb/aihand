@@ -15,8 +15,7 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 <img src="./.github/readme-hero.jpg" alt="AiHand: a tiny (AI) hand for your Mac" />
 
 <p align="center">
-  <a href="https://github.com/nilbuild/tinyhand/releases/latest/download/AiHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
-  <a href="https://tinyhand.app"><img src="https://img.shields.io/badge/Visit_website-ffffff?style=for-the-badge&logo=safari&logoColor=black" alt="Visit website" /></a>
+  <a href="https://github.com/rjiang-bb/aihand/releases/latest/download/AiHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
 </p>
 
 ## What it does

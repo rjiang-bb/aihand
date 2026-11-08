@@ -3,7 +3,7 @@
 APP_NAME="AiHand"
 DISPLAY_NAME="AiHand"
 BUNDLE_ID="net.penguinlabs.aihand"
-REPO="nilbuild/tinyhand"
+REPO="rjiang-bb/aihand"
 FEED_URL="https://github.com/$REPO/releases/latest/download/appcast.xml"
 SPARKLE_PUBLIC_KEY="FWubybHeS/qieOQ9ITnuaIcIpFXz/TPEWPLA7P2C5Yw="
 SPARKLE_VERSION="2.10.0"
