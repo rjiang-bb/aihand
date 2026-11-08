@@ -27,6 +27,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
     private var cancellables = Set<AnyCancellable>()
     private var lastLaidOutListHeight: CGFloat = 0
+    private var hintHideWork: DispatchWorkItem?
 
     private let listWidth: CGFloat = 360
     /// Grows with session count up to 10 rows + pagination (+ ⌘ hints when shown).
@@ -37,9 +38,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         )
     }
     /// Floor at the default expanded size — users can only grow the chat from here.
+    /// Never shorter than the current list (top-aligned) so rows aren’t clipped.
     private var minExpandedWidth: CGFloat { Preferences.sessionsPanelDefaultWidth }
     private var minExpandedHeight: CGFloat {
-        max(Preferences.sessionsPanelDefaultHeight, SessionsListMetrics.maxPanelHeight)
+        max(Preferences.sessionsPanelDefaultHeight, listHeight)
     }
     private let maxShortcutSlots = 9
 
@@ -59,6 +61,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard isVisible, let id = selection.selectedID else { return }
         archive(id)
     }
+
+    /// Return key focus to the sessions panel (e.g. after closing a chat image preview).
+    func focus() {
+        guard isVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
 
     /// Collapse the open chat so a New prompt can take focus cleanly.
@@ -223,12 +233,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     /// Grow / shrink the list-only panel as sessions are added or archived.
-    private func relayoutForSessionCountIfNeeded() {
+    private func relayoutForSessionCountIfNeeded(animateFrame: Bool = true) {
         let height = listHeight
         guard abs(height - lastLaidOutListHeight) > 0.5 else { return }
         lastLaidOutListHeight = height
         guard isVisible, selection.selectedID == nil else { return }
-        layout()
+        layout(animateFrame: animateFrame)
     }
 
     func show(on screen: NSScreen? = nil) {
@@ -327,7 +337,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         store.remove(id)
     }
 
-    private func layout(on screen: NSScreen? = nil, listOriginOverride: CGPoint? = nil) {
+    private func layout(on screen: NSScreen? = nil, listOriginOverride: CGPoint? = nil, animateFrame: Bool = true) {
         let screen = screen ?? panel.screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         let visible = screen.visibleFrame
@@ -362,7 +372,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let sizeChanged = abs(panel.frame.width - frame.width) > 0.5
             || abs(panel.frame.height - frame.height) > 0.5
         applyingLayout = true
-        panel.setFrame(frame, display: true, animate: isVisible && sizeChanged)
+        // ⌘ hint toggles pass animateFrame: false so only SwiftUI’s slide runs —
+        // AppKit window animation + SwiftUI together was the list-only jank.
+        panel.setFrame(frame, display: true, animate: animateFrame && isVisible && sizeChanged)
         applyingLayout = false
     }
 
@@ -581,6 +593,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     private func removeShortcutMonitors() {
+        hintHideWork?.cancel()
+        hintHideWork = nil
         if let flagsMonitor {
             NSEvent.removeMonitor(flagsMonitor)
         }
@@ -601,12 +615,35 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             && !flags.contains(.control)
         let show = cmdAlone && !store.sessions.isEmpty
         guard selection.showShortcutBadges != show else { return }
-        selection.showShortcutBadges = show
-        // List-only: grow/shrink the panel downward (top edge stays put) so hints
-        // extend out of the bottom without shifting the session rows.
-        guard selection.selectedID == nil else { return }
-        lastLaidOutListHeight = -1
-        relayoutForSessionCountIfNeeded()
+        setShortcutHintsVisible(show)
+    }
+
+    /// Slide ⌘ hints in/out inside the list card. List-only grows the panel without
+    /// AppKit frame animation so SwiftUI’s slide isn’t fighting a window resize.
+    private func setShortcutHintsVisible(_ show: Bool) {
+        hintHideWork?.cancel()
+        hintHideWork = nil
+
+        if selection.selectedID != nil {
+            selection.showShortcutBadges = show
+            return
+        }
+
+        if show {
+            selection.showShortcutBadges = true
+            lastLaidOutListHeight = -1
+            relayoutForSessionCountIfNeeded(animateFrame: false)
+            return
+        }
+
+        selection.showShortcutBadges = false
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.selection.showShortcutBadges else { return }
+            self.lastLaidOutListHeight = -1
+            self.relayoutForSessionCountIfNeeded(animateFrame: false)
+        }
+        hintHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: work)
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
@@ -657,11 +694,16 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌘W → archive the selected session (including blank "New session") and open the next.
-        if Int(event.keyCode) == kVK_ANSI_W, panel.isKeyWindow,
-           let id = selection.selectedID {
-            archive(id)
-            return nil
+        // ⌘W → close a focused image preview, else archive the selected session.
+        if Int(event.keyCode) == kVK_ANSI_W, panel.isKeyWindow || ChatImageActions.isPreviewKey {
+            if ChatImageActions.closeKeyPreviewIfNeeded() {
+                focus()
+                return nil
+            }
+            if panel.isKeyWindow, let id = selection.selectedID {
+                archive(id)
+                return nil
+            }
         }
 
         // ⌘↑ / ⌘↓ → previous / next session while a chat is open.
@@ -770,8 +812,7 @@ private enum SessionsListMetrics {
             return picker + columnGap + emptyHint
         }
         let paginate = SessionsListPaging.needsPagination(sessionCount)
-        // Paginated lists already reserve a footer; ⌘ hints reuse that slot.
-        // Otherwise grow for the hints so they extend below the last session.
+        // Paginated lists already have a footer; ⌘ hints reuse that slot.
         let showFooter = paginate || showShortcutHints
         let rows = CGFloat(paginate ? SessionsListPaging.pageSize : sessionCount)
         let stack = rows * row + max(0, rows - 1) * rowGap
@@ -1001,8 +1042,6 @@ private struct SessionsSidePanelView: View {
 
     private var sessionsListContainer: some View {
         VStack(spacing: 0) {
-            // Only scroll once pagination kicks in; otherwise hug content so the
-            // white card doesn’t leave empty space under a short list.
             if needsPagination {
                 ScrollView {
                     sessionsListRows
@@ -1011,7 +1050,6 @@ private struct SessionsSidePanelView: View {
             } else {
                 sessionsListRows
             }
-            // Footer grows out of the bottom; panel resizes downward so rows stay put.
             if selection.showShortcutBadges {
                 sessionsShortcutHintsFooter
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1159,17 +1197,11 @@ private struct WorkspacePicker: View {
                         Button {
                             onSelect(path)
                         } label: {
-                            // Title + path: macOS menus render the second Text as a subtitle.
+                            // One primary string — Menu drops a second Text “subtitle” on macOS.
                             if SessionStore.sameWorkspace(path, current) {
-                                Label {
-                                    Text(menuTitle(for: path))
-                                    Text(path)
-                                } icon: {
-                                    Image(systemName: "checkmark")
-                                }
+                                Label(menuLabel(for: path), systemImage: "checkmark")
                             } else {
-                                Text(menuTitle(for: path))
-                                Text(path)
+                                Text(menuLabel(for: path))
                             }
                         }
                     }
@@ -1189,6 +1221,10 @@ private struct WorkspacePicker: View {
 
     private func menuTitle(for path: String) -> String {
         URL(fileURLWithPath: path).lastPathComponent
+    }
+
+    private func menuLabel(for path: String) -> String {
+        "\(menuTitle(for: path)) - \(path)"
     }
 }
 
@@ -1254,44 +1290,57 @@ private struct ChatCardResizeHandles: View {
     var onEnded: () -> Void
 
     private let edge: CGFloat = 8
-    private let corner: CGFloat = 16
+    private let corner: CGFloat = 18
 
     var body: some View {
-        ZStack {
-            handle(edges: .leading, cursor: .resizeLeftRight)
-                .frame(width: edge)
-                .frame(maxHeight: .infinity)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            handle(edges: .trailing, cursor: .resizeLeftRight)
-                .frame(width: edge)
-                .frame(maxHeight: .infinity)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-            handle(edges: .top, cursor: .resizeUpDown)
-                .frame(height: edge)
-                .frame(maxWidth: .infinity)
-                .frame(maxHeight: .infinity, alignment: .top)
-            handle(edges: .bottom, cursor: .resizeUpDown)
-                .frame(height: edge)
-                .frame(maxWidth: .infinity)
-                .frame(maxHeight: .infinity, alignment: .bottom)
-            handle(edges: [.leading, .bottom], cursor: .resizeLeftRight)
-                .frame(width: corner, height: corner)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-            handle(edges: [.trailing, .bottom], cursor: .resizeLeftRight)
-                .frame(width: corner, height: corner)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-            handle(edges: [.leading, .top], cursor: .resizeLeftRight)
-                .frame(width: corner, height: corner)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            handle(edges: [.trailing, .top], cursor: .resizeLeftRight)
-                .frame(width: corner, height: corner)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        }
-        .padding(1)
-        .allowsHitTesting(true)
+        // Overlay + alignment keeps hit targets to the strip/corner size only
+        // (expanding `.frame(max…)` around a child steals the whole card).
+        // Edges are inset by `corner` so diagonal corners own those pixels.
+        Color.clear
+            .overlay(alignment: .leading) {
+                edgeHandle(.leading, cursor: .resizeLeftRight)
+                    .frame(width: edge)
+                    .frame(maxHeight: .infinity)
+                    .padding(.vertical, corner)
+            }
+            .overlay(alignment: .trailing) {
+                edgeHandle(.trailing, cursor: .resizeLeftRight)
+                    .frame(width: edge)
+                    .frame(maxHeight: .infinity)
+                    .padding(.vertical, corner)
+            }
+            .overlay(alignment: .top) {
+                edgeHandle(.top, cursor: .resizeUpDown)
+                    .frame(height: edge)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, corner)
+            }
+            .overlay(alignment: .bottom) {
+                edgeHandle(.bottom, cursor: .resizeUpDown)
+                    .frame(height: edge)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, corner)
+            }
+            .overlay(alignment: .bottomLeading) {
+                cornerHandle([.leading, .bottom])
+            }
+            .overlay(alignment: .bottomTrailing) {
+                cornerHandle([.trailing, .bottom])
+            }
+            .overlay(alignment: .topLeading) {
+                cornerHandle([.leading, .top])
+            }
+            .overlay(alignment: .topTrailing) {
+                cornerHandle([.trailing, .top])
+            }
+            .padding(1)
+            .allowsHitTesting(true)
     }
 
-    private func handle(edges: SessionsSidePanel.ChatResizeEdges, cursor: NSCursor) -> some View {
+    private func edgeHandle(
+        _ edges: SessionsSidePanel.ChatResizeEdges,
+        cursor: NSCursor
+    ) -> some View {
         ChatResizeEdgeDrag(
             edges: edges,
             cursor: cursor,
@@ -1299,6 +1348,36 @@ private struct ChatCardResizeHandles: View {
             onChanged: onChanged,
             onEnded: onEnded
         )
+    }
+
+    private func cornerHandle(_ edges: SessionsSidePanel.ChatResizeEdges) -> some View {
+        ChatResizeEdgeDrag(
+            edges: edges,
+            cursor: Self.cornerCursor(for: edges),
+            onBegan: onBegan,
+            onChanged: onChanged,
+            onEnded: onEnded
+        )
+        .frame(width: corner, height: corner)
+        .contentShape(Rectangle())
+    }
+
+    private static func cornerCursor(for edges: SessionsSidePanel.ChatResizeEdges) -> NSCursor {
+        if #available(macOS 15.0, *) {
+            let position: NSCursor.FrameResizePosition
+            if edges.contains([.leading, .top]) {
+                position = .topLeft
+            } else if edges.contains([.trailing, .top]) {
+                position = .topRight
+            } else if edges.contains([.leading, .bottom]) {
+                position = .bottomLeft
+            } else {
+                position = .bottomRight
+            }
+            return .frameResize(position: position, directions: [.all])
+        }
+        // No public diagonal resize cursor before Sequoia.
+        return .crosshair
     }
 }
 

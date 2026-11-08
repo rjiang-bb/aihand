@@ -3,15 +3,72 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 cd "$ROOT"
 
-IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: Kamran Ahmed (6QG84AK9XP)}"
+IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: Penguin Labs, LLC (7CPM8AVL66)}"
 PROFILE="${NOTARY_PROFILE:-notarytool-profile}"
 SKIP_NOTARIZE=false
-[[ "${1:-}" == "--skip-notarize" ]] && SKIP_NOTARIZE=true
+SKIP_PUBLISH=false
+NO_BUMP=false
+for arg in "$@"; do
+    case "$arg" in
+        --skip-notarize) SKIP_NOTARIZE=true ;;
+        --skip-publish) SKIP_PUBLISH=true ;;
+        --no-bump) NO_BUMP=true ;;
+        -h|--help)
+            cat <<'USAGE'
+Usage: ./scripts/release.sh [--skip-notarize] [--skip-publish] [--no-bump]
+
+  Bumps VERSION (patch), builds a universal signed DMG, and uploads it to a
+  GitHub release (rjiang-bb/aihand). Dist artifacts are local-only — not git.
+
+  --skip-notarize  Skip Apple notarization (still codesigns).
+  --skip-publish   Build only; do not create/upload a GitHub release.
+  --no-bump        Keep the current VERSION file as-is.
+
+  Env:
+    AIHAND_VERSION   If set, use this version and skip bumping (CI/tags).
+    SKIP_PUBLISH=1   Same as --skip-publish.
+    RELEASE_NOTES    Release body / Sparkle notes (optional).
+USAGE
+            exit 0
+            ;;
+        *)
+            echo "error: unknown argument: $arg (try --help)" >&2
+            exit 1
+            ;;
+    esac
+done
+[[ "${SKIP_PUBLISH:-}" == "1" ]] && SKIP_PUBLISH=true
+
+bump_patch_version() {
+    local major minor patch
+    IFS=. read -r major minor patch < "$ROOT/VERSION"
+    if [[ -z "${major:-}" || -z "${minor:-}" || -z "${patch:-}" ]]; then
+        echo "error: VERSION must be major.minor.patch (got: $(tr -d '[:space:]' < "$ROOT/VERSION"))" >&2
+        exit 1
+    fi
+    patch=$((patch + 1))
+    printf '%s.%s.%s\n' "$major" "$minor" "$patch" > "$ROOT/VERSION"
+    VERSION="${major}.${minor}.${patch}"
+}
+
+if [[ -n "${AIHAND_VERSION:-}" ]]; then
+    VERSION="$AIHAND_VERSION"
+    printf '%s\n' "$VERSION" > "$ROOT/VERSION"
+    echo "==> Using AIHAND_VERSION=$VERSION"
+elif [[ "$NO_BUMP" == true ]]; then
+    VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+    echo "==> Keeping VERSION=$VERSION"
+else
+    bump_patch_version
+    echo "==> Bumped VERSION → $VERSION"
+fi
 
 OUT="dist/release"
 APP="$OUT/$APP_NAME.app"
 DMG="$OUT/$APP_NAME-$VERSION.dmg"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
+DEFAULT_NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
+NOTES="${RELEASE_NOTES:-$DEFAULT_NOTES}"
 
 notarize() {
     if [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]; then
@@ -24,11 +81,56 @@ notarize() {
     xcrun stapler validate "$2"
 }
 
+# SwiftPM ≥6 puts multi-arch products under .build/out; older toolchains used .build/apple.
+resolve_release_binary() {
+    local candidates=(
+        ".build/out/Products/Release/$APP_NAME"
+        ".build/apple/Products/Release/$APP_NAME"
+        ".build/release/$APP_NAME"
+    )
+    local path
+    for path in "${candidates[@]}"; do
+        if [[ -x "$path" ]]; then
+            echo "$path"
+            return 0
+        fi
+    done
+    echo "error: release binary not found (looked in ${candidates[*]})" >&2
+    return 1
+}
+
+publish_github_release() {
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "error: gh CLI required to publish (brew install gh && gh auth login)" >&2
+        exit 1
+    fi
+    local tag="v$VERSION"
+    local args=(
+        release create "$tag"
+        "$DMG" "$DMG.sha256" "$OUT/$APP_NAME.dmg" "$OUT/appcast.xml"
+        --repo "$REPO"
+        --title "$VERSION"
+        --notes "$NOTES"
+    )
+    if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+        echo "==> Release $tag already exists; uploading assets"
+        gh release upload "$tag" \
+            "$DMG" "$DMG.sha256" "$OUT/$APP_NAME.dmg" "$OUT/appcast.xml" \
+            --repo "$REPO" --clobber
+        gh release edit "$tag" --repo "$REPO" --title "$VERSION" --notes "$NOTES"
+    else
+        echo "==> Creating GitHub release $tag"
+        gh "${args[@]}"
+    fi
+    echo "Release: https://github.com/$REPO/releases/tag/$tag"
+}
+
 echo "==> Building $APP_NAME $VERSION (universal)"
 swift build -c release --arch arm64 --arch x86_64
 rm -rf "$OUT"
 mkdir -p "$OUT"
-make_bundle .build/apple/Products/Release/$APP_NAME "$APP" "$BUILD_NUMBER" --with-updates
+BINARY="$(resolve_release_binary)"
+make_bundle "$BINARY" "$APP" "$BUILD_NUMBER" --with-updates
 lipo -info "$APP/Contents/MacOS/$APP_NAME"
 
 echo "==> Signing with $IDENTITY"
@@ -44,7 +146,8 @@ fi
 echo "==> Building the DMG"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
-create-dmg \
+ln -sf /Applications "$STAGE/Applications"
+if ! create-dmg \
     --volname "$APP_NAME" \
     --volicon "assets/AppIcon.icns" \
     --window-pos 200 120 \
@@ -54,7 +157,11 @@ create-dmg \
     --hide-extension "$APP_NAME.app" \
     --app-drop-link 410 170 \
     --no-internet-enable \
-    "$DMG" "$STAGE" >/dev/null
+    "$DMG" "$STAGE" >/dev/null 2>&1; then
+    echo "create-dmg unavailable; falling back to hdiutil"
+    rm -f "$DMG"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
+fi
 rm -rf "$STAGE"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 
@@ -70,10 +177,15 @@ echo "==> Signing the update and writing appcast.xml"
 TOOLS="$(sparkle_tools)"
 if [[ -n "${SPARKLE_PRIVATE_KEY:-}" ]]; then
     ENCLOSURE="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$TOOLS/sign_update" --ed-key-file - "$DMG")"
+elif ENCLOSURE="$("$TOOLS/sign_update" --account aihand "$DMG" 2>/dev/null)"; then
+    :
+elif ENCLOSURE="$("$TOOLS/sign_update" "$DMG" 2>/dev/null)"; then
+    :
 else
-    ENCLOSURE="$("$TOOLS/sign_update" --account tinyhand "$DMG")"
+    echo "warning: Sparkle sign_update unavailable; writing appcast without signature fields"
+    ENCLOSURE="length=\"$(stat -f%z "$DMG")\""
 fi
-NOTES_HTML="$(printf '%s' "${RELEASE_NOTES:-AiHand $VERSION}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' | sed -e 's/$/<br>/')"
+NOTES_HTML="$(printf '%s' "$NOTES" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' | sed -e 's/$/<br>/')"
 cat > "$OUT/appcast.xml" <<XML
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
@@ -95,6 +207,14 @@ XML
 
 (cd "$OUT" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256")
 cp "$DMG" "$OUT/$APP_NAME.dmg"
+
+if [[ "$SKIP_PUBLISH" == false ]]; then
+    publish_github_release
+else
+    echo "==> Skipping GitHub publish"
+fi
+
 echo
-echo "Done: $DMG"
+echo "Done: $DMG  (VERSION $VERSION)"
 cat "$DMG.sha256"
+echo "Commit and push the VERSION bump when you are ready."

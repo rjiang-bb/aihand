@@ -500,27 +500,15 @@ enum Preferences {
         var folders = agentWorkspaces
         if !folders.contains(trimmed) {
             folders.append(trimmed)
-            defaults.set(folders, forKey: "agentWorkspaces")
+            agentWorkspaces = folders
         }
-        set(trimmed, "agentWorkspace")
+        selectAgentWorkspace(trimmed)
     }
 
     static func removeAgentWorkspace(_ path: String) {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        var folders = agentWorkspaces
-        folders.removeAll { $0 == trimmed }
-        defaults.set(folders, forKey: "agentWorkspaces")
-        let current = (defaults.string(forKey: "agentWorkspace") ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if current == trimmed {
-            if let next = folders.first {
-                defaults.set(next, forKey: "agentWorkspace")
-            } else {
-                defaults.removeObject(forKey: "agentWorkspace")
-            }
-        }
-        NotificationCenter.default.post(name: changed, object: nil)
+        agentWorkspaces = agentWorkspaces.filter { $0 != trimmed }
     }
 
     static func selectAgentWorkspace(_ path: String) {
@@ -544,8 +532,8 @@ enum Preferences {
     }
 
     /// Preferred size when a chat is open (total panel width + height). List-only mode is fixed.
-    static let sessionsPanelDefaultWidth: CGFloat = 800
-    static let sessionsPanelDefaultHeight: CGFloat = 900
+    static let sessionsPanelDefaultWidth: CGFloat = 900
+    static let sessionsPanelDefaultHeight: CGFloat = 400
 
     /// Persisted expanded (chat open) panel width. Caps applied at layout time.
     static var sessionsPanelWidth: CGFloat {
@@ -589,11 +577,6 @@ enum Preferences {
 
     @discardableResult
     static func ensureScreenshotsFolder() -> String {
-        AppSupport.migrateDocumentsFolderIfNeeded()
-        let legacy = NSString(string: "~/Documents/tinyhand").expandingTildeInPath
-        if let stored = defaults.string(forKey: "screenshotsFolder"), stored == legacy {
-            defaults.set(defaultScreenshotsFolder, forKey: "screenshotsFolder")
-        }
         let path = screenshotsFolder
         let fm = FileManager.default
         if !fm.fileExists(atPath: path) {

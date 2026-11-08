@@ -4,8 +4,8 @@
 
 # AiHand
 
-[![Latest release](https://img.shields.io/github/v/release/nilbuild/tinyhand?display_name=tag&sort=semver&cacheSeconds=3600)](https://github.com/nilbuild/tinyhand/releases/latest)
-[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](https://tinyhand.app)
+[![Latest release](https://img.shields.io/github/v/release/rjiang-bb/aihand?display_name=tag&sort=semver&cacheSeconds=3600)](https://github.com/rjiang-bb/aihand/releases/latest)
+[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](https://github.com/rjiang-bb/aihand)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 A tiny hand for demos — and a draw-to-agent loop for Cursor, Claude Code, and Codex.
@@ -15,8 +15,7 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 <img src="./.github/readme-hero.jpg" alt="AiHand: a tiny (AI) hand for your Mac" />
 
 <p align="center">
-  <a href="https://github.com/nilbuild/tinyhand/releases/latest/download/AiHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
-  <a href="https://tinyhand.app"><img src="https://img.shields.io/badge/Visit_website-ffffff?style=for-the-badge&logo=safari&logoColor=black" alt="Visit website" /></a>
+  <a href="https://github.com/rjiang-bb/aihand/releases/latest/download/AiHand.dmg"><img src="https://img.shields.io/badge/Download_for_macOS-000000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for macOS" /></a>
 </p>
 
 ## What it does

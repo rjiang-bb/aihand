@@ -58,6 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         setupSettings()
         registerHotKeys()
         setupSessionNotifications()
+        ChatImageActions.setPreviewClosedHandler { [weak self] in
+            self?.sessionsPanel.focus()
+        }
         sessionIconBag = sessionStore.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -633,6 +636,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func archiveSelectedSession() {
+        // ⌘W closes a focused chat image preview instead of archiving the session.
+        if ChatImageActions.closeKeyPreviewIfNeeded() { return }
         sessionsPanel.archiveSelectedSession()
     }
 }

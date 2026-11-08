@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://tinyhand.app/sitemap.xml
+Sitemap: https://aihand.app/sitemap.xml

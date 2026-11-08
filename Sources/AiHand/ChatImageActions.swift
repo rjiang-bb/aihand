@@ -2,8 +2,17 @@ import AppKit
 
 /// Open / copy screenshot files attached to chat messages.
 enum ChatImageActions {
+    /// Above the sessions panel (`floating + 2`) so previews stay on top.
+    private static let windowLevel = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 3)
+
     private static var retainedWindows: [NSWindow] = []
     private static var menuTarget: MenuTarget?
+    private static var onPreviewClosed: (() -> Void)?
+
+    /// Optional callback after a preview closes (used to return focus to sessions/chat).
+    static func setPreviewClosedHandler(_ handler: (() -> Void)?) {
+        onPreviewClosed = handler
+    }
 
     static func open(path: String) {
         guard let image = NSImage(contentsOfFile: path),
@@ -43,6 +52,9 @@ enum ChatImageActions {
         window.contentMinSize = NSSize(width: 200, height: 150)
         window.contentMaxSize = NSSize(width: maxW, height: maxH)
         window.isReleasedWhenClosed = false
+        window.level = windowLevel
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.hidesOnDeactivate = false
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -54,8 +66,29 @@ enum ChatImageActions {
             queue: .main
         ) { note in
             guard let closed = note.object as? NSWindow else { return }
+            let wasKey = NSApp.keyWindow === closed
             retainedWindows.removeAll { $0 === closed }
+            // Return focus to chat when the focused preview goes away (⌘W or traffic-light).
+            if wasKey || retainedWindows.isEmpty {
+                onPreviewClosed?()
+            }
         }
+    }
+
+    /// True when the key window is a chat image preview.
+    static var isPreviewKey: Bool {
+        guard let key = NSApp.keyWindow else { return false }
+        return retainedWindows.contains { $0 === key }
+    }
+
+    /// Close the key preview if any. Returns true when it handled the event.
+    @discardableResult
+    static func closeKeyPreviewIfNeeded() -> Bool {
+        guard let key = NSApp.keyWindow,
+              retainedWindows.contains(where: { $0 === key }) else { return false }
+        // Focus restore happens in willCloseNotification.
+        key.performClose(nil)
+        return true
     }
 
     static func copy(path: String) {
