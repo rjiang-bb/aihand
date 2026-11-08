@@ -13,6 +13,15 @@ final class VideoAnnotatePreview {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 
+    /// Play-button overlay. Only the button takes clicks, so the inline control
+    /// bar underneath keeps working while paused (scrub, skip, play/pause).
+    private final class PlayOverlayView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let hit = super.hitTest(point)
+            return hit === self ? nil : hit
+        }
+    }
+
     /// Transparent hit target over the picture; leaves the bottom control bar free.
     private final class PauseCatcherView: NSView {
         var onClick: (() -> Void)?
@@ -138,7 +147,7 @@ final class VideoAnnotatePreview {
     }
 
     private func makePlayOverlay(size: NSSize) -> NSView {
-        let overlay = NSView(frame: NSRect(origin: .zero, size: size))
+        let overlay = PlayOverlayView(frame: NSRect(origin: .zero, size: size))
         overlay.wantsLayer = true
         overlay.autoresizingMask = [.width, .height]
 
