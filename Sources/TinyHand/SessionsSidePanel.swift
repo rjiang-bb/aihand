@@ -27,6 +27,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
     private var cancellables = Set<AnyCancellable>()
     private var lastLaidOutListHeight: CGFloat = 0
+    private var hintHideWork: DispatchWorkItem?
 
     private let listWidth: CGFloat = 360
     /// Grows with session count up to 10 rows + pagination (+ ⌘ hints when shown).
@@ -223,12 +224,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     /// Grow / shrink the list-only panel as sessions are added or archived.
-    private func relayoutForSessionCountIfNeeded() {
+    private func relayoutForSessionCountIfNeeded(animateFrame: Bool = true) {
         let height = listHeight
         guard abs(height - lastLaidOutListHeight) > 0.5 else { return }
         lastLaidOutListHeight = height
         guard isVisible, selection.selectedID == nil else { return }
-        layout()
+        layout(animateFrame: animateFrame)
     }
 
     func show(on screen: NSScreen? = nil) {
@@ -327,7 +328,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         store.remove(id)
     }
 
-    private func layout(on screen: NSScreen? = nil, listOriginOverride: CGPoint? = nil) {
+    private func layout(on screen: NSScreen? = nil, listOriginOverride: CGPoint? = nil, animateFrame: Bool = true) {
         let screen = screen ?? panel.screen ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
         let visible = screen.visibleFrame
@@ -362,7 +363,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let sizeChanged = abs(panel.frame.width - frame.width) > 0.5
             || abs(panel.frame.height - frame.height) > 0.5
         applyingLayout = true
-        panel.setFrame(frame, display: true, animate: isVisible && sizeChanged)
+        // ⌘ hint toggles pass animateFrame: false so only SwiftUI’s slide runs —
+        // AppKit window animation + SwiftUI together was the list-only jank.
+        panel.setFrame(frame, display: true, animate: animateFrame && isVisible && sizeChanged)
         applyingLayout = false
     }
 
@@ -581,6 +584,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     private func removeShortcutMonitors() {
+        hintHideWork?.cancel()
+        hintHideWork = nil
         if let flagsMonitor {
             NSEvent.removeMonitor(flagsMonitor)
         }
@@ -601,12 +606,35 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             && !flags.contains(.control)
         let show = cmdAlone && !store.sessions.isEmpty
         guard selection.showShortcutBadges != show else { return }
-        selection.showShortcutBadges = show
-        // List-only: grow/shrink the panel downward (top edge stays put) so hints
-        // extend out of the bottom without shifting the session rows.
-        guard selection.selectedID == nil else { return }
-        lastLaidOutListHeight = -1
-        relayoutForSessionCountIfNeeded()
+        setShortcutHintsVisible(show)
+    }
+
+    /// Slide ⌘ hints in/out inside the list card. List-only grows the panel without
+    /// AppKit frame animation so SwiftUI’s slide isn’t fighting a window resize.
+    private func setShortcutHintsVisible(_ show: Bool) {
+        hintHideWork?.cancel()
+        hintHideWork = nil
+
+        if selection.selectedID != nil {
+            selection.showShortcutBadges = show
+            return
+        }
+
+        if show {
+            selection.showShortcutBadges = true
+            lastLaidOutListHeight = -1
+            relayoutForSessionCountIfNeeded(animateFrame: false)
+            return
+        }
+
+        selection.showShortcutBadges = false
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.selection.showShortcutBadges else { return }
+            self.lastLaidOutListHeight = -1
+            self.relayoutForSessionCountIfNeeded(animateFrame: false)
+        }
+        hintHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16, execute: work)
     }
 
     private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
@@ -770,8 +798,7 @@ private enum SessionsListMetrics {
             return picker + columnGap + emptyHint
         }
         let paginate = SessionsListPaging.needsPagination(sessionCount)
-        // Paginated lists already reserve a footer; ⌘ hints reuse that slot.
-        // Otherwise grow for the hints so they extend below the last session.
+        // Paginated lists already have a footer; ⌘ hints reuse that slot.
         let showFooter = paginate || showShortcutHints
         let rows = CGFloat(paginate ? SessionsListPaging.pageSize : sessionCount)
         let stack = rows * row + max(0, rows - 1) * rowGap
@@ -1001,8 +1028,6 @@ private struct SessionsSidePanelView: View {
 
     private var sessionsListContainer: some View {
         VStack(spacing: 0) {
-            // Only scroll once pagination kicks in; otherwise hug content so the
-            // white card doesn’t leave empty space under a short list.
             if needsPagination {
                 ScrollView {
                     sessionsListRows
@@ -1011,7 +1036,6 @@ private struct SessionsSidePanelView: View {
             } else {
                 sessionsListRows
             }
-            // Footer grows out of the bottom; panel resizes downward so rows stay put.
             if selection.showShortcutBadges {
                 sessionsShortcutHintsFooter
                     .transition(.move(edge: .bottom).combined(with: .opacity))

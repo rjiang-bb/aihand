@@ -544,7 +544,7 @@ enum Preferences {
     }
 
     /// Preferred size when a chat is open (total panel width + height). List-only mode is fixed.
-    static let sessionsPanelDefaultWidth: CGFloat = 800
+    static let sessionsPanelDefaultWidth: CGFloat = 900
     static let sessionsPanelDefaultHeight: CGFloat = 900
 
     /// Persisted expanded (chat open) panel width. Caps applied at layout time.
