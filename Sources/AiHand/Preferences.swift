@@ -577,11 +577,6 @@ enum Preferences {
 
     @discardableResult
     static func ensureScreenshotsFolder() -> String {
-        AppSupport.migrateDocumentsFolderIfNeeded()
-        let legacy = NSString(string: "~/Documents/tinyhand").expandingTildeInPath
-        if let stored = defaults.string(forKey: "screenshotsFolder"), stored == legacy {
-            defaults.set(defaultScreenshotsFolder, forKey: "screenshotsFolder")
-        }
         let path = screenshotsFolder
         let fm = FileManager.default
         if !fm.fileExists(atPath: path) {

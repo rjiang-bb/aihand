@@ -11,7 +11,7 @@ let package = Package(
         .executableTarget(
             name: "AiHand",
             dependencies: [.product(name: "Sparkle", package: "Sparkle")],
-            path: "Sources/TinyHand",
+            path: "Sources/AiHand",
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         )
     ]

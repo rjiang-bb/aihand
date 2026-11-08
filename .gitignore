@@ -1,13 +1,8 @@
 .DS_Store
 .build/
 .swiftpm/
-# Ignore build output; only check in the unversioned signed DMG.
-dist/*
-!dist/release/
-dist/release/*
-!dist/release/AiHand.dmg
+dist/
 *.dmg
-!dist/release/AiHand.dmg
 *.zip
 assets/unused/
 .debug-codesign-identity

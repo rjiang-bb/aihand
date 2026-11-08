@@ -1635,10 +1635,10 @@ private struct AboutPage: View {
                 }
             }
             Card(title: nil) {
-                LinkRow(title: "Website", detail: "tinyhand.app", url: "https://tinyhand.app")
-                LinkRow(title: "Source code", detail: "github.com/nilbuild/tinyhand", url: "https://github.com/nilbuild/tinyhand")
+                LinkRow(title: "Website", detail: "aihand.app", url: "https://aihand.app")
+                LinkRow(title: "Source code", detail: "github.com/rjiang-bb/aihand", url: "https://github.com/rjiang-bb/aihand")
                 LinkRow(title: "Made by", detail: "@nilbuild on X", url: "https://x.com/nilbuild")
-                LinkRow(title: "License", detail: "MIT", url: "https://github.com/nilbuild/tinyhand/blob/main/LICENSE")
+                LinkRow(title: "License", detail: "MIT", url: "https://github.com/rjiang-bb/aihand/blob/main/LICENSE")
             }
             HStack {
                 Spacer()

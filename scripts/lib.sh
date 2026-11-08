@@ -8,20 +8,14 @@ FEED_URL="https://github.com/$REPO/releases/latest/download/appcast.xml"
 SPARKLE_PUBLIC_KEY="FWubybHeS/qieOQ9ITnuaIcIpFXz/TPEWPLA7P2C5Yw="
 SPARKLE_VERSION="2.10.0"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${TINYHAND_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}"
+VERSION="${AIHAND_VERSION:-$(tr -d '[:space:]' < "$ROOT/VERSION")}"
 
 quit_running_app() {
-    local running=0
-    pgrep -x "$APP_NAME" >/dev/null && running=1
-    # Legacy binary name from before the AiHand rename.
-    pgrep -x TinyHand >/dev/null && running=1
-    if [[ "$running" -eq 1 ]]; then
+    if pgrep -x "$APP_NAME" >/dev/null; then
         echo "Quitting the running $APP_NAME first..."
         osascript -e "quit app id \"$BUNDLE_ID\"" >/dev/null 2>&1 || true
-        osascript -e 'quit app id "com.kamranahmed.tinyhand"' >/dev/null 2>&1 || true
         sleep 1
         pkill -x "$APP_NAME" || true
-        pkill -x TinyHand || true
         sleep 0.5
     fi
 }
@@ -147,8 +141,6 @@ debug_codesign_identity() {
 }
 
 debug_install_app() {
-    # Drop the pre-rename bundle so notifications / TCC don't keep showing TinyHand.
-    rm -rf "$HOME/Applications/TinyHand.app"
     echo "$HOME/Applications/$APP_NAME.app"
 }
 

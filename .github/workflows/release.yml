@@ -41,7 +41,7 @@ jobs:
       - name: Take the version and release notes from the tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          echo "TINYHAND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "AIHAND_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
           git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           NOTES="$(git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)')"
           if [ -z "$NOTES" ]; then
@@ -53,6 +53,8 @@ jobs:
             echo 'RELEASE_NOTES_EOF'
           } >> "$GITHUB_ENV"
 
+      # GitHub releases are published only by a local `./scripts/release.sh` run.
+      # CI builds artifacts for verification; it does not create or upload releases.
       - name: Build, sign and notarize
         env:
           CODESIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -60,7 +62,8 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: ./scripts/release.sh
+          SKIP_PUBLISH: "1"
+        run: ./scripts/release.sh --no-bump --skip-publish
 
       - uses: actions/upload-artifact@v4
         with:
@@ -69,18 +72,6 @@ jobs:
             dist/release/*.dmg
             dist/release/*.sha256
             dist/release/appcast.xml
-
-      - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            "dist/release/AiHand-$VERSION.dmg" "dist/release/AiHand-$VERSION.dmg.sha256" \
-            dist/release/AiHand.dmg \
-            dist/release/appcast.xml \
-            --title "$VERSION" --notes "$RELEASE_NOTES"
 
       - name: Remove the signing keychain
         if: always()

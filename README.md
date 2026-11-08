@@ -4,8 +4,8 @@
 
 # AiHand
 
-[![Latest release](https://img.shields.io/github/v/release/nilbuild/tinyhand?display_name=tag&sort=semver&cacheSeconds=3600)](https://github.com/nilbuild/tinyhand/releases/latest)
-[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](https://tinyhand.app)
+[![Latest release](https://img.shields.io/github/v/release/rjiang-bb/aihand?display_name=tag&sort=semver&cacheSeconds=3600)](https://github.com/rjiang-bb/aihand/releases/latest)
+[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)](https://github.com/rjiang-bb/aihand)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
 A tiny hand for demos — and a draw-to-agent loop for Cursor, Claude Code, and Codex.
