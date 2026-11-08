@@ -85,8 +85,7 @@ jobs:
         with:
           name: AiHand-dmg
           path: |
-            dist/release/*.dmg
-            dist/release/*.sha256
+            dist/release/AiHand.dmg
             dist/release/appcast.xml
 
       - name: Remove the signing keychain
