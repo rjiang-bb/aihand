@@ -1,9 +1,10 @@
 import AppKit
 import ApplicationServices
+import Carbon.HIToolbox
 import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, agent, workspaces, pointers, appearance, drawing, sound, about
+    case general, ssh, agent, workspaces, pointers, appearance, drawing, sound, about
 
     var id: String { rawValue }
 
@@ -11,6 +12,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "General"
         case .agent: return "Agent"
+        case .ssh: return "SSH"
         case .workspaces: return "Workspaces"
         case .pointers: return "Pointers"
         case .appearance: return "Appearance"
@@ -24,6 +26,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape.fill"
         case .agent: return "terminal.fill"
+        case .ssh: return "network"
         case .workspaces: return "folder.fill"
         case .pointers: return "hand.point.up.left.fill"
         case .appearance: return "sparkles"
@@ -37,6 +40,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return Color(white: 0.55)
         case .agent: return Color(red: 0.2, green: 0.7, blue: 0.55)
+        case .ssh: return Color(red: 0.35, green: 0.72, blue: 0.78)
         case .workspaces: return Color(red: 0.35, green: 0.62, blue: 0.95)
         case .pointers: return Color(red: 0.55, green: 0.42, blue: 0.95)
         case .appearance: return Color(red: 0.95, green: 0.45, blue: 0.6)
@@ -391,6 +395,7 @@ struct SettingsView: View {
         switch model.section {
         case .general: GeneralPage(model: model)
         case .agent: AgentPage(model: model)
+        case .ssh: SSHPage(model: model)
         case .workspaces: WorkspacesPage(model: model)
         case .pointers:
             if model.makingHand {
@@ -499,9 +504,44 @@ private struct GeneralPage: View {
 private struct AgentPage: View {
     @ObservedObject var model: SettingsModel
     @State private var missingCLI: AgentCLIKind?
+    @State private var connections: [SSHConnection] = Preferences.sshConnections
+
+    private var settingsTargetKey: String {
+        Preferences.agentSettingsTarget.storageKey
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
+            if !connections.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Configuring for")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Picker("", selection: Binding(
+                        get: { Preferences.agentSettingsTarget.storageKey },
+                        set: { raw in
+                            if raw == "local" {
+                                Preferences.agentSettingsTarget = .local
+                            } else if let id = UUID(uuidString: raw) {
+                                Preferences.agentSettingsTarget = .ssh(id)
+                            }
+                            model.refresh()
+                            refreshCLIAvailability()
+                        }
+                    )) {
+                        Text("Local").tag("local")
+                        ForEach(connections) { conn in
+                            Text(conn.hostname).tag(conn.id.uuidString)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .focusable(false)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, -8)
+            }
             Card(title: "CLI") {
                 VStack(alignment: .leading, spacing: 0) {
                     Row("Agent CLI", detail: "Cursor Agent, Claude Code, or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
@@ -531,19 +571,273 @@ private struct AgentPage: View {
             }
             Card(title: "Permissions") {
                 AgentPermissionsBlock(model: model)
-                    .id(Preferences.agentCLI.rawValue)
+                    .id("\(settingsTargetKey)-\(Preferences.agentCLI.rawValue)")
             }
             Card(title: "Favorites") {
                 AgentFavoritesBlock(model: model)
-                    .id(Preferences.agentCLI.rawValue)
+                    .id("\(settingsTargetKey)-\(Preferences.agentCLI.rawValue)")
             }
         }
-        .onAppear { refreshCLIAvailability() }
+        .onAppear {
+            connections = Preferences.sshConnections
+            refreshCLIAvailability()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            connections = Preferences.sshConnections
+            refreshCLIAvailability()
+        }
     }
 
     private func refreshCLIAvailability() {
         let kind = Preferences.agentCLI
-        missingCLI = AgentCLIFactory.make(kind).resolveExecutable() == nil ? kind : nil
+        let target = Preferences.agentSettingsTarget
+        DispatchQueue.global(qos: .userInitiated).async {
+            let missing: AgentCLIKind?
+            switch target {
+            case .local:
+                missing = AgentCLIFactory.make(kind).resolveExecutable() == nil ? kind : nil
+            case .ssh(let id):
+                guard let conn = Preferences.sshConnection(id: id) else {
+                    DispatchQueue.main.async { missingCLI = kind }
+                    return
+                }
+                missing = SSHClient.which(conn, kind.commandName) == nil ? kind : nil
+            }
+            DispatchQueue.main.async { missingCLI = missing }
+        }
+    }
+}
+
+private struct SSHPage: View {
+    @ObservedObject var model: SettingsModel
+    @State private var connections: [SSHConnection] = Preferences.sshConnections
+    @State private var draft = ""
+    @State private var statusMessage: String?
+    @State private var statusIsError = false
+    @State private var busy = false
+    @FocusState private var draftFocused: Bool
+    @State private var keyMonitor: Any?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Card(title: "Connections") {
+                VStack(spacing: 0) {
+                    if !connections.isEmpty {
+                        ForEach(Array(connections.enumerated()), id: \.element.id) { index, conn in
+                            SSHConnectionRow(
+                                connection: conn,
+                                onRemove: {
+                                    Preferences.removeSSHConnection(conn.id)
+                                    reload()
+                                }
+                            )
+                            if index < connections.count - 1 {
+                                Rectangle()
+                                    .fill(Color.primary.opacity(0.07))
+                                    .frame(height: 1)
+                                    .padding(.leading, 14)
+                            }
+                        }
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(height: 1)
+                            .padding(.leading, 14)
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(connections.isEmpty ? "Add a connection" : "Add another connection")
+                            .font(.system(size: 13))
+                        TextEditor(text: $draft)
+                            .font(.system(size: 13, design: .monospaced))
+                            .disabled(busy)
+                            .focused($draftFocused)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, minHeight: 66, maxHeight: 66, alignment: .topLeading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color(nsColor: .textBackgroundColor))
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
+                            }
+                            .overlay(alignment: .topLeading) {
+                                if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text("ssh -A user@example.com")
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(.secondary.opacity(0.7))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                        .allowsHitTesting(false)
+                                }
+                            }
+                        HStack {
+                            Spacer(minLength: 0)
+                            PillButton(
+                                title: busy ? "Testing…" : "Add connection",
+                                enabled: !busy && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            ) {
+                                addConnection()
+                            }
+                            .help("Add connection (⌘↩)")
+                        }
+                        if let statusMessage {
+                            SSHStatusBanner(message: statusMessage, isError: statusIsError)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                }
+            }
+        }
+        .onAppear {
+            reload()
+            installKeyMonitor()
+        }
+        .onDisappear { removeKeyMonitor() }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            reload()
+        }
+    }
+
+    private func reload() {
+        connections = Preferences.sshConnections
+        model.refresh()
+    }
+
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+            guard draftFocused else { return event }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let code = Int(event.keyCode)
+            guard code == kVK_Return || code == kVK_ANSI_KeypadEnter else { return event }
+            guard flags.contains(.command),
+                  !flags.contains(.shift),
+                  !flags.contains(.option),
+                  !flags.contains(.control) else {
+                return event
+            }
+            DispatchQueue.main.async { addConnection() }
+            return nil
+        }
+    }
+
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+        }
+        keyMonitor = nil
+    }
+
+    private func addConnection() {
+        let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty, !busy else { return }
+        busy = true
+        statusMessage = nil
+        statusIsError = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let connection = try SSHConnection.make(fromCommandLine: raw)
+                let result = SSHClient.validate(connection)
+                DispatchQueue.main.async {
+                    busy = false
+                    if result.ok {
+                        Preferences.addSSHConnection(connection)
+                        draft = ""
+                        statusMessage = "Saved \(connection.hostname)."
+                        statusIsError = false
+                        reload()
+                    } else {
+                        let detail = result.stderr.isEmpty ? "Could not connect (exit \(result.status))." : result.stderr
+                        statusMessage = detail
+                        statusIsError = true
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    busy = false
+                    statusMessage = error.localizedDescription
+                    statusIsError = true
+                }
+            }
+        }
+    }
+}
+
+private struct SSHStatusBanner: View {
+    let message: String
+    let isError: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(isError ? Color.red : Color(red: 0.2, green: 0.7, blue: 0.45))
+                .padding(.top, 1)
+            Text(message)
+                .font(.system(size: 12, design: isError ? .monospaced : .default))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Opaque fills — translucent red + sheet vibrancy was tinting the whole window.
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(isError
+                      ? Color(red: 0.28, green: 0.11, blue: 0.11)
+                      : Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(
+                    isError ? Color.red.opacity(0.45) : Color.primary.opacity(0.08),
+                    lineWidth: 1
+                )
+        }
+    }
+}
+
+private struct SSHConnectionRow: View {
+    let connection: SSHConnection
+    let onRemove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "network")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color(red: 0.35, green: 0.72, blue: 0.78))
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(connection.hostname)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(connection.commandLine)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button(action: onRemove) {
+                Image(systemName: "trash")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+                    .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help("Remove")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color.primary.opacity(hovering ? 0.03 : 0))
+        .onHover { hovering = $0 }
     }
 }
 
@@ -1015,33 +1309,51 @@ private struct WorkspacesPage: View {
     }
 
     private func refreshWorktreesVisibility() {
-        isGitRepo = GitWorkspace.inspect(path: Preferences.agentWorkspaceRoot) != nil
+        let path = Preferences.agentWorkspaceRoot
+        let connection: SSHConnection? = {
+            guard let id = Preferences.agentWorkspaceConnectionID else { return nil }
+            return Preferences.sshConnection(id: id)
+        }()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = GitWorkspace.inspect(path: path, connection: connection) != nil
+            DispatchQueue.main.async { isGitRepo = ok }
+        }
     }
 }
 
 private struct WorkspaceFoldersBlock: View {
     @ObservedObject var model: SettingsModel
-    /// Local copies so add/remove/select refresh this list (Preferences alone isn’t observed).
-    @State private var folders: [String] = Preferences.agentWorkspaces
-    @State private var currentRoot: String = Preferences.agentWorkspaceRoot
+    @State private var folders: [AgentWorkspaceRef] = Preferences.agentWorkspaceRefs
+    @State private var currentRootID: UUID? = Preferences.currentWorkspaceRef?.id
+    @State private var pendingSSHConnectionID: UUID?
+    @State private var remotePathDraft = "~"
+    @State private var remotePathBusy = false
+    @State private var remotePathError: String?
+    @State private var remotePathFocusToken = 0
+
+    private var pendingSSHConnection: SSHConnection? {
+        guard let id = pendingSSHConnectionID else { return nil }
+        return Preferences.sshConnection(id: id)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             if folders.isEmpty {
                 Row("Folders for the agent", detail: "Add at least one. New sessions use the current folder.") {
-                    PillButton(title: "Add…") { addFolder() }
+                    addButton
                 }
             } else {
-                ForEach(Array(folders.enumerated()), id: \.element) { index, path in
+                ForEach(Array(folders.enumerated()), id: \.element.id) { index, ref in
                     WorkspaceFolderRow(
-                        path: path,
-                        isCurrent: path == currentRoot,
+                        ref: ref,
+                        hostLabel: hostLabel(for: ref),
+                        isCurrent: ref.id == currentRootID,
                         onSelect: {
-                            Preferences.selectAgentWorkspace(path)
+                            Preferences.selectAgentWorkspaceRef(ref.id)
                             reload()
                         },
                         onRemove: {
-                            Preferences.removeAgentWorkspace(path)
+                            Preferences.removeAgentWorkspaceRef(ref.id)
                             reload()
                         }
                     )
@@ -1057,8 +1369,45 @@ private struct WorkspaceFoldersBlock: View {
                     .frame(height: 1)
                     .padding(.leading, 14)
                 Row("Add another folder", detail: "Sessions use the folder marked Current.") {
-                    PillButton(title: "Add…") { addFolder() }
+                    addButton
                 }
+            }
+            if let conn = pendingSSHConnection {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+                    .padding(.leading, 14)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(conn.hostname)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        AutofocusPlainField(
+                            placeholder: "~/code or /absolute/path",
+                            text: $remotePathDraft,
+                            focusToken: remotePathFocusToken,
+                            isEnabled: !remotePathBusy,
+                            onSubmit: { addRemoteFolder() }
+                        )
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 30)
+                        PillButton(title: "Cancel", enabled: !remotePathBusy) {
+                            cancelRemotePath()
+                        }
+                        PillButton(
+                            title: remotePathBusy ? "Checking…" : "Add",
+                            enabled: !remotePathBusy
+                                && !remotePathDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ) {
+                            addRemoteFolder()
+                        }
+                    }
+                    if let remotePathError {
+                        SSHStatusBanner(message: remotePathError, isError: true)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
             }
         }
         .onAppear { reload() }
@@ -1067,27 +1416,181 @@ private struct WorkspaceFoldersBlock: View {
         }
     }
 
+    @ViewBuilder
+    private var addButton: some View {
+        let connections = Preferences.sshConnections
+        if connections.isEmpty {
+            PillButton(title: "Add…") { addLocalFolder() }
+        } else {
+            RightAlignedMenuButton(
+                title: "Add…",
+                items: [("This Mac…", nil)] + connections.map { ($0.hostname, $0.id) }
+            ) { connectionID in
+                if let connectionID {
+                    beginRemotePath(connectionID: connectionID)
+                } else {
+                    cancelRemotePath()
+                    addLocalFolder()
+                }
+            }
+            .frame(width: 64, height: 28)
+        }
+    }
+
+    private func hostLabel(for ref: AgentWorkspaceRef) -> String? {
+        guard let id = ref.connectionID else { return nil }
+        return Preferences.sshConnection(id: id)?.hostname
+    }
+
     private func reload() {
-        folders = Preferences.agentWorkspaces
-        currentRoot = Preferences.agentWorkspaceRoot
+        folders = Preferences.agentWorkspaceRefs
+        currentRootID = Preferences.currentWorkspaceRef?.id
         model.refresh()
     }
 
-    private func addFolder() {
+    private func beginRemotePath(connectionID: UUID) {
+        pendingSSHConnectionID = connectionID
+        remotePathDraft = "~"
+        remotePathError = nil
+        remotePathBusy = false
+        // Wait for NSMenu teardown; AutofocusPlainField ignores the leftover Return from menu selection.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            remotePathFocusToken += 1
+        }
+    }
+
+    private func cancelRemotePath() {
+        pendingSSHConnectionID = nil
+        remotePathDraft = "~"
+        remotePathError = nil
+        remotePathBusy = false
+    }
+
+    private func addRemoteFolder() {
+        guard let conn = pendingSSHConnection else { return }
+        let draft = remotePathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !draft.isEmpty else { return }
+        remotePathBusy = true
+        remotePathError = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resolved = SSHClient.resolvePath(conn, draft)
+            DispatchQueue.main.async {
+                remotePathBusy = false
+                guard let absolute = resolved.path else {
+                    remotePathError = resolved.error ?? "Folder not found on \(conn.hostname)."
+                    return
+                }
+                Preferences.addAgentWorkspaceRef(.ssh(connectionID: conn.id, path: absolute))
+                cancelRemotePath()
+                reload()
+            }
+        }
+    }
+
+    private func addLocalFolder() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = true
-        if !currentRoot.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: currentRoot)
+        if let path = Preferences.currentWorkspaceRef?.path, Preferences.currentWorkspaceRef?.connectionID == nil {
+            panel.directoryURL = URL(fileURLWithPath: path)
         }
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
         for url in panel.urls {
-            Preferences.addAgentWorkspace(url.path)
+            Preferences.addAgentWorkspaceRef(.local(url.path))
         }
         reload()
+    }
+}
+
+/// Pill-styled button that pops an NSMenu right-aligned to its trailing edge.
+private struct RightAlignedMenuButton: NSViewRepresentable {
+    let title: String
+    /// `nil` id = local / This Mac.
+    let items: [(title: String, id: UUID?)]
+    let onSelect: (UUID?) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSelect: onSelect)
+    }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.showMenu(_:)))
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.contentTintColor = .labelColor
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.09).cgColor
+        button.layer?.cornerRadius = 13
+        context.coordinator.items = items
+        return button
+    }
+
+    func updateNSView(_ button: NSButton, context: Context) {
+        button.title = title
+        context.coordinator.items = items
+        context.coordinator.onSelect = onSelect
+    }
+
+    final class Coordinator: NSObject {
+        var items: [(title: String, id: UUID?)] = []
+        var onSelect: (UUID?) -> Void
+
+        init(onSelect: @escaping (UUID?) -> Void) {
+            self.onSelect = onSelect
+        }
+
+        @objc func showMenu(_ sender: NSButton) {
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            for (index, item) in items.enumerated() {
+                if index == 1 {
+                    menu.addItem(.separator())
+                }
+                let menuItem = NSMenuItem(
+                    title: item.title,
+                    action: #selector(pick(_:)),
+                    keyEquivalent: ""
+                )
+                menuItem.target = self
+                menuItem.tag = index
+                menu.addItem(menuItem)
+            }
+            // Right-align to the button; prefer below so the menu never covers it.
+            // AppKit will otherwise flip upward into the button when space is tight.
+            let size = menu.size
+            let x = sender.bounds.maxX - size.width
+            let origin: NSPoint
+            if let window = sender.window {
+                let buttonInWindow = sender.convert(sender.bounds, to: nil)
+                let buttonOnScreen = window.convertToScreen(buttonInWindow)
+                let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+                let fitsBelow = buttonOnScreen.minY - size.height >= visible.minY + 4
+                if fitsBelow {
+                    // Non-flipped: y=0 is the bottom edge — menu top sits there, body below.
+                    origin = NSPoint(x: x, y: sender.isFlipped ? sender.bounds.maxY : 0)
+                } else {
+                    // Place entirely above the button (top of menu = button top + menu height).
+                    if sender.isFlipped {
+                        origin = NSPoint(x: x, y: sender.bounds.minY - size.height)
+                    } else {
+                        origin = NSPoint(x: x, y: sender.bounds.maxY + size.height)
+                    }
+                }
+            } else {
+                origin = NSPoint(x: x, y: sender.isFlipped ? sender.bounds.maxY : 0)
+            }
+            menu.popUp(positioning: nil, at: origin, in: sender)
+        }
+
+        @objc func pick(_ sender: NSMenuItem) {
+            let index = sender.tag
+            guard items.indices.contains(index) else { return }
+            onSelect(items[index].id)
+        }
     }
 }
 
@@ -1172,11 +1675,23 @@ private struct WorkspaceWorktreesBlock: View {
         !busy && !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var connection: SSHConnection? {
+        guard let id = Preferences.agentWorkspaceConnectionID else { return nil }
+        return Preferences.sshConnection(id: id)
+    }
+
     private func reload() {
         root = Preferences.agentWorkspaceRoot
         activePath = Preferences.agentWorkspace
-        repo = GitWorkspace.inspect(path: root)
-        model.refresh()
+        let conn = connection
+        let path = root
+        DispatchQueue.global(qos: .userInitiated).async {
+            let info = GitWorkspace.inspect(path: path, connection: conn)
+            DispatchQueue.main.async {
+                repo = info
+                model.refresh()
+            }
+        }
     }
 
     private func addWorktree() {
@@ -1184,8 +1699,9 @@ private struct WorkspaceWorktreesBlock: View {
         guard !name.isEmpty, !busy else { return }
         busy = true
         statusMessage = nil
+        let conn = connection
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = GitWorkspace.addWorktree(branch: name, inRepo: root)
+            let result = GitWorkspace.addWorktree(branch: name, inRepo: root, connection: conn)
             DispatchQueue.main.async {
                 busy = false
                 if let path = result.path {
@@ -1207,8 +1723,9 @@ private struct WorkspaceWorktreesBlock: View {
         busy = true
         statusMessage = nil
         let switchingAway = SessionStore.sameWorkspace(entry.path, activePath)
+        let conn = connection
         DispatchQueue.global(qos: .userInitiated).async {
-            let error = GitWorkspace.removeWorktree(path: entry.path, inRepo: root)
+            let error = GitWorkspace.removeWorktree(path: entry.path, inRepo: root, connection: conn)
             DispatchQueue.main.async {
                 busy = false
                 if let error {
@@ -1308,15 +1825,15 @@ private struct WorkspaceWorktreeRow: View {
 }
 
 private struct WorkspaceFolderRow: View {
-    let path: String
+    let ref: AgentWorkspaceRef
+    let hostLabel: String?
     let isCurrent: Bool
     let onSelect: () -> Void
     let onRemove: () -> Void
     @State private var hovering = false
 
-    private var title: String {
-        URL(fileURLWithPath: path).lastPathComponent
-    }
+    private var title: String { ref.displayName }
+    private var path: String { ref.path }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1328,6 +1845,14 @@ private struct WorkspaceFolderRow: View {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(title).font(.system(size: 13)).foregroundColor(.primary)
+                            if let hostLabel {
+                                Text(hostLabel)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(Color(red: 0.35, green: 0.72, blue: 0.78))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color(red: 0.35, green: 0.72, blue: 0.78).opacity(0.15)))
+                            }
                             if isCurrent {
                                 Text("Current")
                                     .font(.system(size: 10, weight: .semibold))
@@ -2431,6 +2956,162 @@ private struct PlainField: View {
                     .strokeBorder(borderColor, lineWidth: solidBackground && focused ? 1.5 : 1)
             )
             .modifier(NoFocusEffect())
+    }
+}
+
+/// AppKit field — SwiftUI FocusState often loses to NSMenu dismiss; bump `focusToken` to force the caret in.
+private struct AutofocusPlainField: NSViewRepresentable {
+    let placeholder: String
+    @Binding var text: String
+    var focusToken: Int
+    var isEnabled: Bool = true
+    var onSubmit: (() -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, onSubmit: onSubmit)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let wrap = NSView()
+        wrap.wantsLayer = true
+        wrap.layer?.cornerRadius = 8
+        wrap.layer?.masksToBounds = true
+        wrap.layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
+
+        let field = NSTextField(string: text)
+        field.placeholderString = placeholder
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.backgroundColor = .clear
+        field.font = .systemFont(ofSize: 13)
+        field.focusRingType = .none
+        field.delegate = context.coordinator
+        field.target = context.coordinator
+        field.action = #selector(Coordinator.submit(_:))
+        field.translatesAutoresizingMaskIntoConstraints = false
+        if let cell = field.cell as? NSTextFieldCell {
+            cell.wraps = false
+            cell.isScrollable = true
+        }
+        wrap.addSubview(field)
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: wrap.leadingAnchor, constant: 10),
+            field.trailingAnchor.constraint(equalTo: wrap.trailingAnchor, constant: -10),
+            field.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 6),
+            field.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -6)
+        ])
+        context.coordinator.field = field
+        context.coordinator.wrap = wrap
+        context.coordinator.applyChrome(focused: false)
+        return wrap
+    }
+
+    func updateNSView(_ wrap: NSView, context: Context) {
+        context.coordinator.text = $text
+        context.coordinator.onSubmit = onSubmit
+        guard let field = context.coordinator.field else { return }
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        field.placeholderString = placeholder
+        field.isEnabled = isEnabled
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            context.coordinator.claimFocus()
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var text: Binding<String>
+        var onSubmit: (() -> Void)?
+        var lastFocusToken = 0
+        /// Menu Return would otherwise activate the newly focused field’s action.
+        private var ignoreSubmitUntil = Date.distantPast
+        weak var field: NSTextField?
+        weak var wrap: NSView?
+        private var keyMonitor: Any?
+
+        init(text: Binding<String>, onSubmit: (() -> Void)?) {
+            self.text = text
+            self.onSubmit = onSubmit
+        }
+
+        deinit {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+            }
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            text.wrappedValue = field.stringValue
+        }
+
+        func controlTextDidBeginEditing(_ obj: Notification) {
+            applyChrome(focused: true)
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            applyChrome(focused: false)
+        }
+
+        @objc func submit(_ sender: NSTextField) {
+            guard Date() >= ignoreSubmitUntil else { return }
+            onSubmit?()
+        }
+
+        func claimFocus() {
+            ignoreSubmitUntil = Date().addingTimeInterval(0.4)
+            swallowReturnKeysTemporarily()
+            DispatchQueue.main.async { [weak self] in
+                self?.makeFieldFirstResponder()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                self?.makeFieldFirstResponder()
+            }
+        }
+
+        private func makeFieldFirstResponder() {
+            guard let field, let window = field.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            _ = window.makeFirstResponder(field)
+            if let editor = window.fieldEditor(true, for: field) as? NSTextView {
+                let end = (field.stringValue as NSString).length
+                editor.setSelectedRange(NSRange(location: end, length: 0))
+            }
+            applyChrome(focused: true)
+        }
+
+        /// Drop leftover ↩ from choosing the menu item with the keyboard.
+        private func swallowReturnKeysTemporarily() {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+                self.keyMonitor = nil
+            }
+            let until = ignoreSubmitUntil
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+                if Date() >= until {
+                    if let monitor = self?.keyMonitor {
+                        NSEvent.removeMonitor(monitor)
+                        self?.keyMonitor = nil
+                    }
+                    return event
+                }
+                if event.keyCode == 36 /* Return */ || event.keyCode == 76 /* keypad Enter */ {
+                    return nil
+                }
+                return event
+            }
+        }
+
+        func applyChrome(focused: Bool) {
+            wrap?.layer?.borderWidth = focused ? 1.5 : 1
+            wrap?.layer?.borderColor = focused
+                ? NSColor(red: 0.2, green: 0.55, blue: 0.98, alpha: 1).cgColor
+                : NSColor.labelColor.withAlphaComponent(0.45).cgColor
+        }
     }
 }
 

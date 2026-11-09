@@ -318,16 +318,18 @@ final class AnnotatePromptModel: ObservableObject {
     }
 
     func reloadFavorites() {
-        Preferences.ensureAgentFavorites()
-        let kind = Preferences.agentCLI
+        let target = Preferences.runtimeAgentTarget
+        Preferences.ensureAgentFavorites(for: target)
+        let kind = Preferences.agentCLI(for: target)
         cliTitle = kind.title
-        favorites = Preferences.favorites(for: kind)
-        selectedFavoriteID = Preferences.currentAgentFavorite.id
+        favorites = Preferences.favorites(for: kind, target: target)
+        selectedFavoriteID = Preferences.currentAgentFavoriteID(for: kind, target: target)
+            ?? favorites.first?.id
     }
 
     func selectFavorite(_ fav: AgentFavorite) {
         selectedFavoriteID = fav.id
-        Preferences.setCurrentAgentFavoriteID(fav.id, for: fav.cliKind)
+        Preferences.setCurrentAgentFavoriteID(fav.id, for: fav.cliKind, target: Preferences.runtimeAgentTarget)
     }
 
     func cycleFavorite() {

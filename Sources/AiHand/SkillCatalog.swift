@@ -8,30 +8,54 @@ struct AgentSkill: Identifiable, Equatable, Hashable {
 }
 
 enum SkillCatalog {
+    private struct CacheKey: Hashable {
+        var connectionKey: String
+        var workspace: String
+    }
+
     private static var cached: [AgentSkill]?
-    private static var cachedWorkspace: String?
+    private static var cachedKey: CacheKey?
     private static var cachedAt: Date?
     private static let cacheTTL: TimeInterval = 30
 
-    static func skills(workspace: String? = nil, forceRefresh: Bool = false) -> [AgentSkill] {
-        let key = workspace ?? ""
+    static func skills(
+        workspace: String? = nil,
+        connectionID: UUID? = Preferences.agentWorkspaceConnectionID,
+        forceRefresh: Bool = false
+    ) -> [AgentSkill] {
+        let key = CacheKey(
+            connectionKey: connectionID?.uuidString ?? "local",
+            workspace: workspace ?? ""
+        )
         if !forceRefresh,
            let cached,
-           cachedWorkspace == key,
+           cachedKey == key,
            let cachedAt,
            Date().timeIntervalSince(cachedAt) < cacheTTL {
             return cached
         }
-        let list = scan(workspace: workspace)
+        let list: [AgentSkill]
+        if let connectionID {
+            // Missing connection must not fall through to local scan of a remote path.
+            guard let connection = Preferences.sshConnection(id: connectionID) else {
+                cached = []
+                cachedKey = key
+                cachedAt = Date()
+                return []
+            }
+            list = scanRemote(connection: connection, workspace: workspace)
+        } else {
+            list = scanLocal(workspace: workspace)
+        }
         cached = list
-        cachedWorkspace = key
+        cachedKey = key
         cachedAt = Date()
         return list
     }
 
     static func invalidate() {
         cached = nil
-        cachedWorkspace = nil
+        cachedKey = nil
         cachedAt = nil
     }
 
@@ -77,9 +101,9 @@ enum SkillCatalog {
         return ranked.prefix(limit).map(\.0)
     }
 
-    // MARK: - Scan
+    // MARK: - Local scan
 
-    private static func scan(workspace: String?) -> [AgentSkill] {
+    private static func scanLocal(workspace: String?) -> [AgentSkill] {
         var roots: [URL] = []
         let home = FileManager.default.homeDirectoryForCurrentUser
         roots.append(home.appendingPathComponent(".cursor/skills"))
@@ -91,9 +115,8 @@ enum SkillCatalog {
         }
 
         var byName: [String: AgentSkill] = [:]
-        // Prefer earlier roots (personal over built-in) when names collide.
         for root in roots {
-            for skill in loadSkills(in: root) {
+            for skill in loadSkillsLocal(in: root) {
                 if byName[skill.name] == nil {
                     byName[skill.name] = skill
                 }
@@ -102,7 +125,7 @@ enum SkillCatalog {
         return byName.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private static func loadSkills(in root: URL) -> [AgentSkill] {
+    private static func loadSkillsLocal(in root: URL) -> [AgentSkill] {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
             at: root,
@@ -127,6 +150,73 @@ enum SkillCatalog {
                 name: resolvedName,
                 description: description,
                 directoryName: dir.lastPathComponent
+            ))
+        }
+        return skills
+    }
+
+    // MARK: - Remote scan
+
+    private static func scanRemote(connection: SSHConnection, workspace: String?) -> [AgentSkill] {
+        guard let home = SSHClient.remoteHome(connection) else { return [] }
+        var roots = [
+            "\(home)/.cursor/skills",
+            "\(home)/.agents/skills",
+            "\(home)/.cursor/skills-cursor"
+        ]
+        if let workspace, !workspace.isEmpty {
+            roots.append("\(workspace)/.cursor/skills")
+            roots.append("\(workspace)/.agents/skills")
+        }
+
+        var byName: [String: AgentSkill] = [:]
+        for root in roots {
+            for skill in loadSkillsRemote(connection: connection, root: root) {
+                if byName[skill.name] == nil {
+                    byName[skill.name] = skill
+                }
+            }
+        }
+        return byName.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static func loadSkillsRemote(connection: SSHConnection, root: String) -> [AgentSkill] {
+        let escaped = SSHClient.shellEscape(root)
+        // Emit: dirname\0frontmatter-ish first 8KB of SKILL.md separated by records.
+        let script = """
+        root=\(escaped)
+        [ -d "$root" ] || exit 0
+        for d in "$root"/*/; do
+          [ -d "$d" ] || continue
+          f="${d}SKILL.md"
+          [ -f "$f" ] || continue
+          name=$(basename "$d")
+          printf '%s\\0' "$name"
+          head -c 16000 "$f"
+          printf '\\0\\0'
+        done
+        """
+        let result = SSHClient.runShell(connection, script)
+        guard result.ok, !result.stdout.isEmpty else { return [] }
+
+        var skills: [AgentSkill] = []
+        let parts = result.stdout.components(separatedBy: "\0\0")
+        for part in parts {
+            guard !part.isEmpty else { continue }
+            let pieces = part.split(separator: "\0", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pieces.count == 2 else { continue }
+            let directoryName = String(pieces[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = String(pieces[1])
+            guard !directoryName.isEmpty,
+                  let parsed = parseFrontmatter(text) else { continue }
+            let name = parsed.name?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedName = (name?.isEmpty == false ? name! : directoryName)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !resolvedName.isEmpty else { continue }
+            skills.append(AgentSkill(
+                name: resolvedName,
+                description: collapseDescription(parsed.description ?? ""),
+                directoryName: directoryName
             ))
         }
         return skills
@@ -157,7 +247,6 @@ enum SkillCatalog {
                     i += 1
                     continue
                 }
-                // Next top-level key
                 if l.contains(":") { break }
                 collected.append(l)
                 i += 1

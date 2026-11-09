@@ -444,120 +444,255 @@ enum Preferences {
         set { set(newValue.rawValue, "captureScope") }
     }
 
-    static var agentCLI: AgentCLIKind {
-        get { defaults.string(forKey: "agentCLI").flatMap(AgentCLIKind.init(rawValue:)) ?? .cursor }
+    // MARK: - SSH connections
+
+    static var sshConnections: [SSHConnection] {
+        get {
+            guard let data = defaults.data(forKey: "sshConnections") else { return [] }
+            return (try? JSONDecoder().decode([SSHConnection].self, from: data)) ?? []
+        }
         set {
-            defaults.set(newValue.rawValue, forKey: "agentCLI")
-            ensureAgentFavorites()
+            let data = (try? JSONEncoder().encode(newValue)) ?? Data()
+            defaults.set(data, forKey: "sshConnections")
+            // Drop settings target if connection removed.
+            if case .ssh(let id) = agentSettingsTarget, !newValue.contains(where: { $0.id == id }) {
+                defaults.set(AgentExecutionTarget.local.storageKey, forKey: "agentSettingsTarget")
+            }
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
 
-    /// Per-CLI permission / sandbox mode (`cliKind.rawValue` → mode rawValue).
-    private static var agentPermissionModesByCLI: [String: String] {
-        get { defaults.dictionary(forKey: "agentPermissionModes") as? [String: String] ?? [:] }
-        set { defaults.set(newValue, forKey: "agentPermissionModes") }
+    static func sshConnection(id: UUID) -> SSHConnection? {
+        sshConnections.first { $0.id == id }
+    }
+
+    static func addSSHConnection(_ connection: SSHConnection) {
+        var list = sshConnections
+        list.append(connection)
+        sshConnections = list
+    }
+
+    static func removeSSHConnection(_ id: UUID) {
+        if let conn = sshConnection(id: id) {
+            SSHClient.closeMaster(conn)
+        }
+        // Drop workspaces bound to this machine.
+        let remaining = agentWorkspaceRefs.filter { $0.connectionID != id }
+        if remaining.count != agentWorkspaceRefs.count {
+            writeWorkspaceRefs(remaining)
+            if let first = remaining.first {
+                selectAgentWorkspaceRef(first.id)
+            } else {
+                defaults.removeObject(forKey: "agentWorkspaceRootID")
+                defaults.removeObject(forKey: "agentWorkspace")
+                defaults.removeObject(forKey: "agentWorkspaceRoot")
+            }
+        }
+        var buckets = agentSettingsBuckets
+        buckets.removeValue(forKey: id.uuidString)
+        agentSettingsBuckets = buckets
+        sshConnections = sshConnections.filter { $0.id != id }
+    }
+
+    // MARK: - Agent settings target (editing context)
+
+    /// Which machine’s Agent settings are being edited (Local or an SSH connection).
+    static var agentSettingsTarget: AgentExecutionTarget {
+        get {
+            migrateLegacyAgentSettingsIfNeeded()
+            let raw = (defaults.string(forKey: "agentSettingsTarget") ?? "local")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if raw == "local" || raw.isEmpty { return .local }
+            if let id = UUID(uuidString: raw), sshConnections.contains(where: { $0.id == id }) {
+                return .ssh(id)
+            }
+            return .local
+        }
+        set {
+            defaults.set(newValue.storageKey, forKey: "agentSettingsTarget")
+            ensureAgentFavorites(for: newValue)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Target used when starting sessions — follows the Current workspace’s machine.
+    static var runtimeAgentTarget: AgentExecutionTarget {
+        AgentExecutionTarget(connectionID: currentWorkspaceRef?.connectionID)
+    }
+
+    private struct TargetAgentSettings: Codable {
+        var agentCLI: String?
+        var permissionModes: [String: String]?
+        var favorites: [AgentFavorite]?
+        var currentFavoriteIDs: [String: String]?
+    }
+
+    private static var agentSettingsBuckets: [String: TargetAgentSettings] {
+        get {
+            migrateLegacyAgentSettingsIfNeeded()
+            guard let data = defaults.data(forKey: "agentSettingsByTarget") else { return [:] }
+            return (try? JSONDecoder().decode([String: TargetAgentSettings].self, from: data)) ?? [:]
+        }
+        set {
+            let data = (try? JSONEncoder().encode(newValue)) ?? Data()
+            defaults.set(data, forKey: "agentSettingsByTarget")
+        }
+    }
+
+    private static var didMigrateAgentSettings = false
+
+    private static func migrateLegacyAgentSettingsIfNeeded() {
+        guard !didMigrateAgentSettings else { return }
+        didMigrateAgentSettings = true
+        if defaults.data(forKey: "agentSettingsByTarget") != nil { return }
+        var bucket = TargetAgentSettings()
+        bucket.agentCLI = defaults.string(forKey: "agentCLI")
+        bucket.permissionModes = defaults.dictionary(forKey: "agentPermissionModes") as? [String: String]
+        if let data = defaults.data(forKey: "agentFavorites"),
+           let favs = try? JSONDecoder().decode([AgentFavorite].self, from: data) {
+            bucket.favorites = favs
+        }
+        var ids = defaults.dictionary(forKey: "currentAgentFavoriteIDs") as? [String: String] ?? [:]
+        if let legacy = defaults.string(forKey: "currentAgentFavoriteID"), ids["cursor"] == nil {
+            ids[AgentCLIKind.cursor.rawValue] = legacy
+        }
+        bucket.currentFavoriteIDs = ids.isEmpty ? nil : ids
+        agentSettingsBuckets = ["local": bucket]
+    }
+
+    private static func settingsBucket(for target: AgentExecutionTarget) -> TargetAgentSettings {
+        agentSettingsBuckets[target.storageKey] ?? TargetAgentSettings()
+    }
+
+    private static func updateSettingsBucket(for target: AgentExecutionTarget, _ mutate: (inout TargetAgentSettings) -> Void) {
+        var buckets = agentSettingsBuckets
+        var bucket = buckets[target.storageKey] ?? TargetAgentSettings()
+        mutate(&bucket)
+        buckets[target.storageKey] = bucket
+        agentSettingsBuckets = buckets
+    }
+
+    static var agentCLI: AgentCLIKind {
+        get { agentCLI(for: agentSettingsTarget) }
+        set { setAgentCLI(newValue, for: agentSettingsTarget) }
+    }
+
+    static func agentCLI(for target: AgentExecutionTarget) -> AgentCLIKind {
+        settingsBucket(for: target).agentCLI.flatMap(AgentCLIKind.init(rawValue:)) ?? .cursor
+    }
+
+    static func setAgentCLI(_ kind: AgentCLIKind, for target: AgentExecutionTarget) {
+        updateSettingsBucket(for: target) { $0.agentCLI = kind.rawValue }
+        ensureAgentFavorites(for: target)
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    private static func permissionModes(for target: AgentExecutionTarget) -> [String: String] {
+        settingsBucket(for: target).permissionModes ?? [:]
+    }
+
+    private static func setPermissionMode(cli: AgentCLIKind, raw: String, target: AgentExecutionTarget) {
+        updateSettingsBucket(for: target) { bucket in
+            var map = bucket.permissionModes ?? [:]
+            map[cli.rawValue] = raw
+            bucket.permissionModes = map
+        }
+        NotificationCenter.default.post(name: changed, object: nil)
     }
 
     static var cursorPermissionMode: CursorAgentPermissionMode {
         get {
-            agentPermissionModesByCLI[AgentCLIKind.cursor.rawValue]
+            permissionModes(for: agentSettingsTarget)[AgentCLIKind.cursor.rawValue]
                 .flatMap(CursorAgentPermissionMode.init(rawValue:)) ?? .force
         }
-        set {
-            var map = agentPermissionModesByCLI
-            map[AgentCLIKind.cursor.rawValue] = newValue.rawValue
-            agentPermissionModesByCLI = map
-            NotificationCenter.default.post(name: changed, object: nil)
-        }
+        set { setPermissionMode(cli: .cursor, raw: newValue.rawValue, target: agentSettingsTarget) }
     }
 
     static var claudePermissionMode: ClaudeAgentPermissionMode {
         get {
-            agentPermissionModesByCLI[AgentCLIKind.claude.rawValue]
+            permissionModes(for: agentSettingsTarget)[AgentCLIKind.claude.rawValue]
                 .flatMap(ClaudeAgentPermissionMode.init(rawValue:)) ?? .bypass
         }
-        set {
-            var map = agentPermissionModesByCLI
-            map[AgentCLIKind.claude.rawValue] = newValue.rawValue
-            agentPermissionModesByCLI = map
-            NotificationCenter.default.post(name: changed, object: nil)
-        }
+        set { setPermissionMode(cli: .claude, raw: newValue.rawValue, target: agentSettingsTarget) }
     }
 
     static var codexPermissionMode: CodexAgentPermissionMode {
         get {
-            agentPermissionModesByCLI[AgentCLIKind.codex.rawValue]
+            permissionModes(for: agentSettingsTarget)[AgentCLIKind.codex.rawValue]
                 .flatMap(CodexAgentPermissionMode.init(rawValue:)) ?? .workspaceWrite
         }
+        set { setPermissionMode(cli: .codex, raw: newValue.rawValue, target: agentSettingsTarget) }
+    }
+
+    static func cursorPermissionMode(for target: AgentExecutionTarget) -> CursorAgentPermissionMode {
+        permissionModes(for: target)[AgentCLIKind.cursor.rawValue]
+            .flatMap(CursorAgentPermissionMode.init(rawValue:)) ?? .force
+    }
+
+    static func claudePermissionMode(for target: AgentExecutionTarget) -> ClaudeAgentPermissionMode {
+        permissionModes(for: target)[AgentCLIKind.claude.rawValue]
+            .flatMap(ClaudeAgentPermissionMode.init(rawValue:)) ?? .bypass
+    }
+
+    static func codexPermissionMode(for target: AgentExecutionTarget) -> CodexAgentPermissionMode {
+        permissionModes(for: target)[AgentCLIKind.codex.rawValue]
+            .flatMap(CodexAgentPermissionMode.init(rawValue:)) ?? .workspaceWrite
+    }
+
+    /// Favorites for the Agent settings editing target.
+    static var agentFavorites: [AgentFavorite] {
+        get { agentFavorites(for: agentSettingsTarget) }
         set {
-            var map = agentPermissionModesByCLI
-            map[AgentCLIKind.codex.rawValue] = newValue.rawValue
-            agentPermissionModesByCLI = map
+            updateSettingsBucket(for: agentSettingsTarget) { $0.favorites = newValue }
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
 
-    /// Named model (+ effort) presets, each tagged with a `cliKind`. UI shows only the active CLI’s set.
-    static var agentFavorites: [AgentFavorite] {
-        get {
-            guard let data = defaults.data(forKey: "agentFavorites") else { return [] }
-            return (try? JSONDecoder().decode([AgentFavorite].self, from: data)) ?? []
-        }
-        set {
-            let data = (try? JSONEncoder().encode(newValue)) ?? Data()
-            set(data, "agentFavorites")
-        }
+    static func agentFavorites(for target: AgentExecutionTarget) -> [AgentFavorite] {
+        settingsBucket(for: target).favorites ?? []
     }
 
-    /// Per-CLI current favorite ids (`cliKind.rawValue` → uuid string).
-    private static var currentFavoriteIDsByCLI: [String: String] {
-        get { defaults.dictionary(forKey: "currentAgentFavoriteIDs") as? [String: String] ?? [:] }
-        set { defaults.set(newValue, forKey: "currentAgentFavoriteIDs") }
+    private static func currentFavoriteIDs(for target: AgentExecutionTarget) -> [String: String] {
+        settingsBucket(for: target).currentFavoriteIDs ?? [:]
     }
 
-    static func currentAgentFavoriteID(for kind: AgentCLIKind) -> UUID? {
-        // Migrate legacy single-id key once.
-        if let legacy = defaults.string(forKey: "currentAgentFavoriteID"),
-           let uuid = UUID(uuidString: legacy) {
-            var map = currentFavoriteIDsByCLI
-            if map[kind.rawValue] == nil {
-                map[kind.rawValue] = uuid.uuidString
-                currentFavoriteIDsByCLI = map
-            }
-            defaults.removeObject(forKey: "currentAgentFavoriteID")
-        }
-        guard let raw = currentFavoriteIDsByCLI[kind.rawValue] else { return nil }
+    static func currentAgentFavoriteID(for kind: AgentCLIKind, target: AgentExecutionTarget? = nil) -> UUID? {
+        let t = target ?? agentSettingsTarget
+        guard let raw = currentFavoriteIDs(for: t)[kind.rawValue] else { return nil }
         return UUID(uuidString: raw)
     }
 
-    static func setCurrentAgentFavoriteID(_ id: UUID, for kind: AgentCLIKind) {
-        var map = currentFavoriteIDsByCLI
-        map[kind.rawValue] = id.uuidString
-        currentFavoriteIDsByCLI = map
+    static func setCurrentAgentFavoriteID(_ id: UUID, for kind: AgentCLIKind, target: AgentExecutionTarget? = nil) {
+        let t = target ?? agentSettingsTarget
+        updateSettingsBucket(for: t) { bucket in
+            var map = bucket.currentFavoriteIDs ?? [:]
+            map[kind.rawValue] = id.uuidString
+            bucket.currentFavoriteIDs = map
+        }
         NotificationCenter.default.post(name: changed, object: nil)
     }
 
-    /// Favorite used for new sessions on the current CLI (always non-nil after ensure).
     static var currentAgentFavorite: AgentFavorite {
-        ensureAgentFavorites()
-        let kind = agentCLI
-        if let id = currentAgentFavoriteID(for: kind),
-           let fav = agentFavorites.first(where: { $0.id == id && $0.cliKind == kind }) {
+        let target = agentSettingsTarget
+        ensureAgentFavorites(for: target)
+        let kind = agentCLI(for: target)
+        if let id = currentAgentFavoriteID(for: kind, target: target),
+           let fav = agentFavorites(for: target).first(where: { $0.id == id && $0.cliKind == kind }) {
             return fav
         }
-        return favorites(for: kind).first { $0.isBuiltIn }
+        return favorites(for: kind, target: target).first { $0.isBuiltIn }
             ?? AgentFavorite.builtInDefault(for: kind)
     }
 
-    static func favorites(for kind: AgentCLIKind) -> [AgentFavorite] {
-        ensureAgentFavorites()
-        return agentFavorites.filter { $0.cliKind == kind }
+    static func favorites(for kind: AgentCLIKind, target: AgentExecutionTarget? = nil) -> [AgentFavorite] {
+        let t = target ?? agentSettingsTarget
+        ensureAgentFavorites(for: t)
+        return agentFavorites(for: t).filter { $0.cliKind == kind }
     }
 
-    /// Guarantee each CLI has a Default favorite and each CLI’s current selection is valid.
-    static func ensureAgentFavorites() {
-        var list = agentFavorites
+    static func ensureAgentFavorites(for target: AgentExecutionTarget? = nil) {
+        let t = target ?? agentSettingsTarget
+        var list = agentFavorites(for: t)
         var mutated = false
         for kind in AgentCLIKind.allCases {
             let builtin = AgentFavorite.builtInDefault(for: kind)
@@ -580,19 +715,7 @@ enum Preferences {
                 mutated = true
             }
         }
-        if mutated {
-            defaults.set((try? JSONEncoder().encode(list)) ?? Data(), forKey: "agentFavorites")
-        }
-
-        var map = currentFavoriteIDsByCLI
-        // One-time migrate legacy global current id onto the active CLI.
-        if let legacy = defaults.string(forKey: "currentAgentFavoriteID") {
-            if map[agentCLI.rawValue] == nil {
-                map[agentCLI.rawValue] = legacy
-            }
-            defaults.removeObject(forKey: "currentAgentFavoriteID")
-            mutated = true
-        }
+        var map = currentFavoriteIDs(for: t)
         for kind in AgentCLIKind.allCases {
             let forCLI = list.filter { $0.cliKind == kind }
             let raw = map[kind.rawValue]
@@ -603,37 +726,38 @@ enum Preferences {
                 mutated = true
             }
         }
-        if map != currentFavoriteIDsByCLI {
-            currentFavoriteIDsByCLI = map
-            mutated = true
-        }
         if mutated {
+            updateSettingsBucket(for: t) { bucket in
+                bucket.favorites = list
+                bucket.currentFavoriteIDs = map
+            }
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
 
     static func addAgentFavorite(_ favorite: AgentFavorite) {
-        ensureAgentFavorites()
-        var list = agentFavorites
+        let t = agentSettingsTarget
+        ensureAgentFavorites(for: t)
+        var list = agentFavorites(for: t)
         list.append(favorite)
-        agentFavorites = list
-        setCurrentAgentFavoriteID(favorite.id, for: favorite.cliKind)
+        updateSettingsBucket(for: t) { $0.favorites = list }
+        setCurrentAgentFavoriteID(favorite.id, for: favorite.cliKind, target: t)
     }
 
     @discardableResult
     static func removeAgentFavorite(_ id: UUID) -> Bool {
-        ensureAgentFavorites()
-        var list = agentFavorites
+        let t = agentSettingsTarget
+        ensureAgentFavorites(for: t)
+        var list = agentFavorites(for: t)
         guard let fav = list.first(where: { $0.id == id }) else { return false }
         let others = list.filter { $0.cliKind == fav.cliKind && $0.id != id }
-        // Always keep at least one favorite for the CLI (the built-in Default).
         if others.isEmpty { return false }
         if fav.isBuiltIn { return false }
         list.removeAll { $0.id == id }
-        defaults.set((try? JSONEncoder().encode(list)) ?? Data(), forKey: "agentFavorites")
-        if currentAgentFavoriteID(for: fav.cliKind) == id {
+        updateSettingsBucket(for: t) { $0.favorites = list }
+        if currentAgentFavoriteID(for: fav.cliKind, target: t) == id {
             let fallback = others.first(where: { $0.isBuiltIn })?.id ?? others[0].id
-            setCurrentAgentFavoriteID(fallback, for: fav.cliKind)
+            setCurrentAgentFavoriteID(fallback, for: fav.cliKind, target: t)
         } else {
             NotificationCenter.default.post(name: changed, object: nil)
         }
@@ -641,21 +765,22 @@ enum Preferences {
     }
 
     static func selectAgentFavorite(_ id: UUID) {
-        ensureAgentFavorites()
-        guard let fav = agentFavorites.first(where: { $0.id == id }),
-              fav.cliKind == agentCLI else { return }
-        setCurrentAgentFavoriteID(id, for: fav.cliKind)
+        let t = agentSettingsTarget
+        ensureAgentFavorites(for: t)
+        guard let fav = agentFavorites(for: t).first(where: { $0.id == id }),
+              fav.cliKind == agentCLI(for: t) else { return }
+        setCurrentAgentFavoriteID(id, for: fav.cliKind, target: t)
     }
 
-    /// Pick the favorite a new session should use — prefer the last session’s when still available.
-    static func favoriteForNewSession(cli: AgentCLIKind, lastSession: AgentSession?) -> AgentFavorite {
-        ensureAgentFavorites()
-        let available = favorites(for: cli)
+    static func favoriteForNewSession(cli: AgentCLIKind, lastSession: AgentSession?, target: AgentExecutionTarget? = nil) -> AgentFavorite {
+        let t = target ?? runtimeAgentTarget
+        ensureAgentFavorites(for: t)
+        let available = favorites(for: cli, target: t)
 
         if let last = lastSession, last.cliKind == cli {
             if let id = last.favoriteId,
                let match = available.first(where: { $0.id == id }) {
-                setCurrentAgentFavoriteID(match.id, for: cli)
+                setCurrentAgentFavoriteID(match.id, for: cli, target: t)
                 return match
             }
             let lastModel = last.modelId ?? ""
@@ -663,169 +788,277 @@ enum Preferences {
             if let match = available.first(where: {
                 $0.modelId == lastModel && ($0.effort ?? nil) == lastEffort
             }) {
-                setCurrentAgentFavoriteID(match.id, for: cli)
+                setCurrentAgentFavoriteID(match.id, for: cli, target: t)
                 return match
             }
         }
 
-        let currentID = currentAgentFavoriteID(for: cli)
+        let currentID = currentAgentFavoriteID(for: cli, target: t)
         let current = available.first(where: { $0.id == currentID })
             ?? available.first(where: { $0.isBuiltIn })
             ?? AgentFavorite.builtInDefault(for: cli)
-        setCurrentAgentFavoriteID(current.id, for: cli)
+        setCurrentAgentFavoriteID(current.id, for: cli, target: t)
         return current
     }
 
     static func updateAgentFavoriteTitle(_ id: UUID, title: String) {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        var list = agentFavorites
+        let t = agentSettingsTarget
+        var list = agentFavorites(for: t)
         guard let i = list.firstIndex(where: { $0.id == id }) else { return }
         list[i].title = trimmed
-        agentFavorites = list
+        updateSettingsBucket(for: t) { $0.favorites = list }
+        NotificationCenter.default.post(name: changed, object: nil)
     }
 
-    /// Folders available for agent sessions. One of them is the current working folder (`agentWorkspace`).
-    static var agentWorkspaces: [String] {
+    // MARK: - Workspaces (local + SSH)
+
+    static var agentWorkspaceRefs: [AgentWorkspaceRef] {
         get {
-            if let stored = defaults.stringArray(forKey: "agentWorkspaces") {
-                var seen = Set<String>()
-                let cleaned = stored
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty && seen.insert($0).inserted }
-                if !cleaned.isEmpty { return cleaned }
-            }
-            let legacy = (defaults.string(forKey: "agentWorkspace") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return legacy.isEmpty ? [] : [legacy]
+            migrateLegacyWorkspacesIfNeeded()
+            guard let data = defaults.data(forKey: "agentWorkspaceRefs") else { return [] }
+            return (try? JSONDecoder().decode([AgentWorkspaceRef].self, from: data)) ?? []
         }
         set {
+            writeWorkspaceRefs(newValue)
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    private static var didMigrateWorkspaces = false
+
+    private static func migrateLegacyWorkspacesIfNeeded() {
+        guard !didMigrateWorkspaces else { return }
+        didMigrateWorkspaces = true
+        if defaults.data(forKey: "agentWorkspaceRefs") != nil { return }
+        let legacyPaths: [String]
+        if let stored = defaults.stringArray(forKey: "agentWorkspaces") {
             var seen = Set<String>()
-            let cleaned = newValue
+            legacyPaths = stored
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && seen.insert($0).inserted }
-            defaults.set(cleaned, forKey: "agentWorkspaces")
-            let current = (defaults.string(forKey: "agentWorkspace") ?? "")
+        } else {
+            let legacy = (defaults.string(forKey: "agentWorkspace") ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if cleaned.isEmpty {
-                defaults.removeObject(forKey: "agentWorkspace")
-            } else if !cleaned.contains(current) {
-                defaults.set(cleaned[0], forKey: "agentWorkspace")
+            legacyPaths = legacy.isEmpty ? [] : [legacy]
+        }
+        let refs = legacyPaths.map { AgentWorkspaceRef.local($0) }
+        writeWorkspaceRefs(refs)
+        if let rootPath = defaults.string(forKey: "agentWorkspaceRoot"),
+           let match = refs.first(where: { $0.path == rootPath }) {
+            defaults.set(match.id.uuidString, forKey: "agentWorkspaceRootID")
+        } else if let first = refs.first {
+            defaults.set(first.id.uuidString, forKey: "agentWorkspaceRootID")
+        }
+        // Migrate worktree memory path→path into id→path
+        if let old = defaults.dictionary(forKey: "agentWorktreeByRoot") as? [String: String] {
+            var next: [String: String] = [:]
+            for (path, worktree) in old {
+                if let ref = refs.first(where: { $0.path == path }) {
+                    next[ref.id.uuidString] = worktree
+                }
             }
-            NotificationCenter.default.post(name: changed, object: nil)
+            defaults.set(next, forKey: "agentWorktreeByRootID")
         }
     }
 
-    /// Registered folder selected in the sessions workspace picker (always one of `agentWorkspaces`).
-    static var agentWorkspaceRoot: String {
-        get {
-            let folders = agentWorkspaces
-            let stored = (defaults.string(forKey: "agentWorkspaceRoot") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if folders.contains(stored) { return stored }
-            let active = (defaults.string(forKey: "agentWorkspace") ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if folders.contains(active) { return active }
-            return folders.first ?? ""
+    private static func writeWorkspaceRefs(_ refs: [AgentWorkspaceRef]) {
+        var seen = Set<String>()
+        let cleaned = refs.filter { ref in
+            let key = "\(ref.connectionID?.uuidString ?? "local")|\(ref.path)"
+            return !ref.path.isEmpty && seen.insert(key).inserted
         }
+        defaults.set((try? JSONEncoder().encode(cleaned)) ?? Data(), forKey: "agentWorkspaceRefs")
+        // Mirror path arrays for any leftover readers / reset.
+        defaults.set(cleaned.map(\.path), forKey: "agentWorkspaces")
+    }
+
+    /// Path-only list (legacy). Prefer `agentWorkspaceRefs` when connection matters.
+    static var agentWorkspaces: [String] {
+        get { agentWorkspaceRefs.map(\.path) }
+        set {
+            // Only used by reset/migration paths — treat as local folders.
+            let refs = newValue
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .map { AgentWorkspaceRef.local($0) }
+            agentWorkspaceRefs = refs
+        }
+    }
+
+    static var currentWorkspaceRef: AgentWorkspaceRef? {
+        let refs = agentWorkspaceRefs
+        if let raw = defaults.string(forKey: "agentWorkspaceRootID"),
+           let id = UUID(uuidString: raw),
+           let match = refs.first(where: { $0.id == id }) {
+            return match
+        }
+        return refs.first
+    }
+
+    static var agentWorkspaceConnectionID: UUID? {
+        currentWorkspaceRef?.connectionID
+    }
+
+    /// Registered folder selected in the sessions workspace picker.
+    static var agentWorkspaceRoot: String {
+        get { currentWorkspaceRef?.path ?? "" }
         set {
             let path = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !path.isEmpty, agentWorkspaces.contains(path) else { return }
-            defaults.set(path, forKey: "agentWorkspaceRoot")
-            let active = rememberedWorktree(forRoot: path) ?? path
-            defaults.set(active, forKey: "agentWorkspace")
-            NotificationCenter.default.post(name: changed, object: nil)
+            guard let ref = agentWorkspaceRefs.first(where: {
+                $0.path == path && $0.connectionID == currentWorkspaceRef?.connectionID
+            }) ?? agentWorkspaceRefs.first(where: { $0.path == path }) else { return }
+            selectAgentWorkspaceRef(ref.id)
         }
     }
 
     /// Active working directory for new agent sessions (registered root or a git worktree under it).
     static var agentWorkspace: String {
         get {
-            let folders = agentWorkspaces
             let active = (defaults.string(forKey: "agentWorkspace") ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !active.isEmpty {
-                if folders.contains(active) { return active }
-                // Worktree paths are allowed without being registered folders.
-                let root = (defaults.string(forKey: "agentWorkspaceRoot") ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if folders.contains(root) { return active }
-            }
-            return folders.first ?? ""
+            if !active.isEmpty { return active }
+            return agentWorkspaceRoot
         }
         set {
-            let path = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !path.isEmpty else { return }
-            var folders = agentWorkspaces
-            if !folders.contains(path) {
-                folders.append(path)
-                defaults.set(folders, forKey: "agentWorkspaces")
-                defaults.set(path, forKey: "agentWorkspaceRoot")
+            selectWorkspace(path: newValue, connectionID: currentWorkspaceRef?.connectionID)
+        }
+    }
+
+    /// Switch active folder (and machine) — used by notifications / session reveal.
+    /// Never invents a local ref for an SSH path.
+    static func selectWorkspace(path: String, connectionID: UUID?) {
+        let path = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+        if let ref = agentWorkspaceRefs.first(where: {
+            $0.connectionID == connectionID && ($0.path == path || path.hasPrefix($0.path + "/"))
+        }) {
+            // Set root + connection first so worktree memory keys the right machine.
+            defaults.set(ref.id.uuidString, forKey: "agentWorkspaceRootID")
+            defaults.set(ref.path, forKey: "agentWorkspaceRoot")
+            if path == ref.path {
+                let active = rememberedWorktree(forRootID: ref.id) ?? ref.path
+                defaults.set(active, forKey: "agentWorkspace")
+            } else {
+                rememberWorktree(path, forRootID: ref.id)
+                defaults.set(path, forKey: "agentWorkspace")
             }
-            defaults.set(path, forKey: "agentWorkspace")
+            NotificationCenter.default.post(name: changed, object: nil)
+            return
+        }
+        if let ref = agentWorkspaceRefs.first(where: { $0.path == path }) {
+            selectAgentWorkspaceRef(ref.id)
+            return
+        }
+        // Unknown path: auto-register only for local machines.
+        if connectionID == nil {
+            addAgentWorkspaceRef(.local(path))
+            return
+        }
+        defaults.set(path, forKey: "agentWorkspace")
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    static func addAgentWorkspace(_ path: String) {
+        addAgentWorkspaceRef(.local(path))
+    }
+
+    static func addAgentWorkspaceRef(_ ref: AgentWorkspaceRef) {
+        let trimmed = ref.path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var refs = agentWorkspaceRefs
+        if let existing = refs.first(where: { $0.connectionID == ref.connectionID && $0.path == trimmed }) {
+            selectAgentWorkspaceRef(existing.id)
+            return
+        }
+        var next = ref
+        next.path = trimmed
+        refs.append(next)
+        writeWorkspaceRefs(refs)
+        selectAgentWorkspaceRef(next.id)
+    }
+
+    static func removeAgentWorkspace(_ path: String) {
+        if let ref = agentWorkspaceRefs.first(where: { $0.path == path && $0.connectionID == nil })
+            ?? agentWorkspaceRefs.first(where: { $0.path == path }) {
+            removeAgentWorkspaceRef(ref.id)
+        }
+    }
+
+    static func removeAgentWorkspaceRef(_ id: UUID) {
+        clearRememberedWorktree(forRootID: id)
+        let refs = agentWorkspaceRefs.filter { $0.id != id }
+        writeWorkspaceRefs(refs)
+        if currentWorkspaceRef?.id == id || defaults.string(forKey: "agentWorkspaceRootID") == id.uuidString {
+            if let first = refs.first {
+                selectAgentWorkspaceRef(first.id)
+            } else {
+                defaults.removeObject(forKey: "agentWorkspaceRootID")
+                defaults.removeObject(forKey: "agentWorkspace")
+                defaults.removeObject(forKey: "agentWorkspaceRoot")
+                NotificationCenter.default.post(name: changed, object: nil)
+            }
+        } else {
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
 
-    static func addAgentWorkspace(_ path: String) {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        var folders = agentWorkspaces
-        if !folders.contains(trimmed) {
-            folders.append(trimmed)
-            agentWorkspaces = folders
-        }
-        selectAgentWorkspace(trimmed)
-    }
-
-    static func removeAgentWorkspace(_ path: String) {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        clearRememberedWorktree(forRoot: trimmed)
-        agentWorkspaces = agentWorkspaces.filter { $0 != trimmed }
-    }
-
-    /// Select a registered workspace root in the picker (restores last worktree for that root).
     static func selectAgentWorkspace(_ path: String) {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard agentWorkspaces.contains(trimmed) else { return }
-        agentWorkspaceRoot = trimmed
+        if let ref = agentWorkspaceRefs.first(where: { $0.path == path }) {
+            selectAgentWorkspaceRef(ref.id)
+        }
     }
 
-    /// Select a git worktree (or the main checkout path) under the current registered root.
+    static func selectAgentWorkspaceRef(_ id: UUID) {
+        guard let ref = agentWorkspaceRefs.first(where: { $0.id == id }) else { return }
+        defaults.set(ref.id.uuidString, forKey: "agentWorkspaceRootID")
+        defaults.set(ref.path, forKey: "agentWorkspaceRoot")
+        let active = rememberedWorktree(forRootID: ref.id) ?? ref.path
+        defaults.set(active, forKey: "agentWorkspace")
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
     static func selectAgentWorktree(_ path: String, root: String) {
         let worktree = path.trimmingCharacters(in: .whitespacesAndNewlines)
         let rootPath = root.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !worktree.isEmpty, !rootPath.isEmpty, agentWorkspaces.contains(rootPath) else { return }
-        rememberWorktree(worktree, forRoot: rootPath)
-        defaults.set(rootPath, forKey: "agentWorkspaceRoot")
+        guard !worktree.isEmpty, !rootPath.isEmpty else { return }
+        let rootRef = agentWorkspaceRefs.first(where: {
+            $0.path == rootPath && $0.connectionID == currentWorkspaceRef?.connectionID
+        }) ?? agentWorkspaceRefs.first(where: { $0.path == rootPath })
+        guard let rootRef else { return }
+        rememberWorktree(worktree, forRootID: rootRef.id)
+        defaults.set(rootRef.id.uuidString, forKey: "agentWorkspaceRootID")
+        defaults.set(rootRef.path, forKey: "agentWorkspaceRoot")
         defaults.set(worktree, forKey: "agentWorkspace")
         NotificationCenter.default.post(name: changed, object: nil)
     }
 
     /// Branch name for the active working directory (empty when not a git repo).
     static var agentGitBranch: String {
-        GitWorkspace.currentBranch(in: agentWorkspace) ?? ""
+        let connection: SSHConnection? = {
+            guard let id = agentWorkspaceConnectionID else { return nil }
+            return sshConnection(id: id)
+        }()
+        return GitWorkspace.currentBranch(in: agentWorkspace, connection: connection) ?? ""
     }
 
-    private static func worktreeMemoryKey() -> String { "agentWorktreeByRoot" }
-
-    private static func rememberedWorktree(forRoot root: String) -> String? {
-        let map = defaults.dictionary(forKey: worktreeMemoryKey()) as? [String: String] ?? [:]
-        let value = map[root]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    private static func rememberedWorktree(forRootID id: UUID) -> String? {
+        let map = defaults.dictionary(forKey: "agentWorktreeByRootID") as? [String: String] ?? [:]
+        let value = map[id.uuidString]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return value.isEmpty ? nil : value
     }
 
-    private static func rememberWorktree(_ path: String, forRoot root: String) {
-        var map = defaults.dictionary(forKey: worktreeMemoryKey()) as? [String: String] ?? [:]
-        map[root] = path
-        defaults.set(map, forKey: worktreeMemoryKey())
+    private static func rememberWorktree(_ path: String, forRootID id: UUID) {
+        var map = defaults.dictionary(forKey: "agentWorktreeByRootID") as? [String: String] ?? [:]
+        map[id.uuidString] = path
+        defaults.set(map, forKey: "agentWorktreeByRootID")
     }
 
-    private static func clearRememberedWorktree(forRoot root: String) {
-        var map = defaults.dictionary(forKey: worktreeMemoryKey()) as? [String: String] ?? [:]
-        map.removeValue(forKey: root)
-        defaults.set(map, forKey: worktreeMemoryKey())
+    private static func clearRememberedWorktree(forRootID id: UUID) {
+        var map = defaults.dictionary(forKey: "agentWorktreeByRootID") as? [String: String] ?? [:]
+        map.removeValue(forKey: id.uuidString)
+        defaults.set(map, forKey: "agentWorktreeByRootID")
     }
 
     static var screenshotsFolder: String {
@@ -951,13 +1184,18 @@ enum Preferences {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
                     "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI",
-                    "agentPermissionModes",
+                    "agentPermissionModes", "agentSettingsByTarget", "agentSettingsTarget",
+                    "sshConnections",
                     "agentWorkspace", "agentWorkspaceRoot", "agentWorkspaces", "agentWorktreeByRoot",
+                    "agentWorkspaceRefs", "agentWorkspaceRootID", "agentWorktreeByRootID",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY",
                     "sessionsPanelExpandedOriginX", "sessionsPanelExpandedOriginY"] {
             defaults.removeObject(forKey: key)
         }
+        didMigrateAgentSettings = false
+        didMigrateWorkspaces = false
+        SSHClient.closeAllMasters()
         applyTheme()
         NotificationCenter.default.post(name: changed, object: nil)
     }

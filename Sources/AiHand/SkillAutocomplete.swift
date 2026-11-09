@@ -11,12 +11,14 @@ final class SkillAutocompleteController: ObservableObject {
     private var queryRange: Range<String.Index>?
     private var keyMonitor: Any?
     private var workspace: String = ""
+    private var connectionID: UUID?
     var readText: () -> String = { "" }
     var writeText: (String) -> Void = { _ in }
 
-    func configure(workspace: String) {
-        if self.workspace != workspace {
+    func configure(workspace: String, connectionID: UUID? = Preferences.agentWorkspaceConnectionID) {
+        if self.workspace != workspace || self.connectionID != connectionID {
             self.workspace = workspace
+            self.connectionID = connectionID
             refreshSkills()
         } else if skills.isEmpty {
             refreshSkills()
@@ -24,7 +26,10 @@ final class SkillAutocompleteController: ObservableObject {
     }
 
     func refreshSkills() {
-        skills = SkillCatalog.skills(workspace: workspace.isEmpty ? nil : workspace)
+        skills = SkillCatalog.skills(
+            workspace: workspace.isEmpty ? nil : workspace,
+            connectionID: connectionID
+        )
     }
 
     func update(text: String) {

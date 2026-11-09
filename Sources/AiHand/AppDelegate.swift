@@ -707,8 +707,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             overlay.exit()
         }
         let path = session.workspace.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !path.isEmpty, !SessionStore.sameWorkspace(path, Preferences.agentWorkspace) {
-            Preferences.agentWorkspace = path
+        if !path.isEmpty {
+            let samePath = SessionStore.sameWorkspace(path, Preferences.agentWorkspace)
+            let sameHost = SessionStore.sameConnection(session.connectionID, Preferences.agentWorkspaceConnectionID)
+            if !samePath || !sameHost {
+                Preferences.selectWorkspace(path: path, connectionID: session.connectionID)
+            }
         }
         sessionsPanel.openChat(for: id)
     }

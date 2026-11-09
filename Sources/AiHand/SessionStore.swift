@@ -61,6 +61,10 @@ final class AgentSession: ObservableObject, Identifiable {
     let workspace: String
     /// Git branch (or worktree branch) when the session was created; empty for non-git folders.
     let gitBranch: String
+    /// SSH machine for this workspace (`nil` = this Mac).
+    let connectionID: UUID?
+    /// Denormalized host label for list badges (`user@host`).
+    let connectionLabel: String?
 
     /// Favorite used for this session (updated when the composer picker changes).
     @Published var favoriteId: UUID?
@@ -78,19 +82,23 @@ final class AgentSession: ObservableObject, Identifiable {
     /// Pending follow-ups; not persisted across relaunch.
     @Published var queuedFollowUps: [QueuedFollowUp] = []
 
+    var executionTarget: AgentExecutionTarget {
+        AgentExecutionTarget(connectionID: connectionID)
+    }
+
     /// Apply a favorite to this session and mark it Current for this CLI.
     func applyFavorite(_ fav: AgentFavorite) {
         guard fav.cliKind == cliKind else { return }
         favoriteId = fav.id
         modelId = fav.usesCLIDefaultModel ? nil : fav.modelId
         effort = fav.effort.flatMap { $0.isEmpty ? nil : $0 }
-        Preferences.setCurrentAgentFavoriteID(fav.id, for: cliKind)
+        Preferences.setCurrentAgentFavoriteID(fav.id, for: cliKind, target: executionTarget)
     }
 
     /// Cycle to the next favorite for this session’s CLI (wraps).
     @discardableResult
     func cycleFavorite() -> AgentFavorite? {
-        let favs = Preferences.favorites(for: cliKind)
+        let favs = Preferences.favorites(for: cliKind, target: executionTarget)
         guard !favs.isEmpty else { return nil }
         let idx = favs.firstIndex(where: { $0.id == favoriteId }) ?? -1
         let next = favs[(idx + 1) % favs.count]
@@ -106,7 +114,9 @@ final class AgentSession: ObservableObject, Identifiable {
         screenshotPath: String?,
         workspace: String = Preferences.agentWorkspace,
         gitBranch: String = Preferences.agentGitBranch,
-        cliKind: AgentCLIKind = Preferences.agentCLI,
+        connectionID: UUID? = Preferences.agentWorkspaceConnectionID,
+        connectionLabel: String? = nil,
+        cliKind: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget),
         favoriteId: UUID? = nil,
         modelId: String? = nil,
         effort: String? = nil,
@@ -120,6 +130,14 @@ final class AgentSession: ObservableObject, Identifiable {
         self.screenshotPath = screenshotPath
         self.workspace = SessionStore.normalizedWorkspace(workspace)
         self.gitBranch = gitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.connectionID = connectionID
+        if let connectionLabel, !connectionLabel.isEmpty {
+            self.connectionLabel = connectionLabel
+        } else if let connectionID {
+            self.connectionLabel = Preferences.sshConnection(id: connectionID)?.hostname
+        } else {
+            self.connectionLabel = nil
+        }
         self.cliKind = cliKind
         self.favoriteId = favoriteId
         self.modelId = modelId.flatMap { $0.isEmpty ? nil : $0 }
@@ -152,6 +170,9 @@ final class AgentSession: ObservableObject, Identifiable {
             migratedWorkspace.isEmpty ? Preferences.agentWorkspace : migratedWorkspace
         )
         self.gitBranch = (snapshot.gitBranch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.connectionID = snapshot.connectionID
+        self.connectionLabel = snapshot.connectionLabel
+            ?? snapshot.connectionID.flatMap { Preferences.sshConnection(id: $0)?.hostname }
         self.favoriteId = snapshot.favoriteId
         self.modelId = snapshot.modelId.flatMap { $0.isEmpty ? nil : $0 }
         self.effort = snapshot.effort.flatMap { $0.isEmpty ? nil : $0 }
@@ -190,6 +211,8 @@ final class AgentSession: ObservableObject, Identifiable {
             cliKind: cliKind,
             workspace: workspace,
             gitBranch: gitBranch.isEmpty ? nil : gitBranch,
+            connectionID: connectionID,
+            connectionLabel: connectionLabel,
             favoriteId: favoriteId,
             modelId: modelId,
             effort: effort
@@ -221,6 +244,9 @@ final class SessionStore: ObservableObject {
         var workspace: String?
         /// Optional; missing values match any branch for that workspace path.
         var gitBranch: String?
+        /// Optional; missing means local (this Mac).
+        var connectionID: UUID?
+        var connectionLabel: String?
         var favoriteId: UUID?
         var modelId: String?
         var effort: String?
@@ -236,12 +262,16 @@ final class SessionStore: ObservableObject {
     @Published private(set) var currentWorkspace: String = ""
     /// Registered folder selected in the workspace picker.
     @Published private(set) var workspaceRoot: String = ""
+    /// SSH connection for the current workspace (`nil` = local).
+    @Published private(set) var currentConnectionID: UUID?
     /// Git branch for `currentWorkspace` (empty when not a repo).
     @Published private(set) var currentGitBranch: String = ""
     /// Worktrees for the current registered root; nil when the root is not a git repo.
     @Published private(set) var gitRepo: GitRepoInfo?
     /// Folders from Settings — kept in sync so the panel picker refreshes.
     @Published private(set) var workspaceFolders: [String] = []
+    /// Full workspace refs (local + SSH) for the panel picker.
+    @Published private(set) var workspaceRefs: [AgentWorkspaceRef] = []
     @Published var selectedSessionID: UUID?
     private var bags: [UUID: AnyCancellable] = [:]
     private var prefsObserver: Any?
@@ -262,8 +292,13 @@ final class SessionStore: ObservableObject {
     }
 
     func matchesCurrentScope(_ session: AgentSession) -> Bool {
-        Self.sameWorkspace(session.workspace, currentWorkspace)
+        Self.sameConnection(session.connectionID, currentConnectionID)
+            && Self.sameWorkspace(session.workspace, currentWorkspace)
             && Self.sameGitBranch(session.gitBranch, currentGitBranch)
+    }
+
+    static func sameConnection(_ a: UUID?, _ b: UUID?) -> Bool {
+        a == b
     }
 
     static func sameGitBranch(_ a: String, _ b: String) -> Bool {
@@ -289,8 +324,11 @@ final class SessionStore: ObservableObject {
     }
 
     /// In-progress (working/waiting) and finished counts for a workspace path.
-    func sessionCounts(for workspace: String) -> (inProgress: Int, succeeded: Int) {
-        let list = allSessions.filter { Self.sameWorkspace($0.workspace, workspace) }
+    func sessionCounts(for workspace: String, connectionID: UUID? = nil) -> (inProgress: Int, succeeded: Int) {
+        let list = allSessions.filter {
+            Self.sameConnection($0.connectionID, connectionID)
+                && Self.sameWorkspace($0.workspace, workspace)
+        }
         let inProgress = list.filter { $0.status == .working || $0.status == .waiting }.count
         let succeeded = list.filter { $0.status == .finished }.count
         return (inProgress, succeeded)
@@ -328,11 +366,13 @@ final class SessionStore: ObservableObject {
     /// Re-filter the panel when Settings changes folders or the current working folder.
     func syncFromPreferences(clearSelectionIfNeeded: Bool = true) {
         // Keep Settings’ paths as-is so selectAgentWorkspace can match them.
-        let folders = Preferences.agentWorkspaces
+        let refs = Preferences.agentWorkspaceRefs
+        let folders = refs.map(\.path)
         let nextRoot = Self.normalizedWorkspace(Preferences.agentWorkspaceRoot)
         let next = Self.normalizedWorkspace(Preferences.agentWorkspace)
-        let foldersChanged = folders != workspaceFolders
-        let rootChanged = nextRoot != workspaceRoot
+        let nextConnection = Preferences.agentWorkspaceConnectionID
+        let foldersChanged = folders != workspaceFolders || refs != workspaceRefs
+        let rootChanged = nextRoot != workspaceRoot || nextConnection != currentConnectionID
         let currentChanged = next != currentWorkspace
         guard foldersChanged || rootChanged || currentChanged else {
             scheduleGitRefresh(forRoot: nextRoot.isEmpty ? next : nextRoot)
@@ -340,9 +380,11 @@ final class SessionStore: ObservableObject {
         }
         if foldersChanged {
             workspaceFolders = folders
+            workspaceRefs = refs
         }
         if rootChanged {
             workspaceRoot = nextRoot
+            currentConnectionID = nextConnection
         }
         if currentChanged {
             currentWorkspace = next
@@ -407,12 +449,18 @@ final class SessionStore: ObservableObject {
 
     /// Must be called on `gitProbeQueue` so the in-flight flags stay consistent.
     private func runGitProbe(for key: String) {
-        let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key)
+        let connection: SSHConnection? = {
+            // Capture connection for the root being probed (main-thread prefs are OK here;
+            // this block runs on gitProbeQueue after startGitProbe was scheduled from main).
+            let id = Preferences.agentWorkspaceConnectionID
+            return id.flatMap { Preferences.sshConnection(id: $0) }
+        }()
+        let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key, connection: connection)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // Apply only if this root is still the one being shown (the user may have switched).
             if key == self.probedRootKey {
-                self.applyGitInfo(info, activePath: self.currentWorkspace)
+                self.applyGitInfo(info, activePath: self.currentWorkspace, connection: connection)
             }
             self.gitProbeQueue.async { [weak self] in
                 guard let self else { return }
@@ -428,7 +476,7 @@ final class SessionStore: ObservableObject {
         Self.normalizedWorkspace(workspaceRoot.isEmpty ? currentWorkspace : workspaceRoot)
     }
 
-    private func applyGitInfo(_ info: GitRepoInfo?, activePath: String) {
+    private func applyGitInfo(_ info: GitRepoInfo?, activePath: String, connection: SSHConnection?) {
         let branch: String
         if let entry = info?.entry(forPath: activePath) {
             branch = entry.branch
@@ -437,7 +485,7 @@ final class SessionStore: ObservableObject {
         } else if info == nil {
             branch = ""
         } else {
-            branch = GitWorkspace.currentBranch(in: activePath) ?? ""
+            branch = GitWorkspace.currentBranch(in: activePath, connection: connection) ?? ""
         }
         // Avoid redraw churn when polling finds nothing new.
         guard gitRepo != info || currentGitBranch != branch else { return }

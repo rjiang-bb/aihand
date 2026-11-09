@@ -23,24 +23,15 @@ final class AgentSessionRunner {
 
     func start(session: AgentSession, workspace: String, prompt: String, imagePath: String?) {
         self.session = session
-        guard let exe = cli.resolveExecutable() else {
-            DispatchQueue.main.async {
-                let msg = "Couldn’t find `\(session.cliKind.commandName)`. \(session.cliKind.installHint)"
-                session.status = .failed
-                session.errorMessage = msg
-                session.preview = msg
-                session.messages.append(AgentMessage(kind: .system, text: msg))
-            }
-            return
+        prepareAndLaunch(session: session, workspace: workspace, imagePath: imagePath) { remoteImage in
+            self.cli.startArguments(
+                workspace: workspace,
+                prompt: prompt,
+                imagePath: remoteImage,
+                model: session.modelId,
+                effort: session.effort
+            )
         }
-        let args = cli.startArguments(
-            workspace: workspace,
-            prompt: prompt,
-            imagePath: imagePath,
-            model: session.modelId,
-            effort: session.effort
-        )
-        launch(exe: exe, args: args, session: session)
     }
 
     func followUp(session: AgentSession, workspace: String, prompt: String, imagePath: String? = nil) {
@@ -50,15 +41,6 @@ final class AgentSessionRunner {
                 session.status = .waiting
                 session.errorMessage = "No chat id yet — wait for the first turn to finish, then try again."
                 session.messages.append(AgentMessage(kind: .system, text: session.errorMessage ?? ""))
-            }
-            return
-        }
-        guard let exe = cli.resolveExecutable() else {
-            DispatchQueue.main.async {
-                let msg = "Couldn’t find `\(session.cliKind.commandName)`. \(session.cliKind.installHint)"
-                session.status = .failed
-                session.errorMessage = msg
-                session.messages.append(AgentMessage(kind: .system, text: msg))
             }
             return
         }
@@ -74,15 +56,104 @@ final class AgentSessionRunner {
         } else {
             DispatchQueue.main.sync(execute: appendUser)
         }
-        let args = cli.followUpArguments(
-            workspace: workspace,
-            chatId: chatId,
-            prompt: prompt,
-            imagePath: imagePath,
-            model: session.modelId,
-            effort: session.effort
-        )
-        launch(exe: exe, args: args, session: session)
+        prepareAndLaunch(session: session, workspace: workspace, imagePath: imagePath) { remoteImage in
+            self.cli.followUpArguments(
+                workspace: workspace,
+                chatId: chatId,
+                prompt: prompt,
+                imagePath: remoteImage,
+                model: session.modelId,
+                effort: session.effort
+            )
+        }
+    }
+
+    /// Resolve local/remote executable, optionally upload media, then launch.
+    private func prepareAndLaunch(
+        session: AgentSession,
+        workspace: String,
+        imagePath: String?,
+        makeArgs: @escaping (String?) -> [String]
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            if let connectionID = session.connectionID {
+                guard let connection = Preferences.sshConnection(id: connectionID) else {
+                    self.failMissingConnection(session: session)
+                    return
+                }
+                guard let exe = SSHClient.which(connection, session.cliKind.commandName) else {
+                    self.failMissingCLI(session: session)
+                    return
+                }
+                var remoteImage: String? = nil
+                if let imagePath, FileManager.default.fileExists(atPath: imagePath) {
+                    let ext = (imagePath as NSString).pathExtension
+                    let remote = "/tmp/aihand-\(session.id.uuidString).\(ext.isEmpty ? "png" : ext)"
+                    let upload = SSHClient.upload(connection: connection, localPath: imagePath, remotePath: remote)
+                    if upload.ok {
+                        remoteImage = remote
+                    } else {
+                        Log.write("ssh upload failed: \(upload.stderr)")
+                        self.failUpload(session: session, host: connection.hostname, detail: upload.stderr)
+                        return
+                    }
+                }
+                let args = AgentCLIRuntime.withPermissionTarget(session.executionTarget) {
+                    makeArgs(remoteImage)
+                }
+                self.launchRemote(
+                    connection: connection,
+                    exe: exe,
+                    args: args,
+                    workspace: workspace,
+                    session: session
+                )
+                return
+            }
+
+            guard let exe = self.cli.resolveExecutable() else {
+                self.failMissingCLI(session: session)
+                return
+            }
+            let args = AgentCLIRuntime.withPermissionTarget(session.executionTarget) {
+                makeArgs(imagePath)
+            }
+            self.launch(exe: exe, args: args, session: session)
+        }
+    }
+
+    private func failMissingCLI(session: AgentSession) {
+        DispatchQueue.main.async {
+            let msg = "Couldn’t find `\(session.cliKind.commandName)`. \(session.cliKind.installHint)"
+            session.status = .failed
+            session.errorMessage = msg
+            session.preview = msg
+            session.messages.append(AgentMessage(kind: .system, text: msg))
+        }
+    }
+
+    private func failMissingConnection(session: AgentSession) {
+        DispatchQueue.main.async {
+            let msg = "SSH connection for this session is gone. Re-add it under Settings → Connections."
+            session.status = .failed
+            session.errorMessage = msg
+            session.preview = msg
+            session.messages.append(AgentMessage(kind: .system, text: msg))
+        }
+    }
+
+    private func failUpload(session: AgentSession, host: String, detail: String) {
+        DispatchQueue.main.async {
+            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            let msg = trimmed.isEmpty
+                ? "Couldn’t upload the screenshot to \(host)."
+                : "Couldn’t upload the screenshot to \(host): \(trimmed)"
+            session.status = .failed
+            session.errorMessage = msg
+            session.preview = msg
+            session.messages.append(AgentMessage(kind: .system, text: msg))
+        }
     }
 
     func stop() {
@@ -105,12 +176,7 @@ final class AgentSessionRunner {
 
     private func launch(exe: String, args: [String], session: AgentSession) {
         stopQuietly()
-        bufferLock.lock()
-        stdoutBuffer = Data()
-        stderrText = ""
-        bufferLock.unlock()
-        currentAssistantID = nil
-        seenToolUseIDs.removeAll()
+        resetBuffers()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
@@ -124,6 +190,43 @@ final class AgentSessionRunner {
         let cwd = session.workspace.isEmpty ? NSHomeDirectory() : session.workspace
         process.currentDirectoryURL = URL(fileURLWithPath: cwd)
 
+        attachPipes(to: process)
+        finishLaunch(process: process, session: session, logArgs: args)
+    }
+
+    private func launchRemote(
+        connection: SSHConnection,
+        exe: String,
+        args: [String],
+        workspace: String,
+        session: AgentSession
+    ) {
+        stopQuietly()
+        resetBuffers()
+
+        // Remote argv: executable + CLI args. Working directory is applied via bash -lc cd.
+        var remoteArgv = [exe]
+        remoteArgv.append(contentsOf: args)
+        let built = SSHClient.makeRemoteProcess(
+            connection: connection,
+            remoteArgv: remoteArgv,
+            remoteWorkingDirectory: workspace.isEmpty ? nil : workspace
+        )
+        let process = built.process
+        attachPipes(to: process)
+        finishLaunch(process: process, session: session, logArgs: built.sshArgv)
+    }
+
+    private func resetBuffers() {
+        bufferLock.lock()
+        stdoutBuffer = Data()
+        stderrText = ""
+        bufferLock.unlock()
+        currentAssistantID = nil
+        seenToolUseIDs.removeAll()
+    }
+
+    private func attachPipes(to process: Process) {
         let out = Pipe()
         let err = Pipe()
         stdout = out
@@ -150,7 +253,6 @@ final class AgentSessionRunner {
             Log.write("agent stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
             self?.bufferLock.lock()
             self?.stderrText.append(text)
-            // Cap so a noisy CLI cannot grow unbounded.
             if let self, self.stderrText.count > 8_000 {
                 self.stderrText = String(self.stderrText.suffix(6_000))
             }
@@ -163,14 +265,16 @@ final class AgentSessionRunner {
                 self?.handleTermination(status: proc.terminationStatus)
             }
         }
+    }
 
+    private func finishLaunch(process: Process, session: AgentSession, logArgs: [String]) {
         self.process = process
         DispatchQueue.main.async {
             session.status = .working
         }
         do {
             try process.run()
-            Log.write("agent launched pid=\(process.processIdentifier) args=\(args.joined(separator: " "))")
+            Log.write("agent launched pid=\(process.processIdentifier) args=\(logArgs.joined(separator: " "))")
         } catch {
             clearPipeHandlers()
             DispatchQueue.main.async {
@@ -631,15 +735,17 @@ final class AgentSessionManager {
         } else {
             title = String(trimmed.prefix(48))
         }
-        let cliKind = Preferences.agentCLI
+        let target = Preferences.runtimeAgentTarget
+        let cliKind = Preferences.agentCLI(for: target)
         // Prefer the latest session that used this CLI (list is workspace-scoped, mixed CLIs).
         let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
-        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI)
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI, target: target)
         let session = AgentSession(
             title: title,
             prompt: prompt,
             screenshotPath: screenshotPath,
             workspace: workspace,
+            connectionID: Preferences.agentWorkspaceConnectionID,
             cliKind: cliKind,
             favoriteId: favorite.id,
             modelId: favorite.usesCLIDefaultModel ? nil : favorite.modelId,
@@ -656,14 +762,16 @@ final class AgentSessionManager {
     func createBlankSession() -> AgentSession? {
         let workspace = Preferences.agentWorkspace
         guard !workspace.isEmpty else { return nil }
-        let cliKind = Preferences.agentCLI
+        let target = Preferences.runtimeAgentTarget
+        let cliKind = Preferences.agentCLI(for: target)
         let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
-        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI)
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI, target: target)
         let session = AgentSession(
             title: "New session",
             prompt: "",
             screenshotPath: nil,
             workspace: workspace,
+            connectionID: Preferences.agentWorkspaceConnectionID,
             cliKind: cliKind,
             favoriteId: favorite.id,
             modelId: favorite.usesCLIDefaultModel ? nil : favorite.modelId,

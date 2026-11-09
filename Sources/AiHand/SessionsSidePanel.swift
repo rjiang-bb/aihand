@@ -394,13 +394,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         persistListPlacement()
     }
 
-    private func workspaceKey(_ path: String) -> String {
-        SessionStore.normalizedWorkspace(path)
+    private func workspaceKey(_ path: String, connectionID: UUID? = nil) -> String {
+        let conn = connectionID?.uuidString ?? "local"
+        return "\(conn)|\(SessionStore.normalizedWorkspace(path))"
     }
 
     private func rememberOpenChatForCurrentWorkspace() {
-        let key = workspaceKey(store.currentWorkspace)
-        guard !key.isEmpty else { return }
+        let key = workspaceKey(store.currentWorkspace, connectionID: store.currentConnectionID)
+        guard !key.hasSuffix("|") else { return }
         if let id = selection.selectedID {
             openChatByWorkspace[key] = id
         } else {
@@ -432,14 +433,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     /// Leaving workspace/worktree A remembers its open chat; entering B restores B’s if any.
     private func workspaceDidChange(to next: String) {
-        let nextKey = workspaceKey(next)
+        let nextKey = workspaceKey(next, connectionID: store.currentConnectionID)
         let previousKey = trackedWorkspaceKey
         guard nextKey != previousKey else { return }
 
         if !previousKey.isEmpty {
             if let id = selection.selectedID,
                let session = store.allSessions.first(where: { $0.id == id }),
-               SessionStore.sameWorkspace(session.workspace, previousKey) {
+               workspaceKey(session.workspace, connectionID: session.connectionID) == previousKey {
                 openChatByWorkspace[previousKey] = id
             } else if selection.selectedID == nil {
                 openChatByWorkspace.removeValue(forKey: previousKey)
@@ -449,7 +450,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
         if let id = openChatByWorkspace[nextKey],
            store.allSessions.contains(where: {
-               $0.id == id && SessionStore.sameWorkspace($0.workspace, nextKey)
+               $0.id == id && workspaceKey($0.workspace, connectionID: $0.connectionID) == nextKey
            }) {
             restoreOpenChat(for: id)
             return
@@ -893,14 +894,17 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     private func selectWorkspace(at index: Int) {
-        guard store.workspaceFolders.indices.contains(index) else { return }
+        let refs = store.workspaceRefs.isEmpty
+            ? Preferences.agentWorkspaceRefs
+            : store.workspaceRefs
+        guard refs.indices.contains(index) else { return }
         // Keep the list open while ⌥ is held; only collapse a click-pinned menu.
         if !selection.showWorkspacePicker {
             selection.closeWorkspacePicker()
             lastLaidOutListHeight = -1
             relayoutForSessionCountIfNeeded(animateFrame: false)
         }
-        Preferences.selectAgentWorkspace(store.workspaceFolders[index])
+        Preferences.selectAgentWorkspaceRef(refs[index].id)
     }
 
     private func selectWorktree(at index: Int) {
@@ -1480,8 +1484,9 @@ private struct SessionsSidePanelView: View {
             VStack(spacing: 6) {
                 WorkspacePicker(
                     store: store,
-                    folders: store.workspaceFolders,
-                    current: store.workspaceRoot.isEmpty ? store.currentWorkspace : store.workspaceRoot,
+                    refs: store.workspaceRefs.isEmpty ? Preferences.agentWorkspaceRefs : store.workspaceRefs,
+                    currentRootID: Preferences.currentWorkspaceRef?.id,
+                    currentPath: store.workspaceRoot.isEmpty ? store.currentWorkspace : store.workspaceRoot,
                     isOpen: selection.workspacePickerExpanded,
                     pinned: Binding(
                         get: { selection.pinnedWorkspacePicker },
@@ -1490,12 +1495,12 @@ private struct SessionsSidePanelView: View {
                             if $0 { selection.closeGitPicker() }
                         }
                     ),
-                    onSelect: {
+                    onSelect: { ref in
                         // Stay open while ⌥ is held; collapse only a click-pinned menu.
                         if !selection.showWorkspacePicker {
                             selection.closeWorkspacePicker()
                         }
-                        Preferences.selectAgentWorkspace($0)
+                        Preferences.selectAgentWorkspaceRef(ref.id)
                     },
                     onManage: {
                         // Leave the picker (Settings) even if ⌥ is still down.
@@ -1772,34 +1777,53 @@ private struct SessionsEmptyStateCard: View {
 
 private struct WorkspacePicker: View {
     @ObservedObject var store: SessionStore
-    let folders: [String]
-    let current: String
+    let refs: [AgentWorkspaceRef]
+    let currentRootID: UUID?
+    let currentPath: String
     var isOpen: Bool
     @Binding var pinned: Bool
-    var onSelect: (String) -> Void
+    var onSelect: (AgentWorkspaceRef) -> Void
     var onManage: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
 
     private var fg: Color { colorScheme == .dark ? .white : .black }
 
+    private var currentRef: AgentWorkspaceRef? {
+        if let currentRootID {
+            return refs.first { $0.id == currentRootID }
+        }
+        return refs.first { SessionStore.sameWorkspace($0.path, currentPath) }
+    }
+
     private var title: String {
-        if current.isEmpty { return "No folder" }
-        return URL(fileURLWithPath: current).lastPathComponent
+        guard let currentRef else { return currentPath.isEmpty ? "No folder" : URL(fileURLWithPath: currentPath).lastPathComponent }
+        return currentRef.displayName
+    }
+
+    private var subtitle: String {
+        if let currentRef {
+            if let id = currentRef.connectionID,
+               let label = Preferences.sshConnection(id: id)?.hostname {
+                return "\(label):\(currentRef.path)"
+            }
+            return currentRef.path
+        }
+        return currentPath.isEmpty ? "Choose a working folder" : currentPath
     }
 
     var body: some View {
         // Expand in-flow inside one card — pushes sessions down; no floating overlay.
         VStack(spacing: 0) {
             Button {
-                if folders.isEmpty {
+                if refs.isEmpty {
                     onManage()
                 } else {
                     pinned.toggle()
                 }
             } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: "folder.fill")
+                    Image(systemName: currentRef?.connectionID == nil ? "folder.fill" : "network")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
                         .frame(width: 30, height: 30)
@@ -1809,7 +1833,7 @@ private struct WorkspacePicker: View {
                             .foregroundStyle(fg)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        Text(current.isEmpty ? "Choose a working folder" : current)
+                        Text(subtitle)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(fg.opacity(0.55))
                             .lineLimit(1)
@@ -1838,19 +1862,21 @@ private struct WorkspacePicker: View {
                     .frame(height: 1)
                     .padding(.horizontal, 12)
 
-                if folders.isEmpty {
+                if refs.isEmpty {
                     WorkspacePickerActionRow(title: "Add folders…", fg: fg, onSelect: onManage)
                 } else {
-                    ForEach(Array(folders.enumerated()), id: \.element) { index, path in
+                    ForEach(Array(refs.enumerated()), id: \.element.id) { index, ref in
                         WorkspacePickerRow(
-                            path: path,
+                            path: ref.path,
+                            hostLabel: ref.connectionID.flatMap { Preferences.sshConnection(id: $0)?.hostname },
                             shortcutIndex: index + 1,
-                            isCurrent: SessionStore.sameWorkspace(path, current),
-                            counts: store.sessionCounts(for: path),
+                            isCurrent: ref.id == currentRootID
+                                || (currentRootID == nil && SessionStore.sameWorkspace(ref.path, currentPath)),
+                            counts: store.sessionCounts(for: ref.path, connectionID: ref.connectionID),
                             fg: fg,
-                            onSelect: { onSelect(path) }
+                            onSelect: { onSelect(ref) }
                         )
-                        if index < folders.count - 1 {
+                        if index < refs.count - 1 {
                             Rectangle()
                                 .fill(Color.primary.opacity(0.07))
                                 .frame(height: 1)
@@ -2211,6 +2237,7 @@ private struct GitWorktreeRow: View {
 
 private struct WorkspacePickerRow: View {
     let path: String
+    var hostLabel: String? = nil
     let shortcutIndex: Int
     let isCurrent: Bool
     let counts: (inProgress: Int, succeeded: Int)
@@ -2234,6 +2261,14 @@ private struct WorkspacePickerRow: View {
                             .foregroundStyle(fg)
                             .lineLimit(1)
                             .truncationMode(.middle)
+                        if let hostLabel {
+                            Text(hostLabel)
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color(red: 0.35, green: 0.72, blue: 0.78))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(Capsule().fill(Color(red: 0.35, green: 0.72, blue: 0.78).opacity(0.18)))
+                        }
                         sessionCounts
                         Spacer(minLength: 4)
                     }
@@ -2592,6 +2627,14 @@ private struct SessionCardView: View {
                                 .font(.system(size: 14, weight: isSelected ? .bold : .semibold))
                                 .foregroundStyle(fg)
                                 .lineLimit(1)
+                            if let label = session.connectionLabel, !label.isEmpty {
+                                Text(label)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Color(red: 0.35, green: 0.72, blue: 0.78))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .background(Capsule().fill(Color(red: 0.35, green: 0.72, blue: 0.78).opacity(0.18)))
+                            }
                             Spacer(minLength: 4)
                             Text(relativeTime(session.createdAt))
                                 .font(.system(size: 12, weight: .medium))
