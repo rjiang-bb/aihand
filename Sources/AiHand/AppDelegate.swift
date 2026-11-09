@@ -324,6 +324,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 for stroke in strokes {
                     self.overlay.releaseStrokeHold(stroke, fadeNow: false)
                 }
+                self.overlay.clearInk()
                 self.overlay.exit()
                 if let session = self.sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
                     self.sessionsPanel.openChat(for: session.id)
@@ -332,6 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 for stroke in strokes {
                     self.overlay.releaseStrokeHold(stroke, fadeNow: false)
                 }
+                self.overlay.clearInk()
                 self.overlay.exit()
                 self.presentCaptureFailure(error, kind: .screenshot)
             }

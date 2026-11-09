@@ -1354,6 +1354,7 @@ private struct SessionsSidePanelView: View {
                     compact: true,
                     onPanelDragEnded: onPanelDragEnded
                 )
+                .id(id)
                 .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                 .background(SolidCardBackground(cornerRadius: 22, selected: false))
                 .overlay {

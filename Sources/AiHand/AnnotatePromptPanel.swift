@@ -198,13 +198,28 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         if let id = model.selectedFavoriteID {
             Preferences.selectAgentFavorite(id)
         }
+        // Drop the prompt before chat focuses — AppKit’s shared field editor
+        // otherwise pastes this string into the Follow up composer.
+        clearPromptField()
         hide()
         onSubmit?(text)
     }
 
     private func cancel() {
+        clearPromptField()
         hide()
         onCancel?()
+    }
+
+    private func clearPromptField() {
+        model.text = ""
+        if let root = panel.contentView, let field = findPromptTextField(in: root) {
+            field.stringValue = ""
+            if let editor = panel.fieldEditor(false, for: field) as? NSTextView {
+                editor.string = ""
+            }
+        }
+        panel.makeFirstResponder(nil)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -213,17 +228,37 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
 
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
-        // ⇧↩ newlines are handled by AgentComposerView (updates binding + asks us to refit).
+        // Installed on each show so this monitor runs before any leftover session-chat
+        // AgentComposerView newline monitor (sessions is only ordered out, not torn down).
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel.isVisible else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let code = Int(event.keyCode)
+
+            // ⇧↩ → insert newline into the live field editor + SwiftUI binding.
+            if (code == kVK_Return || code == kVK_ANSI_KeypadEnter),
+               flags.contains(.shift),
+               !flags.contains(.command),
+               !flags.contains(.option),
+               !flags.contains(.control),
+               let textView = self.editableFieldEditor() {
+                let range = textView.selectedRange()
+                let ns = textView.string as NSString
+                let updated = ns.replacingCharacters(in: range, with: "\n")
+                textView.string = updated
+                self.model.text = updated
+                let insertedAt = min(range.location + 1, (updated as NSString).length)
+                textView.setSelectedRange(NSRange(location: insertedAt, length: 0))
+                self.refitContent()
+                return nil
+            }
 
             // ⌘/ → cycle favorite models (keyCode: ⌘ makes charactersIgnoringModifiers flaky).
             if flags.contains(.command),
                !flags.contains(.shift),
                !flags.contains(.option),
                !flags.contains(.control),
-               (Int(event.keyCode) == kVK_ANSI_Slash || event.charactersIgnoringModifiers == "/") {
+               (code == kVK_ANSI_Slash || event.charactersIgnoringModifiers == "/") {
                 DispatchQueue.main.async {
                     self.model.cycleFavorite()
                 }

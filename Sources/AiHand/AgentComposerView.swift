@@ -145,6 +145,7 @@ struct AgentComposerView: View {
                     Spacer(minLength: 8)
                     hintPair(key: "⌘/", label: "model")
                 } else {
+                    hintPair(key: "⇧↩", label: "newline")
                     hintPair(key: "Enter", label: "send to agent")
                     hintPair(key: "Esc", label: "cancel")
                     Spacer(minLength: 8)
@@ -236,16 +237,17 @@ struct AgentComposerView: View {
         text = next
     }
 
-    /// ⇧↩ inserts a newline. Updates the SwiftUI binding so vertical TextFields grow
-    /// (needed in the floating annotate panel, which sizes from fittingSize).
+    /// ⇧↩ inserts a newline into the focused field editor and SwiftUI binding.
     private func installNewlineMonitor() {
         guard newlineMonitor == nil else { return }
         newlineMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Don't rely on FocusState — it's flaky inside NSPanels.
+            // Require FocusState so a hidden sessions chat composer doesn't steal
+            // ⇧↩ from the annotate panel (sessions is ordered out, not destroyed).
+            guard focused else { return event }
             guard let textView = Self.editableTextView(), textView.isEditable else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let code = Int(event.keyCode)
-            guard code == kVK_Return || code == 76 else { return event }
+            guard code == kVK_Return || code == kVK_ANSI_KeypadEnter else { return event }
             guard flags.contains(.shift),
                   !flags.contains(.command),
                   !flags.contains(.option),
@@ -256,14 +258,13 @@ struct AgentComposerView: View {
             let range = textView.selectedRange()
             let ns = textView.string as NSString
             let updated = ns.replacingCharacters(in: range, with: "\n")
+            // Mutate the live editor — binding-only updates often don't reach it.
+            textView.string = updated
             text = updated
-            let insertedAt = range.location + 1
+            let insertedAt = min(range.location + 1, (updated as NSString).length)
+            textView.setSelectedRange(NSRange(location: insertedAt, length: 0))
 
             DispatchQueue.main.async {
-                if let textView = Self.editableTextView() {
-                    let maxLoc = (textView.string as NSString).length
-                    textView.setSelectedRange(NSRange(location: min(insertedAt, maxLoc), length: 0))
-                }
                 onLayoutNeeded?()
             }
             return nil

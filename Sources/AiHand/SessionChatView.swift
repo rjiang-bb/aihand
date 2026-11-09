@@ -70,6 +70,7 @@ struct SessionChatView: View {
             focusComposer()
         }
         .onChange(of: session.id) { _ in
+            draft = ""
             focusComposer()
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
@@ -252,6 +253,10 @@ struct SessionChatView: View {
         // Idle turns treat both as send-now; queue only applies while working.
         let resolved: FollowUpSubmit = (isWorking && mode == .queue) ? .queue : .sendNow
         onSend(text, resolved)
+        // Field editor can write the old string back after we clear; force empty.
+        DispatchQueue.main.async {
+            draft = ""
+        }
     }
 
     private func steerQueued(_ item: QueuedFollowUp) {
