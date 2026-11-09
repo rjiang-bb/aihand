@@ -1403,7 +1403,6 @@ private struct SessionsSidePanelView: View {
                     )
             )
             .panelDragHandle(onEnded: onPanelDragEnded)
-            .help("Drag to move")
             Spacer(minLength: 8)
             Button(action: onNew) {
                 Text("New")
@@ -1420,7 +1419,6 @@ private struct SessionsSidePanelView: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help("Start a new session")
             Button(action: onOpenSettings) {
                 Image(systemName: "gearshape")
                     .font(.system(size: 12, weight: .semibold))
@@ -1435,7 +1433,6 @@ private struct SessionsSidePanelView: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help("Settings")
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
@@ -1450,7 +1447,6 @@ private struct SessionsSidePanelView: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help("Close")
         }
         // Match the list column’s leading inset (content HStack uses 14).
         .padding(.horizontal, 14)
@@ -1644,7 +1640,6 @@ private struct SessionsSidePanelView: View {
             .buttonStyle(.plain)
             .disabled(page <= 0)
             .opacity(page <= 0 ? 0.35 : 1)
-            .help("Previous page")
 
             Text("\(start)–\(end) of \(total)")
                 .font(.system(size: 11, weight: .medium))
@@ -1670,7 +1665,6 @@ private struct SessionsSidePanelView: View {
             .buttonStyle(.plain)
             .disabled(page >= pages - 1)
             .opacity(page >= pages - 1 ? 0.35 : 1)
-            .help("Next page")
         }
         .foregroundStyle(.primary.opacity(0.75))
         .padding(.horizontal, 10)
@@ -1809,7 +1803,6 @@ private struct WorkspacePicker: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help(current.isEmpty ? "Choose a working folder" : current)
 
             if isOpen {
                 Rectangle()
@@ -2062,7 +2055,6 @@ private struct GitWorktreeAddRow: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!enabled)
-                .help("Create a worktree for this branch")
             }
             if let errorMessage, !errorMessage.isEmpty {
                 Text(errorMessage)
@@ -2214,7 +2206,6 @@ private struct WorkspacePickerRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("\(name) — \(path)")
     }
 
     @ViewBuilder
@@ -2562,7 +2553,6 @@ private struct SessionCardView: View {
                         .softHoverInnerBorder(Circle(), inset: 2)
                 }
                 .buttonStyle(.plain)
-                .help("Archive session")
                 .padding(.trailing, 10)
                 .transition(.opacity)
             }

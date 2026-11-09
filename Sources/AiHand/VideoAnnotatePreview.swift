@@ -171,7 +171,6 @@ final class VideoAnnotatePreview {
             .withSymbolConfiguration(config)
         button.imagePosition = .imageOnly
         button.contentTintColor = .white
-        button.toolTip = "Play"
         button.setAccessibilityLabel("Play")
         button.target = self
         button.action = #selector(playTapped)

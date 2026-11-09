@@ -113,7 +113,6 @@ final class Toolbar {
         permissionButton.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)
         permissionButton.imagePosition = .imageLeading
         permissionButton.contentTintColor = .black
-        permissionButton.toolTip = "AiHand needs Accessibility permission to intercept clicks and draw"
         permissionButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
         permissionButton.target = self
         permissionButton.action = #selector(fixPermission)
@@ -237,7 +236,6 @@ final class Toolbar {
         let name = on ? "speaker.wave.2.fill" : "speaker.slash.fill"
         let tip = on ? "Tap sound on — click to mute" : "Tap sound off — click to unmute"
         soundButton?.image = NSImage(systemSymbolName: name, accessibilityDescription: tip)?.withSymbolConfiguration(config)
-        soundButton?.toolTip = tip
         soundButton?.contentTintColor = NSColor(white: 1, alpha: on ? 0.85 : 0.45)
     }
 
@@ -422,7 +420,6 @@ final class Toolbar {
         b.isBordered = false
         b.bezelStyle = .regularSquare
         b.imageScaling = .scaleProportionallyUpOrDown
-        b.toolTip = tip
         b.setAccessibilityLabel(tip)
         b.wantsLayer = true
         b.layer?.cornerRadius = 10

@@ -749,18 +749,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem.button?.attributedTitle = sessionBadgeTitle()
         statusItem.button?.appearsDisabled = false
 
-        var tip = overlay.isActive
-            ? "AiHand is on — click to turn off, right-click for the menu"
-            : "AiHand — click to turn on, right-click for the menu"
-        let active = sessionStore.activeCount
-        let completed = sessionStore.completedCount
-        if active > 0 || completed > 0 {
-            var parts: [String] = []
-            if active > 0 { parts.append("\(active) active") }
-            if completed > 0 { parts.append("\(completed) completed") }
-            tip += "\n" + parts.joined(separator: " · ")
-        }
-        statusItem.button?.toolTip = tip
     }
 
     private func sessionBadgeTitle() -> NSAttributedString {

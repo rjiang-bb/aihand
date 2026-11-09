@@ -591,7 +591,6 @@ private struct CLIMissingBanner: View {
                     }
                     .buttonStyle(.plain)
                     .focusable(false)
-                    .help(copied ? "Copied" : "Copy command")
                     .padding(6)
                 }
                 .background(
@@ -776,8 +775,7 @@ private struct AgentFavoritesBlock: View {
                 .fixedSize()
                 PillButton(
                     title: "Add favorite",
-                    enabled: titleFilled,
-                    disabledHelp: "Must fill in title"
+                    enabled: titleFilled
                 ) { addFavorite() }
                     .fixedSize()
             }
@@ -899,7 +897,6 @@ private struct AgentFavoriteRow: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help(isCurrent ? "Current favorite for new sessions" : "Use for new sessions")
 
             if canRemove, hovering || !isCurrent {
                 Button(action: onRemove) {
@@ -912,7 +909,6 @@ private struct AgentFavoriteRow: View {
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
-                .help("Remove favorite")
             }
         }
         .padding(.horizontal, 14)
@@ -1039,7 +1035,6 @@ private struct WorkspaceWorktreesBlock: View {
                         entry: entry,
                         isSelected: SessionStore.sameWorkspace(entry.path, activePath),
                         canRemove: !entry.isPrimary && entry.workingDiff.isEmpty,
-                        removeBlockedReason: removeBlockedReason(for: entry),
                         onSelect: {
                             Preferences.selectAgentWorktree(entry.path, root: root)
                             reload()
@@ -1103,12 +1098,6 @@ private struct WorkspaceWorktreesBlock: View {
         !busy && !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func removeBlockedReason(for entry: GitWorktreeEntry) -> String? {
-        if entry.isPrimary { return "Main checkout can’t be removed" }
-        if !entry.workingDiff.isEmpty { return "Commit or stash before removing" }
-        return nil
-    }
-
     private func reload() {
         root = Preferences.agentWorkspaceRoot
         activePath = Preferences.agentWorkspace
@@ -1168,7 +1157,6 @@ private struct WorkspaceWorktreeRow: View {
     let entry: GitWorktreeEntry
     let isSelected: Bool
     let canRemove: Bool
-    let removeBlockedReason: String?
     let onSelect: () -> Void
     let onRemove: () -> Void
     @State private var hovering = false
@@ -1213,7 +1201,6 @@ private struct WorkspaceWorktreeRow: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help(isSelected ? "Active worktree" : "Use this worktree")
 
             if !entry.isPrimary, hovering || canRemove {
                 Button(action: onRemove) {
@@ -1227,7 +1214,6 @@ private struct WorkspaceWorktreeRow: View {
                 .buttonStyle(.plain)
                 .focusable(false)
                 .disabled(!canRemove)
-                .help(removeBlockedReason ?? "Remove worktree")
             }
         }
         .padding(.horizontal, 14)
@@ -1280,7 +1266,6 @@ private struct WorkspaceFolderRow: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help(isCurrent ? "Current working folder" : "Use as current working folder")
 
             if hovering || !isCurrent {
                 Button(action: onRemove) {
@@ -1293,7 +1278,6 @@ private struct WorkspaceFolderRow: View {
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
-                .help("Remove folder")
             }
         }
         .padding(.horizontal, 14)
@@ -1500,7 +1484,6 @@ private struct AddSlot: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
-        .help("Add a pointer")
         .onHover { hovering = $0 }
     }
 }
@@ -1587,7 +1570,6 @@ private struct PickerCell: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
-        .help(added ? "\(style.title) is already in the toolbar" : style.title)
         .onHover { hovering = $0 }
     }
 }
@@ -1652,7 +1634,6 @@ private struct CustomHandChip: View {
             .buttonStyle(.plain)
             .focusable(false)
             .opacity(hovering ? 1 : 0)
-            .help("Delete \(style.title)")
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 5)
@@ -1679,7 +1660,6 @@ private struct CustomHandChip: View {
             }
         }
         .onHover { hovering = $0 }
-        .help(pinned ? "\(style.title) is in your toolbar" : "Click to add \(style.title) to the toolbar")
         .popover(isPresented: $swapping, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("The toolbar is full. Swap \(style.title) in for:")
@@ -1717,7 +1697,6 @@ private struct SwapCell: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
-        .help("Replace \(style.title)")
         .onHover { hovering = $0 }
     }
 }
@@ -1786,13 +1765,11 @@ private struct ToolbarSlot: View {
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
-                .help("Remove from the toolbar")
                 .offset(x: 5, y: -5)
             }
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .help(style.title)
     }
 }
 
@@ -1944,7 +1921,6 @@ private struct InkSwatch: View {
         }
         .buttonStyle(.plain)
         .focusable(false)
-        .help(choice.title)
         .onHover { hovering = $0 }
     }
 }
@@ -2178,7 +2154,6 @@ private struct TextButton: View {
 private struct PillButton: View {
     let title: String
     var enabled: Bool = true
-    var disabledHelp: String? = nil
     let action: () -> Void
     @State private var hovering = false
     @Environment(\.colorScheme) private var colorScheme
@@ -2206,7 +2181,6 @@ private struct PillButton: View {
         .buttonStyle(.plain)
         .focusable(false)
         .disabled(!enabled)
-        .help(enabled ? "" : (disabledHelp ?? ""))
         .onHover { hovering = $0 }
     }
 }

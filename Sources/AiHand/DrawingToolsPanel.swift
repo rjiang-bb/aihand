@@ -187,7 +187,6 @@ final class DrawingToolsPanel {
             let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
             scopeButton.image = NSImage(systemSymbolName: scope.symbol, accessibilityDescription: scope.title)?
                 .withSymbolConfiguration(config)
-            scopeButton.toolTip = "\(scope.title) (⌘/)"
             scopeButton.setAccessibilityLabel(scope.title)
             scopeBadge?.textColor = fg.withAlphaComponent(0.85)
         }
@@ -200,7 +199,6 @@ final class DrawingToolsPanel {
         b.bezelStyle = .regularSquare
         b.wantsLayer = true
         b.layer?.cornerRadius = 10
-        b.toolTip = "\(scope.title) (⌘/)"
         b.setAccessibilityLabel(scope.title)
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
         b.image = NSImage(systemSymbolName: scope.symbol, accessibilityDescription: scope.title)?
@@ -236,7 +234,6 @@ final class DrawingToolsPanel {
         b.bezelStyle = .regularSquare
         b.wantsLayer = true
         b.layer?.cornerRadius = 10
-        b.toolTip = "\(tool.title) (\(tool.shortcut))"
         b.setAccessibilityLabel(tool.title)
 
         let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
@@ -273,7 +270,6 @@ final class DrawingToolsPanel {
         b.bezelStyle = .regularSquare
         b.wantsLayer = true
         b.layer?.cornerRadius = 10
-        b.toolTip = "\(thickness.title) stroke (\(thickness.shortcut))"
         b.setAccessibilityLabel(thickness.title)
         b.title = ""
 

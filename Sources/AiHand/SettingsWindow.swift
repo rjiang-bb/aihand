@@ -105,7 +105,6 @@ final class ShortcutRecorder: NSButton {
         wantsLayer = true
         layer?.cornerRadius = 7
         layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
-        toolTip = "Click, then press the new shortcut. Esc cancels."
         target = self
         action = #selector(startRecording)
         title = ""
