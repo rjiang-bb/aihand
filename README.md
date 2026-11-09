@@ -55,6 +55,7 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 | **⌘Z** | Undo |
 | **⌘⇧X** | Clear drawing |
 | **⌘⇧S** | Save annotated screenshot |
+| **⌘⇧C** | Copy annotated screenshot |
 | **⌘/** | Capture screen ↔ window |
 | **Enter** | Comment, then send to agent |
 | **⌘↩** | Send annotated screenshot to agent |

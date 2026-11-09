@@ -1,7 +1,7 @@
 import AppKit
 import UserNotifications
 
-/// Banner when a drawing-mode screenshot is saved to disk.
+/// Banner when a drawing-mode screenshot is saved or copied.
 enum ScreenshotNotifier {
     static let categoryID = "screenshot.saved"
     static let pathKey = "screenshotPath"
@@ -26,6 +26,24 @@ enum ScreenshotNotifier {
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 Log.write("screenshot notification failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    static func notifyCopied() {
+        let content = UNMutableNotificationContent()
+        content.title = "Screenshot copied"
+        content.body = "Annotated screenshot is on the clipboard."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "screenshot-copied-\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error {
+                Log.write("screenshot copy notification failed: \(error.localizedDescription)")
             }
         }
     }

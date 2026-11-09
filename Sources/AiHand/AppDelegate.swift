@@ -150,6 +150,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             guard let self, !self.annotatePanel.isVisible else { return }
             self.saveScreenshot()
         }
+        overlay.onRequestCopy = { [weak self] in
+            guard let self, !self.annotatePanel.isVisible else { return }
+            self.copyScreenshot()
+        }
         overlay.onRequestVideoAnnotate = { [weak self] url, region in
             self?.openVideoComment(path: url.path, region: region)
         }
@@ -364,6 +368,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 }
                 ScreenshotNotifier.notifySaved(path: outcome.path)
                 Log.write("screenshot saved \(outcome.path)")
+            } catch {
+                for stroke in strokes {
+                    self.overlay.releaseStrokeHold(stroke, fadeNow: false)
+                }
+                if self.overlay.isActive {
+                    self.overlay.setAnnotationHintsVisible(true)
+                }
+                self.presentCaptureFailure(error, kind: .screenshot)
+            }
+        }
+    }
+
+    /// ⌘⇧C — copy an annotated capture to the clipboard without starting an agent.
+    private func copyScreenshot() {
+        guard overlay.isActive, let overlayFrame = overlay.overlayFrame else { return }
+        let screen = overlay.activeScreen
+            ?? NSScreen.screens.first(where: { $0.frame.intersects(overlayFrame) })
+            ?? NSScreen.main
+        guard let screen else { return }
+
+        let strokes = pendingStrokes
+        let strokeScreen = strokes.isEmpty
+            ? WindowCapture.captureRegion(on: screen)
+            : Self.strokeScreenBounds(strokes: strokes, overlayFrame: overlayFrame)
+
+        annotatePanel.hide()
+        overlay.setAnnotationHintsVisible(false)
+        for stroke in strokes {
+            overlay.releaseStrokeHold(stroke, fadeNow: false)
+        }
+
+        Task { @MainActor in
+            do {
+                let captured = try await WindowCapture.captureAnnotatedImage(
+                    strokes: strokes,
+                    strokeScreenBounds: strokeScreen,
+                    overlayFrame: overlayFrame
+                )
+                let rep = NSBitmapImageRep(cgImage: captured.image)
+                let image = NSImage(size: NSSize(width: rep.pixelsWide, height: rep.pixelsHigh))
+                image.addRepresentation(rep)
+                let pb = NSPasteboard.general
+                pb.clearContents()
+                pb.writeObjects([image])
+
+                self.pendingStrokes = []
+                self.overlay.clearInk()
+                self.overlay.exit()
+                ScreenshotNotifier.notifyCopied()
+                Log.write("screenshot copied to clipboard")
             } catch {
                 for stroke in strokes {
                     self.overlay.releaseStrokeHold(stroke, fadeNow: false)

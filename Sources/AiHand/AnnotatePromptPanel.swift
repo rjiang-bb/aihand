@@ -16,12 +16,14 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
     private let model = AnnotatePromptModel()
     private var hosting: NSHostingView<AnnotatePromptView>?
     private var keyMonitor: Any?
+    private var lastScreen: NSScreen?
+    private var lastPlacement: Placement = .bottom
 
     var isVisible: Bool { panel.isVisible }
 
     override init() {
         panel = Panel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 180),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 200),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -42,6 +44,9 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         }
         model.onCancel = { [weak self] in
             self?.cancel()
+        }
+        model.onLayoutNeeded = { [weak self] in
+            self?.refitContent()
         }
 
         let host = NSHostingView(rootView: AnnotatePromptView(model: model))
@@ -67,6 +72,8 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         model.requirePrompt = requirePrompt
         model.reloadFavorites()
         model.focusTick += 1
+        lastScreen = screen
+        lastPlacement = placement
 
         position(on: screen, placement: placement)
         panel.orderFrontRegardless()
@@ -90,6 +97,12 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             self.model.focusTick += 1
             self.focusPromptField()
         }
+    }
+
+    /// Grow/shrink the floating panel when the composer adds newlines or skill suggestions.
+    private func refitContent() {
+        guard panel.isVisible, let screen = lastScreen ?? panel.screen ?? NSScreen.main else { return }
+        position(on: screen, placement: lastPlacement)
     }
 
     /// Force the prompt NSTextField to become first responder (SwiftUI FocusState alone is flaky in panels).
@@ -129,7 +142,7 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             host.layoutSubtreeIfNeeded()
             let fitting = host.fittingSize
             if fitting.width > 10, fitting.height > 10 {
-                panel.setContentSize(NSSize(width: max(460, fitting.width), height: fitting.height))
+                panel.setContentSize(NSSize(width: max(480, fitting.width), height: fitting.height))
             }
         }
 
@@ -200,6 +213,7 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
 
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
+        // ⇧↩ newlines are handled by AgentComposerView (updates binding + asks us to refit).
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, self.panel.isVisible else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -215,23 +229,7 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
                 }
                 return nil
             }
-
-            let code = Int(event.keyCode)
-            guard code == 36 || code == 76 else { return event }
-            // ⇧↩ → newline in the prompt field.
-            guard flags.contains(.shift),
-                  !flags.contains(.command),
-                  !flags.contains(.option),
-                  !flags.contains(.control) else {
-                return event
-            }
-            guard let textView = self.editableFieldEditor() else { return event }
-            textView.insertText("\n", replacementRange: textView.selectedRange())
-            // Keep SwiftUI binding in sync with the field editor.
-            if let value = textView.string as String? {
-                self.model.text = value
-            }
-            return nil
+            return event
         }
     }
 
@@ -266,6 +264,7 @@ final class AnnotatePromptModel: ObservableObject {
     @Published var focusTick = 0
     var onSubmit: ((String) -> Void)?
     var onCancel: (() -> Void)?
+    var onLayoutNeeded: (() -> Void)?
 
     var canSubmit: Bool {
         guard !workspaceMissing else { return false }
@@ -309,54 +308,49 @@ private struct AnnotatePromptView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var solidBG: Color { SoftChrome.cardFill(dark: colorScheme == .dark) }
-    private var fieldFill: Color {
-        colorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05)
+
+    private var workspace: String {
+        Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("Ask the agent")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.secondary)
-                Spacer(minLength: 8)
-                favoriteMenu
+            Text("Ask the agent")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            if model.workspaceMissing {
+                Text("Set an agent workspace in Settings")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
             }
-            TextField(model.requirePrompt ? "Prompt…" : "Optional prompt…", text: $model.text, axis: .vertical)
-                .font(.system(size: 14))
-                .lineLimit(4...10)
-                .textFieldStyle(.plain)
-                .focused($focused)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-                .frame(minHeight: 96, maxHeight: 160, alignment: .topLeading)
-                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(fieldFill))
-                .onChange(of: model.focusTick) { _ in
-                    focused = true
-                }
-            HStack {
-                if model.workspaceMissing {
-                    Text("Set an agent workspace in Settings")
-                        .font(.system(size: 11))
-                        .foregroundColor(.orange)
-                } else {
-                    Text("⇧↩ newline · ⌘↩ send · ⌘/ model · Esc")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                Spacer()
-                Button("Send") {
+
+            AgentComposerView(
+                kind: .initial,
+                isWorking: false,
+                requireNonEmpty: model.requirePrompt,
+                placeholder: model.requirePrompt ? "Prompt…" : "Optional prompt…",
+                text: $model.text,
+                workspace: workspace,
+                favorites: model.favorites,
+                selectedFavoriteID: model.selectedFavoriteID,
+                favoriteMenuTitle: model.favoriteMenuTitle,
+                onSelectFavorite: { model.selectFavorite($0) },
+                onSend: {
                     guard model.canSubmit else { return }
                     model.onSubmit?(model.text)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(!model.canSubmit)
-                .keyboardShortcut(.return, modifiers: .command)
+                },
+                onLayoutNeeded: { model.onLayoutNeeded?() },
+                focused: $focused
+            )
+            .disabled(model.workspaceMissing)
+            .opacity(model.workspaceMissing ? 0.55 : 1)
+            .onChange(of: model.focusTick) { _ in
+                focused = true
             }
         }
         .padding(14)
-        .frame(width: 460)
+        .frame(width: 480)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(solidBG)
@@ -373,33 +367,5 @@ private struct AnnotatePromptView: View {
             model.onCancel?()
         }
         .onAppear { focused = true }
-    }
-
-    private var favoriteMenu: some View {
-        Menu {
-            ForEach(model.favorites) { fav in
-                Button {
-                    model.selectFavorite(fav)
-                } label: {
-                    if fav.id == model.selectedFavoriteID {
-                        Label(fav.title, systemImage: "checkmark")
-                    } else {
-                        Text(fav.title)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(model.favoriteMenuTitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-            }
-            .foregroundColor(.secondary)
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Favorite model for this send — ⌘/ to cycle")
     }
 }
