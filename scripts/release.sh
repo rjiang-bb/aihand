@@ -54,7 +54,9 @@ read_base_version() {
         echo "error: VERSION must be major.minor.patch (got: $(tr -d '[:space:]' < "$ROOT/VERSION"))" >&2
         exit 1
     fi
-    printf '%s %s %s' "$major" "$minor" "$patch"
+    # Trailing newline required: `read ... < <(read_base_version)` returns 1 on
+    # EOF-without-newline, which aborts the script under `set -e`.
+    printf '%s %s %s\n' "$major" "$minor" "$patch"
 }
 
 bump_patch_version() {
