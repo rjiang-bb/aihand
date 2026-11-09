@@ -49,17 +49,17 @@ enum WindowCapture {
         }
     }
 
-    static func captureAnnotated(
+    /// Annotated capture as a bitmap (no file write). Used for clipboard copy.
+    static func captureAnnotatedImage(
         strokes: [StrokeResult],
         strokeScreenBounds: CGRect,
         overlayFrame: CGRect,
         scope: CaptureScope = Preferences.captureScope
-    ) async throws -> Outcome {
+    ) async throws -> (image: CGImage, windowName: String?) {
         if !ensureScreenRecordingAccess() {
             throw CaptureError.permissionDenied
         }
 
-        let folder = Preferences.ensureScreenshotsFolder()
         guard let screen = screenContaining(strokeScreenBounds) else {
             throw CaptureError.noScreen
         }
@@ -84,13 +84,29 @@ enum WindowCapture {
         let image = crop(full, screenFrame: screenBounds, region: captureBounds) ?? full
         let annotated = composite(image: image, strokes: strokes, captureBounds: captureBounds, overlayFrame: overlayFrame)
             ?? image
+        return (annotated, target.name)
+    }
+
+    static func captureAnnotated(
+        strokes: [StrokeResult],
+        strokeScreenBounds: CGRect,
+        overlayFrame: CGRect,
+        scope: CaptureScope = Preferences.captureScope
+    ) async throws -> Outcome {
+        let folder = Preferences.ensureScreenshotsFolder()
+        let captured = try await captureAnnotatedImage(
+            strokes: strokes,
+            strokeScreenBounds: strokeScreenBounds,
+            overlayFrame: overlayFrame,
+            scope: scope
+        )
 
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let name = "\(formatter.string(from: Date())).png"
         let path = (folder as NSString).appendingPathComponent(name)
-        try writePNG(annotated, to: path)
-        return Outcome(path: path, windowName: target.name)
+        try writePNG(captured.image, to: path)
+        return Outcome(path: path, windowName: captured.windowName)
     }
 
     /// AppKit bounds of whatever the current capture scope targets on `screen`.

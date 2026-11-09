@@ -253,6 +253,14 @@ final class SessionStore: ObservableObject {
         sessions.filter { $0.status == .finished }.count
     }
 
+    /// In-progress (working/waiting) and finished counts for a workspace path.
+    func sessionCounts(for workspace: String) -> (inProgress: Int, succeeded: Int) {
+        let list = allSessions.filter { Self.sameWorkspace($0.workspace, workspace) }
+        let inProgress = list.filter { $0.status == .working || $0.status == .waiting }.count
+        let succeeded = list.filter { $0.status == .finished }.count
+        return (inProgress, succeeded)
+    }
+
     init() {
         syncFromPreferences(clearSelectionIfNeeded: false)
         load()

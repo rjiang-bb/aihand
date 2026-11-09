@@ -14,8 +14,6 @@ struct SessionChatView: View {
     @State private var draft = ""
     @State private var draggingQueueID: UUID?
     @FocusState private var composerFocused: Bool
-    @StateObject private var skillAC = SkillAutocompleteController()
-    @State private var keyMonitor: Any?
     @State private var prefsTick = 0
 
     private var solidBG: Color { SoftChrome.cardFill(dark: colorScheme == .dark) }
@@ -36,10 +34,6 @@ struct SessionChatView: View {
         return favorites.first { $0.isBuiltIn } ?? favorites.first
     }
 
-    private var currentFavoriteTitle: String {
-        currentFavorite?.title ?? "Default"
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -51,26 +45,32 @@ struct SessionChatView: View {
                 queueSection
                 Divider()
             }
-            composer
+            AgentComposerView(
+                kind: .followUp,
+                isWorking: isWorking,
+                requireNonEmpty: true,
+                placeholder: "Follow up…",
+                text: $draft,
+                workspace: workspace,
+                favorites: favorites,
+                selectedFavoriteID: currentFavorite?.id,
+                onSelectFavorite: { session.applyFavorite($0) },
+                onSend: { submit(.sendNow) },
+                onQueue: { submit(.queue) },
+                onStop: onStop,
+                focused: $composerFocused
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, 12)
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
         .onAppear {
-            skillAC.configure(workspace: workspace)
-            skillAC.readText = { draft }
-            skillAC.writeText = { draft = $0 }
             focusComposer()
-            installKeyMonitor()
-        }
-        .onDisappear {
-            removeKeyMonitor()
-            skillAC.teardown()
         }
         .onChange(of: session.id) { _ in
             focusComposer()
-        }
-        .onChange(of: draft) { _ in
-            skillAC.update(text: draft)
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
             prefsTick &+= 1
@@ -81,37 +81,6 @@ struct SessionChatView: View {
         DispatchQueue.main.async {
             composerFocused = true
         }
-    }
-
-    private func installKeyMonitor() {
-        guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            // Shift+Return → newline; plain Return still submits via onSubmit.
-            // ⌘/ model cycling lives on SessionsSidePanel + the app menu.
-            let code = Int(event.keyCode)
-            guard code == 36 || code == 76 else { return event }
-            guard flags.contains(.shift),
-                  !flags.contains(.command),
-                  !flags.contains(.option),
-                  !flags.contains(.control) else {
-                return event
-            }
-            guard composerFocused,
-                  let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
-                  textView.isEditable else {
-                return event
-            }
-            textView.insertText("\n", replacementRange: textView.selectedRange())
-            return nil
-        }
-    }
-
-    private func removeKeyMonitor() {
-        if let keyMonitor {
-            NSEvent.removeMonitor(keyMonitor)
-        }
-        keyMonitor = nil
     }
 
     private var header: some View {
@@ -142,6 +111,7 @@ struct SessionChatView: View {
                         .foregroundStyle(solidFG)
                         .frame(width: 24, height: 24)
                         .background(Circle().fill(solidFG.opacity(0.1)))
+                        .softHoverInnerBorder(Circle(), inset: 2)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -242,6 +212,13 @@ struct SessionChatView: View {
                 Text("Steer")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.accentColor.opacity(0.12))
+                    )
+                    .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
             }
             .buttonStyle(.plain)
             .help("Interrupt and send this now")
@@ -253,6 +230,7 @@ struct SessionChatView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 18, height: 18)
                     .background(Circle().fill(Color.primary.opacity(0.08)))
+                    .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
             }
             .buttonStyle(.plain)
             .help("Remove from queue")
@@ -270,150 +248,10 @@ struct SessionChatView: View {
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    private var composer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // In-flow above the prompt so multiline growth can never cover it.
-            if skillAC.isActive {
-                SkillSuggestionList(
-                    controller: skillAC,
-                    query: SkillCatalog.slashQuery(in: draft)?.query ?? ""
-                ) { skill in
-                    applySkill(skill)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.opacity)
-            }
-
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Follow up…", text: $draft, axis: .vertical)
-                    .lineLimit(1...12)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(.primary)
-                    .focused($composerFocused)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(
-                                        composerFocused
-                                            ? Color(red: 0.2, green: 0.55, blue: 0.98)
-                                            : Color.primary.opacity(0.45),
-                                        lineWidth: composerFocused ? 1.5 : 1
-                                    )
-                            )
-                    )
-                    .onSubmit {
-                        if skillAC.isActive {
-                            applySelectedSkill()
-                        } else {
-                            submit(.queue)
-                        }
-                    }
-                    .help("Type / for skills · ⇧↩ for a new line")
-                if isWorking {
-                    Button(action: onStop) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 28))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop (⌃C)")
-                }
-                Button(action: { submit(.sendNow) }) {
-                    let canSend = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(
-                            canSend ? Color.white : Color.secondary.opacity(0.55),
-                            canSend ? Color.accentColor : Color.secondary.opacity(0.25)
-                        )
-                }
-                .buttonStyle(.plain)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help(isWorking ? "Send now" : "Send")
-            }
-
-            HStack(alignment: .center, spacing: 14) {
-                if isWorking {
-                    hintPair(key: "Enter", label: "queue")
-                    hintPair(key: "⇧↩", label: "newline")
-                    hintPair(key: "⌘↩", label: "steer")
-                    hintPair(key: "⌃C", label: "stop")
-                } else {
-                    hintPair(key: "/", label: "skills")
-                    hintPair(key: "⇧↩", label: "newline")
-                    hintPair(key: "Enter", label: "send")
-                }
-                Spacer(minLength: 8)
-                hintPair(key: "⌘/", label: "model")
-                favoritePicker
-            }
-            .padding(.horizontal, 4)
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 12)
-    }
-
-    private var favoritePicker: some View {
-        Menu {
-            ForEach(favorites) { fav in
-                Button {
-                    session.applyFavorite(fav)
-                } label: {
-                    if fav.id == currentFavorite?.id {
-                        Label(fav.title, systemImage: "checkmark")
-                    } else {
-                        Text(fav.title)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Text(currentFavoriteTitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-            }
-            .foregroundStyle(Color.primary.opacity(0.78))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(Color.primary.opacity(0.07))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
-            )
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .help("Favorite model — ⌘/ to cycle")
-    }
-
-    private func hintPair(key: String, label: String) -> some View {
-        HStack(spacing: 4) {
-            Text(key)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(Color.primary.opacity(0.72))
-            Text(label)
-                .font(.system(size: 10.5))
-                .foregroundStyle(Color.primary.opacity(0.55))
-        }
-    }
-
     private func submit(_ mode: FollowUpSubmit) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         draft = ""
-        skillAC.clear()
         // Idle turns treat both as send-now; queue only applies while working.
         let resolved: FollowUpSubmit = (isWorking && mode == .queue) ? .queue : .sendNow
         onSend(text, resolved)
@@ -422,18 +260,6 @@ struct SessionChatView: View {
     private func steerQueued(_ item: QueuedFollowUp) {
         session.queuedFollowUps.removeAll { $0.id == item.id }
         onSend(item.text, .sendNow)
-    }
-
-    private func applySkill(_ skill: AgentSkill) {
-        var text = draft
-        skillAC.apply(skill, to: &text)
-        draft = text
-    }
-
-    private func applySelectedSkill() {
-        var text = draft
-        skillAC.applySelected(to: &text)
-        draft = text
     }
 }
 
