@@ -28,6 +28,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var lastLaidOutListHeight: CGFloat = 0
     private var hintHideWork: DispatchWorkItem?
+    /// Last open chat per workspace so switching folders can restore it.
+    private var openChatByWorkspace: [String: UUID] = [:]
+    /// Workspace key last applied to selection memory (normalized path).
+    private var trackedWorkspaceKey: String = ""
 
     private let listWidth: CGFloat = 360
     /// Grows with session count up to 10 rows + pagination (+ ⌘ hints / open workspace picker).
@@ -247,6 +251,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             self.relayoutForSessionCountIfNeeded(animateFrame: false)
         }
         .store(in: &cancellables)
+        trackedWorkspaceKey = SessionStore.normalizedWorkspace(store.currentWorkspace)
+        store.$currentWorkspace
+            .receive(on: RunLoop.main)
+            .sink { [weak self] next in
+                self?.workspaceDidChange(to: next)
+            }
+            .store(in: &cancellables)
         lastLaidOutListHeight = listHeight
     }
 
@@ -314,6 +325,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             persistListPlacement()
         }
         selection.selectedID = id
+        rememberOpenChatForCurrentWorkspace()
         selection.revealSessionInList(id, sessions: store.sessions)
         if isVisible {
             if needsExpand {
@@ -342,6 +354,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let expanded = panel.frame
         discardBlankDraftIfLeaving()
         selection.selectedID = nil
+        rememberOpenChatForCurrentWorkspace()
         layout(
             listOriginOverride: CGPoint(
                 x: expanded.maxX - listWidth,
@@ -349,6 +362,86 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             )
         )
         persistListPlacement()
+    }
+
+    private func workspaceKey(_ path: String) -> String {
+        SessionStore.normalizedWorkspace(path)
+    }
+
+    private func rememberOpenChatForCurrentWorkspace() {
+        let key = workspaceKey(store.currentWorkspace)
+        guard !key.isEmpty else { return }
+        if let id = selection.selectedID {
+            openChatByWorkspace[key] = id
+        } else {
+            openChatByWorkspace.removeValue(forKey: key)
+        }
+    }
+
+    /// Re-select a remembered chat after a workspace switch without forcing the panel on-screen.
+    private func restoreOpenChat(for id: UUID) {
+        if selection.selectedID == id {
+            selection.revealSessionInList(id, sessions: store.sessions)
+            return
+        }
+        if selection.selectedID != nil {
+            discardBlankDraftIfLeaving(except: id)
+        }
+        let needsExpand = selection.selectedID == nil
+        if needsExpand, isVisible {
+            persistListPlacement()
+        }
+        selection.selectedID = id
+        rememberOpenChatForCurrentWorkspace()
+        selection.revealSessionInList(id, sessions: store.sessions)
+        guard isVisible else { return }
+        if needsExpand {
+            layout()
+        }
+    }
+
+    /// Leaving workspace A remembers its open chat; entering B restores B’s if any.
+    private func workspaceDidChange(to next: String) {
+        let nextKey = workspaceKey(next)
+        let previousKey = trackedWorkspaceKey
+        guard nextKey != previousKey else { return }
+
+        if !previousKey.isEmpty {
+            if let id = selection.selectedID,
+               let session = store.allSessions.first(where: { $0.id == id }),
+               SessionStore.sameWorkspace(session.workspace, previousKey) {
+                openChatByWorkspace[previousKey] = id
+            } else if selection.selectedID == nil {
+                openChatByWorkspace.removeValue(forKey: previousKey)
+            }
+        }
+        trackedWorkspaceKey = nextKey
+
+        if let id = openChatByWorkspace[nextKey],
+           store.allSessions.contains(where: {
+               $0.id == id && SessionStore.sameWorkspace($0.workspace, nextKey)
+           }) {
+            restoreOpenChat(for: id)
+            return
+        }
+
+        if let id = selection.selectedID,
+           let session = store.allSessions.first(where: { $0.id == id }),
+           !SessionStore.sameWorkspace(session.workspace, nextKey) {
+            // Collapse chat for the destination without wiping the remembered id for `previousKey`.
+            let expanded = panel.frame
+            discardBlankDraftIfLeaving()
+            selection.selectedID = nil
+            if isVisible {
+                layout(
+                    listOriginOverride: CGPoint(
+                        x: expanded.maxX - listWidth,
+                        y: expanded.maxY - listHeight
+                    )
+                )
+                persistListPlacement()
+            }
+        }
     }
 
     /// Drop an untouched "New session" when leaving it (switch, Esc close-chat, click away).
@@ -1149,15 +1242,13 @@ private struct SessionsSidePanelView: View {
         .onChange(of: store.sessions.map(\.id)) { ids in
             selection.clampListPage(total: ids.count)
             if let id = selection.selectedID, !ids.contains(id) {
+                // Still alive under another workspace — panel restores on switch-back.
+                if store.allSessions.contains(where: { $0.id == id }) { return }
                 onCloseChat()
             }
         }
         .onChange(of: store.currentWorkspace) { _ in
             selection.listPage = 0
-            if let id = selection.selectedID,
-               !store.sessions.contains(where: { $0.id == id }) {
-                onCloseChat()
-            }
         }
     }
 
