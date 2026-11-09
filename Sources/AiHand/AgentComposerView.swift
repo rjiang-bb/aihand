@@ -31,25 +31,9 @@ struct AgentComposerView: View {
 
     @StateObject private var skillAC = SkillAutocompleteController()
     @State private var newlineMonitor: Any?
-    /// Measured soft-wrap height for the prompt (1 line until text actually wraps).
-    @State private var promptFieldHeight: CGFloat = 0
-
-    private let promptLineLimit = 1...12
-    private let promptFontSize = NSFont.systemFontSize
 
     private var trimmed: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var singleLineHeight: CGFloat {
-        let font = NSFont.systemFont(ofSize: promptFontSize)
-        return max(1, ceil(font.ascender - font.descender + font.leading))
-    }
-
-    private var resolvedPromptHeight: CGFloat {
-        let maxHeight = singleLineHeight * CGFloat(promptLineLimit.upperBound)
-        let measured = promptFieldHeight > 0 ? promptFieldHeight : singleLineHeight
-        return min(max(measured, singleLineHeight), maxHeight)
     }
 
     private var canSend: Bool {
@@ -85,35 +69,10 @@ struct AgentComposerView: View {
 
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(placeholder, text: $text, axis: .vertical)
-                    .lineLimit(promptLineLimit)
+                    .lineLimit(1...12)
                     .textFieldStyle(.plain)
                     .foregroundStyle(.primary)
                     .focused($focused)
-                    // Exact height from a mirrored Text — avoids macOS vertical TextField's
-                    // single-line intrinsic size without overshooting via minHeight hacks.
-                    .frame(height: resolvedPromptHeight, alignment: .topLeading)
-                    .background(alignment: .topLeading) {
-                        Text(text.isEmpty ? " " : text)
-                            .font(.system(size: promptFontSize))
-                            .lineLimit(promptLineLimit)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .opacity(0)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                GeometryReader { geo in
-                                    Color.clear.preference(
-                                        key: PromptFieldHeightKey.self,
-                                        value: geo.size.height
-                                    )
-                                }
-                            )
-                            .allowsHitTesting(false)
-                    }
-                    .onPreferenceChange(PromptFieldHeightKey.self) { height in
-                        guard abs(height - promptFieldHeight) > 0.5 else { return }
-                        promptFieldHeight = height
-                        requestLayout()
-                    }
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -138,6 +97,7 @@ struct AgentComposerView: View {
                             onSend()
                         }
                     }
+                    .help("Type / for skills · ⇧↩ for a new line")
 
                 if isWorking, let onStop {
                     Button(action: onStop) {
@@ -148,6 +108,7 @@ struct AgentComposerView: View {
                             .softHoverInnerBorder(Circle(), inset: 2.5)
                     }
                     .buttonStyle(.plain)
+                    .help("Stop (⌃C)")
                 }
 
                 Button(action: {
@@ -166,6 +127,7 @@ struct AgentComposerView: View {
                 .buttonStyle(.plain)
                 .disabled(!canSend)
                 .keyboardShortcut(.return, modifiers: .command)
+                .help(kind == .followUp ? "Send / Steer (⌘↩)" : "Send (⌘↩)")
             }
 
             HStack(alignment: .center, spacing: 14) {
@@ -202,21 +164,14 @@ struct AgentComposerView: View {
         }
         .onChange(of: text) { _ in
             skillAC.update(text: text)
-            requestLayout()
+            onLayoutNeeded?()
         }
         .onChange(of: skillAC.isActive) { _ in
-            requestLayout()
+            onLayoutNeeded?()
         }
         .onDisappear {
             removeNewlineMonitor()
             skillAC.teardown()
-        }
-    }
-
-    private func requestLayout() {
-        // Defer so SwiftUI applies the new height before the panel reads fittingSize.
-        DispatchQueue.main.async {
-            onLayoutNeeded?()
         }
     }
 
@@ -333,12 +288,5 @@ struct AgentComposerView: View {
             return editor
         }
         return nil
-    }
-}
-
-private enum PromptFieldHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
     }
 }
