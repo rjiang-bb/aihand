@@ -59,6 +59,8 @@ final class AgentSession: ObservableObject, Identifiable {
     let cliKind: AgentCLIKind
     /// Working directory this session belongs to.
     let workspace: String
+    /// Git branch (or worktree branch) when the session was created; empty for non-git folders.
+    let gitBranch: String
 
     /// Favorite used for this session (updated when the composer picker changes).
     @Published var favoriteId: UUID?
@@ -103,6 +105,7 @@ final class AgentSession: ObservableObject, Identifiable {
         prompt: String,
         screenshotPath: String?,
         workspace: String = Preferences.agentWorkspace,
+        gitBranch: String = Preferences.agentGitBranch,
         cliKind: AgentCLIKind = Preferences.agentCLI,
         favoriteId: UUID? = nil,
         modelId: String? = nil,
@@ -116,6 +119,7 @@ final class AgentSession: ObservableObject, Identifiable {
         self.initialPrompt = prompt
         self.screenshotPath = screenshotPath
         self.workspace = SessionStore.normalizedWorkspace(workspace)
+        self.gitBranch = gitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         self.cliKind = cliKind
         self.favoriteId = favoriteId
         self.modelId = modelId.flatMap { $0.isEmpty ? nil : $0 }
@@ -147,6 +151,7 @@ final class AgentSession: ObservableObject, Identifiable {
         self.workspace = SessionStore.normalizedWorkspace(
             migratedWorkspace.isEmpty ? Preferences.agentWorkspace : migratedWorkspace
         )
+        self.gitBranch = (snapshot.gitBranch ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         self.favoriteId = snapshot.favoriteId
         self.modelId = snapshot.modelId.flatMap { $0.isEmpty ? nil : $0 }
         self.effort = snapshot.effort.flatMap { $0.isEmpty ? nil : $0 }
@@ -184,6 +189,7 @@ final class AgentSession: ObservableObject, Identifiable {
             errorMessage: errorMessage,
             cliKind: cliKind,
             workspace: workspace,
+            gitBranch: gitBranch.isEmpty ? nil : gitBranch,
             favoriteId: favoriteId,
             modelId: modelId,
             effort: effort
@@ -213,6 +219,8 @@ final class SessionStore: ObservableObject {
         var cliKind: AgentCLIKind?
         /// Optional for backwards compatibility; missing values migrate to the current workspace.
         var workspace: String?
+        /// Optional; missing values match any branch for that workspace path.
+        var gitBranch: String?
         var favoriteId: UUID?
         var modelId: String?
         var effort: String?
@@ -224,8 +232,14 @@ final class SessionStore: ObservableObject {
 
     /// All sessions across every workspace. Prefer `sessions` for the UI list.
     @Published private(set) var allSessions: [AgentSession] = []
-    /// Working directory whose sessions are shown in the panel.
+    /// Active working directory (root or worktree) whose sessions are shown.
     @Published private(set) var currentWorkspace: String = ""
+    /// Registered folder selected in the workspace picker.
+    @Published private(set) var workspaceRoot: String = ""
+    /// Git branch for `currentWorkspace` (empty when not a repo).
+    @Published private(set) var currentGitBranch: String = ""
+    /// Worktrees for the current registered root; nil when the root is not a git repo.
+    @Published private(set) var gitRepo: GitRepoInfo?
     /// Folders from Settings — kept in sync so the panel picker refreshes.
     @Published private(set) var workspaceFolders: [String] = []
     @Published var selectedSessionID: UUID?
@@ -233,10 +247,24 @@ final class SessionStore: ObservableObject {
     private var prefsObserver: Any?
     private var saveWork: DispatchWorkItem?
     private let saveQueue = DispatchQueue(label: "net.penguinlabs.aihand.sessions", qos: .utility)
+    private var gitRefreshWork: DispatchWorkItem?
 
-    /// Sessions for the current working directory (panel list / ⌘1…9).
+    /// Sessions for the current working directory + branch (panel list / ⌘1…9).
     var sessions: [AgentSession] {
-        allSessions.filter { Self.sameWorkspace($0.workspace, currentWorkspace) }
+        allSessions.filter { matchesCurrentScope($0) }
+    }
+
+    func matchesCurrentScope(_ session: AgentSession) -> Bool {
+        Self.sameWorkspace(session.workspace, currentWorkspace)
+            && Self.sameGitBranch(session.gitBranch, currentGitBranch)
+    }
+
+    static func sameGitBranch(_ a: String, _ b: String) -> Bool {
+        let left = a.trimmingCharacters(in: .whitespacesAndNewlines)
+        let right = b.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Legacy sessions (no branch) stay visible on whatever branch shares their path.
+        if left.isEmpty || right.isEmpty { return true }
+        return left == right
     }
 
     var selectedSession: AgentSession? {
@@ -293,22 +321,68 @@ final class SessionStore: ObservableObject {
     func syncFromPreferences(clearSelectionIfNeeded: Bool = true) {
         // Keep Settings’ paths as-is so selectAgentWorkspace can match them.
         let folders = Preferences.agentWorkspaces
+        let nextRoot = Self.normalizedWorkspace(Preferences.agentWorkspaceRoot)
         let next = Self.normalizedWorkspace(Preferences.agentWorkspace)
         let foldersChanged = folders != workspaceFolders
+        let rootChanged = nextRoot != workspaceRoot
         let currentChanged = next != currentWorkspace
-        guard foldersChanged || currentChanged else { return }
+        guard foldersChanged || rootChanged || currentChanged else {
+            scheduleGitRefresh(forRoot: nextRoot.isEmpty ? next : nextRoot)
+            return
+        }
         if foldersChanged {
             workspaceFolders = folders
+        }
+        if rootChanged {
+            workspaceRoot = nextRoot
         }
         if currentChanged {
             currentWorkspace = next
             if clearSelectionIfNeeded,
                let id = selectedSessionID,
                let session = allSessions.first(where: { $0.id == id }),
-               !Self.sameWorkspace(session.workspace, next) {
+               !matchesCurrentScope(session) {
                 selectedSessionID = nil
             }
         }
+        scheduleGitRefresh(forRoot: nextRoot.isEmpty ? next : nextRoot)
+    }
+
+    /// Refresh worktree list + diff stats for the registered root (async).
+    func refreshGitInfo() {
+        scheduleGitRefresh(forRoot: workspaceRoot.isEmpty ? currentWorkspace : workspaceRoot, force: true)
+    }
+
+    private func scheduleGitRefresh(forRoot root: String, force: Bool = false) {
+        let key = Self.normalizedWorkspace(root)
+        gitRefreshWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key)
+            DispatchQueue.main.async {
+                self.applyGitInfo(info, activePath: self.currentWorkspace)
+            }
+        }
+        gitRefreshWork = work
+        // Debounce rapid workspace flips; force path still waits a tick so UI can settle.
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + (force ? 0.05 : 0.12),
+            execute: work
+        )
+    }
+
+    private func applyGitInfo(_ info: GitRepoInfo?, activePath: String) {
+        gitRepo = info
+        if let entry = info?.entry(forPath: activePath) {
+            currentGitBranch = entry.branch
+        } else if let info, info.worktrees.count == 1 {
+            currentGitBranch = info.worktrees[0].branch
+        } else if info == nil {
+            currentGitBranch = ""
+        } else {
+            currentGitBranch = GitWorkspace.currentBranch(in: activePath) ?? ""
+        }
+        objectWillChange.send()
     }
 
     /// Back-compat name used by older call sites / mental model.

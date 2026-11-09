@@ -102,8 +102,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         sessionsPanel.onNew = { [weak self] in
             self?.startBlankSession()
         }
+        sessionsPanel.onStartDrawing = { [weak self] in
+            self?.startPointerWithSessions()
+        }
+        sessionsPanel.onOpenSettings = { [weak self] in
+            self?.settings.show()
+        }
         sessionsPanel.onManageWorkspaces = { [weak self] in
-            self?.settings.show(.agent)
+            self?.settings.show(.workspaces)
         }
         sessionManager.onSessionCompleted = { session in
             SessionNotifier.notifyCompleted(session: session)
@@ -184,7 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func startBlankSession() {
         let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else {
-            settings.show(.agent)
+            settings.show(.workspaces)
             return
         }
         if !sessionsPanel.isVisible {
@@ -258,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             pendingVideoPath = path
             videoAnnotatePreview.hide()
             overlay.exit()
-            settings.show(.agent)
+            settings.show(.workspaces)
             return
         }
         annotatePanel.hide()
@@ -285,7 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else {
             overlay.exit()
-            settings.show(.agent)
+            settings.show(.workspaces)
             return
         }
 
@@ -743,18 +749,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem.button?.attributedTitle = sessionBadgeTitle()
         statusItem.button?.appearsDisabled = false
 
-        var tip = overlay.isActive
-            ? "AiHand is on — click to turn off, right-click for the menu"
-            : "AiHand — click to turn on, right-click for the menu"
-        let active = sessionStore.activeCount
-        let completed = sessionStore.completedCount
-        if active > 0 || completed > 0 {
-            var parts: [String] = []
-            if active > 0 { parts.append("\(active) active") }
-            if completed > 0 { parts.append("\(completed) completed") }
-            tip += "\n" + parts.joined(separator: " · ")
-        }
-        statusItem.button?.toolTip = tip
     }
 
     private func sessionBadgeTitle() -> NSAttributedString {

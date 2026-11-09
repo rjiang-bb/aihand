@@ -103,7 +103,6 @@ struct SessionChatView: View {
                 enabled: compact && onPanelDragEnded != nil,
                 onEnded: { onPanelDragEnded?() }
             )
-            .modifier(OptionalHelp(text: compact ? "Drag to move" : nil))
             if let onClose {
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -221,7 +220,6 @@ struct SessionChatView: View {
                     .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
             }
             .buttonStyle(.plain)
-            .help("Interrupt and send this now")
             Button {
                 session.queuedFollowUps.removeAll { $0.id == item.id }
             } label: {
@@ -233,7 +231,6 @@ struct SessionChatView: View {
                     .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
             }
             .buttonStyle(.plain)
-            .help("Remove from queue")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -289,14 +286,4 @@ private struct QueueReorderDropDelegate: DropDelegate {
     }
 }
 
-private struct OptionalHelp: ViewModifier {
-    var text: String?
-    func body(content: Content) -> some View {
-        if let text {
-            content.help(text)
-        } else {
-            content
-        }
-    }
-}
 

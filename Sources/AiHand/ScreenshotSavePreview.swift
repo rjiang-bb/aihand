@@ -262,7 +262,6 @@ final class ScreenshotSavePreview {
             .withSymbolConfiguration(config)
         b.imagePosition = .imageOnly
         b.contentTintColor = dark ? .black : .white
-        b.toolTip = "Dismiss"
         b.setAccessibilityLabel("Dismiss")
         b.translatesAutoresizingMaskIntoConstraints = false
         b.target = self
