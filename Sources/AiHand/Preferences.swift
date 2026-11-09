@@ -135,6 +135,87 @@ enum AgentCLIKind: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// Cursor Agent permission posture for unattended AiHand runs.
+enum CursorAgentPermissionMode: String, CaseIterable, Identifiable, Codable {
+    case force
+    case sandboxed
+    case autoReview
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .force: return "Force allow"
+        case .sandboxed: return "Force allow (sandbox)"
+        case .autoReview: return "Auto-review"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .force: return "Auto-approve tool calls (`--force`), unless denied by policy."
+        case .sandboxed: return "Same as force allow, with the Cursor sandbox enabled."
+        case .autoReview: return "Smart Auto: safe calls run; the rest need review (`--auto-review`)."
+        }
+    }
+}
+
+/// Claude Code permission posture for unattended AiHand runs.
+enum ClaudeAgentPermissionMode: String, CaseIterable, Identifiable, Codable {
+    case bypass
+    case acceptEdits
+    case auto
+    case dontAsk
+    case plan
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .bypass: return "Bypass permissions"
+        case .acceptEdits: return "Accept edits"
+        case .auto: return "Auto"
+        case .dontAsk: return "Don’t ask"
+        case .plan: return "Plan only"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .bypass: return "Skip permission checks (`--dangerously-skip-permissions`)."
+        case .acceptEdits: return "Auto-approve workspace file edits; other tools may still prompt."
+        case .auto: return "Background classifier screens tool calls (`--permission-mode auto`)."
+        case .dontAsk: return "Auto-deny anything that would prompt (`--permission-mode dontAsk`)."
+        case .plan: return "Explore and propose changes without editing (`--permission-mode plan`)."
+        }
+    }
+}
+
+/// Codex sandbox posture for unattended AiHand runs.
+enum CodexAgentPermissionMode: String, CaseIterable, Identifiable, Codable {
+    case workspaceWrite
+    case readOnly
+    case fullAccess
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .workspaceWrite: return "Workspace write"
+        case .readOnly: return "Read only"
+        case .fullAccess: return "Full access"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .workspaceWrite: return "Edit and run commands inside the workspace (`--sandbox workspace-write`)."
+        case .readOnly: return "Inspect only; no edits (`--sandbox read-only`)."
+        case .fullAccess: return "No sandbox; network and filesystem unrestricted (`danger-full-access`)."
+        }
+    }
+}
+
 enum InkChoice: String, CaseIterable {
     case match, red, orange, yellow, green, blue, purple, white, black
 
@@ -368,6 +449,51 @@ enum Preferences {
         set {
             defaults.set(newValue.rawValue, forKey: "agentCLI")
             ensureAgentFavorites()
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Per-CLI permission / sandbox mode (`cliKind.rawValue` → mode rawValue).
+    private static var agentPermissionModesByCLI: [String: String] {
+        get { defaults.dictionary(forKey: "agentPermissionModes") as? [String: String] ?? [:] }
+        set { defaults.set(newValue, forKey: "agentPermissionModes") }
+    }
+
+    static var cursorPermissionMode: CursorAgentPermissionMode {
+        get {
+            agentPermissionModesByCLI[AgentCLIKind.cursor.rawValue]
+                .flatMap(CursorAgentPermissionMode.init(rawValue:)) ?? .force
+        }
+        set {
+            var map = agentPermissionModesByCLI
+            map[AgentCLIKind.cursor.rawValue] = newValue.rawValue
+            agentPermissionModesByCLI = map
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    static var claudePermissionMode: ClaudeAgentPermissionMode {
+        get {
+            agentPermissionModesByCLI[AgentCLIKind.claude.rawValue]
+                .flatMap(ClaudeAgentPermissionMode.init(rawValue:)) ?? .bypass
+        }
+        set {
+            var map = agentPermissionModesByCLI
+            map[AgentCLIKind.claude.rawValue] = newValue.rawValue
+            agentPermissionModesByCLI = map
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    static var codexPermissionMode: CodexAgentPermissionMode {
+        get {
+            agentPermissionModesByCLI[AgentCLIKind.codex.rawValue]
+                .flatMap(CodexAgentPermissionMode.init(rawValue:)) ?? .workspaceWrite
+        }
+        set {
+            var map = agentPermissionModesByCLI
+            map[AgentCLIKind.codex.rawValue] = newValue.rawValue
+            agentPermissionModesByCLI = map
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
@@ -825,6 +951,7 @@ enum Preferences {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
                     "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI",
+                    "agentPermissionModes",
                     "agentWorkspace", "agentWorkspaceRoot", "agentWorkspaces", "agentWorktreeByRoot",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY",

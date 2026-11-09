@@ -31,9 +31,25 @@ struct AgentComposerView: View {
 
     @StateObject private var skillAC = SkillAutocompleteController()
     @State private var newlineMonitor: Any?
+    /// Content width of the prompt field (excludes padding); drives soft-wrap height.
+    @State private var fieldWidth: CGFloat = 360
+
+    private let promptLineLimit = 1...12
+    private let promptFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 
     private var trimmed: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Soft-wrapped height for the current prompt. Vertical TextField alone often keeps a
+    /// single-line intrinsic size on macOS, so the floating annotate panel never grows.
+    private var promptFieldMinHeight: CGFloat {
+        Self.measuredTextHeight(
+            text: text,
+            width: max(40, fieldWidth),
+            font: promptFont,
+            maxLines: promptLineLimit.upperBound
+        )
     }
 
     private var canSend: Bool {
@@ -69,10 +85,16 @@ struct AgentComposerView: View {
 
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(placeholder, text: $text, axis: .vertical)
-                    .lineLimit(1...12)
+                    .lineLimit(promptLineLimit)
                     .textFieldStyle(.plain)
                     .foregroundStyle(.primary)
                     .focused($focused)
+                    .frame(minHeight: promptFieldMinHeight, alignment: .topLeading)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(key: PromptFieldWidthKey.self, value: geo.size.width)
+                        }
+                    )
                     .padding(10)
                     .background(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -87,6 +109,11 @@ struct AgentComposerView: View {
                                     )
                             )
                     )
+                    .onPreferenceChange(PromptFieldWidthKey.self) { width in
+                        guard abs(width - fieldWidth) > 0.5 else { return }
+                        fieldWidth = width
+                        requestLayout()
+                    }
                     .onSubmit {
                         if skillAC.isActive {
                             applySelectedSkill()
@@ -161,15 +188,45 @@ struct AgentComposerView: View {
         }
         .onChange(of: text) { _ in
             skillAC.update(text: text)
-            onLayoutNeeded?()
+            requestLayout()
         }
         .onChange(of: skillAC.isActive) { _ in
-            onLayoutNeeded?()
+            requestLayout()
         }
         .onDisappear {
             removeNewlineMonitor()
             skillAC.teardown()
         }
+    }
+
+    private func requestLayout() {
+        // Defer so SwiftUI applies the new minHeight before the panel reads fittingSize.
+        DispatchQueue.main.async {
+            onLayoutNeeded?()
+        }
+    }
+
+    private static func measuredTextHeight(
+        text: String,
+        width: CGFloat,
+        font: NSFont,
+        maxLines: Int
+    ) -> CGFloat {
+        let lineHeight = max(1, ceil(font.ascender - font.descender + font.leading))
+        let sample = text.isEmpty ? " " : text
+        let storage = NSTextStorage(attributedString: NSAttributedString(
+            string: sample,
+            attributes: [.font: font]
+        ))
+        let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        let layout = NSLayoutManager()
+        layout.addTextContainer(container)
+        storage.addLayoutManager(layout)
+        _ = layout.glyphRange(for: container)
+        let used = ceil(layout.usedRect(for: container).height)
+        let maxHeight = lineHeight * CGFloat(maxLines)
+        return min(max(used, lineHeight), maxHeight)
     }
 
     private var favoritePicker: some View {
@@ -285,5 +342,12 @@ struct AgentComposerView: View {
             return editor
         }
         return nil
+    }
+}
+
+private enum PromptFieldWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }

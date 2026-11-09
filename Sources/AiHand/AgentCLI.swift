@@ -117,12 +117,11 @@ struct CursorAgentCLI: AgentCLI {
     ) -> [String] {
         var args = [
             "-p",
-            "--force",
-            "--trust",
             "--workspace", workspace,
             "--output-format", "stream-json",
             "--stream-partial-output"
         ]
+        appendPermissionFlags(&args)
         appendCursorModel(&args, model: model, effort: effort)
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
@@ -142,13 +141,12 @@ struct CursorAgentCLI: AgentCLI {
     ) -> [String] {
         var args = [
             "-p",
-            "--force",
-            "--trust",
             "--workspace", workspace,
             "--resume", chatId,
             "--output-format", "stream-json",
             "--stream-partial-output"
         ]
+        appendPermissionFlags(&args)
         appendCursorModel(&args, model: model, effort: effort)
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
@@ -159,6 +157,19 @@ struct CursorAgentCLI: AgentCLI {
             args.append(prompt)
         }
         return args
+    }
+
+    private func appendPermissionFlags(_ args: inout [String]) {
+        // Workspace is chosen in Settings; always trust it for unattended annotate runs.
+        args.append("--trust")
+        switch Preferences.cursorPermissionMode {
+        case .force:
+            args.append("--force")
+        case .sandboxed:
+            args += ["--force", "--sandbox", "enabled"]
+        case .autoReview:
+            args.append("--auto-review")
+        }
     }
 
     private func appendCursorModel(_ args: inout [String], model: String?, effort: String?) {
@@ -190,14 +201,13 @@ struct ClaudeAgentCLI: AgentCLI {
         effort: String?
     ) -> [String] {
         // Workspace is the process cwd (set by AgentSessionRunner). Claude has no --workspace
-        // flag; --dangerously-skip-permissions matches Cursor `--force` for unattended runs.
-        // --verbose is required for useful stream-json assistant/tool events.
+        // flag. --verbose is required for useful stream-json assistant/tool events.
         var args = [
             "-p",
             "--verbose",
-            "--output-format", "stream-json",
-            "--dangerously-skip-permissions"
+            "--output-format", "stream-json"
         ]
+        appendPermissionFlags(&args)
         if let model, !model.isEmpty {
             args += ["--model", model]
         }
@@ -221,9 +231,9 @@ struct ClaudeAgentCLI: AgentCLI {
             "-p",
             "--verbose",
             "--output-format", "stream-json",
-            "--dangerously-skip-permissions",
             "--resume", chatId
         ]
+        appendPermissionFlags(&args)
         if let model, !model.isEmpty {
             args += ["--model", model]
         }
@@ -236,6 +246,21 @@ struct ClaudeAgentCLI: AgentCLI {
             args.append(prompt)
         }
         return args
+    }
+
+    private func appendPermissionFlags(_ args: inout [String]) {
+        switch Preferences.claudePermissionMode {
+        case .bypass:
+            args.append("--dangerously-skip-permissions")
+        case .acceptEdits:
+            args += ["--permission-mode", "acceptEdits"]
+        case .auto:
+            args += ["--permission-mode", "auto"]
+        case .dontAsk:
+            args += ["--permission-mode", "dontAsk"]
+        case .plan:
+            args += ["--permission-mode", "plan"]
+        }
     }
 }
 
@@ -256,24 +281,13 @@ struct CodexAgentCLI: AgentCLI {
         model: String?,
         effort: String?
     ) -> [String] {
-        // `codex exec` is the non-interactive entry point. workspace-write matches Cursor's
-        // auto-approve editing intent without full --yolo. --skip-git-repo-check allows
+        // `codex exec` is the non-interactive entry point. --skip-git-repo-check allows
         // arbitrary folders chosen in Settings.
-        var args = [
-            "exec",
-            "--json",
-            "--sandbox", "workspace-write",
-            "--skip-git-repo-check",
-            "-C", workspace
-        ]
-        if let model, !model.isEmpty {
-            args += ["-m", model]
-        }
-        if let effort, !effort.isEmpty {
-            args += ["-c", "model_reasoning_effort=\(effort)"]
-        }
+        var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            args += ["--image", imagePath]
+            // `--` stops greedy `--image` (num_args=1..) from swallowing the prompt
+            // (openai/codex#30106 → exit 1 "No prompt provided via stdin").
+            args += ["--image", imagePath, "--"]
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
         } else {
             // Video (or unknown): path in prompt so Codex can open the file.
@@ -290,22 +304,11 @@ struct CodexAgentCLI: AgentCLI {
         model: String?,
         effort: String?
     ) -> [String] {
-        var args = [
-            "exec",
-            "--json",
-            "--sandbox", "workspace-write",
-            "--skip-git-repo-check",
-            "-C", workspace
-        ]
-        if let model, !model.isEmpty {
-            args += ["-m", model]
-        }
-        if let effort, !effort.isEmpty {
-            args += ["-c", "model_reasoning_effort=\(effort)"]
-        }
+        var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         args += ["resume", chatId]
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            args += ["--image", imagePath]
+            // Keep `--` for consistency if resume's --image is ever greedy again.
+            args += ["--image", imagePath, "--"]
             args.append(prompt)
         } else if let imagePath {
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
@@ -313,6 +316,36 @@ struct CodexAgentCLI: AgentCLI {
             args.append(prompt)
         }
         return args
+    }
+
+    private func baseExecArguments(workspace: String, model: String?, effort: String?) -> [String] {
+        var args = [
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "-C", workspace
+        ]
+        appendPermissionFlags(&args)
+        if let model, !model.isEmpty {
+            args += ["-m", model]
+        }
+        if let effort, !effort.isEmpty {
+            args += ["-c", "model_reasoning_effort=\(effort)"]
+        }
+        return args
+    }
+
+    private func appendPermissionFlags(_ args: inout [String]) {
+        switch Preferences.codexPermissionMode {
+        case .workspaceWrite:
+            // Matches Cursor's auto-approve editing intent without full --yolo.
+            args += ["--sandbox", "workspace-write"]
+        case .readOnly:
+            // Never escalate: AiHand has no TTY for approval prompts.
+            args += ["--sandbox", "read-only", "-a", "never"]
+        case .fullAccess:
+            args += ["--sandbox", "danger-full-access", "-a", "never"]
+        }
     }
 }
 
