@@ -29,9 +29,10 @@ Holding **⌘** shows shortcut badges and a hints footer (`⌘1–9` / `⌘↑�
 
 ## ⌘/ model cycling
 
-**⌘/** cycles the open chat’s favorite models for that session’s CLI (wraps).
+**⌘/** cycles favorite models (wraps) in the open chat and in the annotate comment box while drawing.
 
-- Own the shortcut in `SessionsSidePanel`’s key monitor when the panel is key, and keep the app menu item “Cycle Agent Model” (`AppDelegate`) as the fallback — menu key equivalents are more reliable than local monitors with ⌘ held.
+- Own the shortcut in `SessionsSidePanel`’s key monitor when the panel is key, in `AnnotatePromptPanel` while commenting, and keep the app menu item “Cycle Agent Model” (`AppDelegate`) as the fallback — menu key equivalents are more reliable than local monitors with ⌘ held.
+- Capture screen ↔ window while drawing is **⌘B** (not ⌘/) so model cycling stays free in the comment box.
 - Do **not** also consume ⌘/ in `SessionChatView` (double-cycle skips favorites).
 - Do **not** call `closeChat()` from `windowDidResignKey`. Menu key equivalents and the favorite picker resign key briefly; collapsing clears `selectedID` and makes ⌘/ a no-op. Use Esc / the chat close control to dismiss chat.
 

@@ -160,7 +160,6 @@ struct AgentComposerView: View {
                     Spacer(minLength: 8)
                     hintPair(key: "⌘/", label: "model")
                 } else {
-                    hintPair(key: "⇧↩", label: "newline")
                     hintPair(key: "Enter", label: "send to agent")
                     hintPair(key: "Esc", label: "cancel")
                     Spacer(minLength: 8)

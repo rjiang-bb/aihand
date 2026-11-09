@@ -260,7 +260,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         margin: 0; padding: 0;
         background: var(--bg);
         color: var(--text);
-        font: 13.5px/1.55 var(--sans);
+        font: 14.5px/1.55 var(--sans);
         -webkit-user-select: text;
         user-select: text;
       }
@@ -284,7 +284,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .msg.tool-group {
         align-self: stretch;
         max-width: 100%;
-        font: 12.5px/1.45 var(--sans);
+        font: 13.5px/1.45 var(--sans);
         color: var(--muted);
       }
       .msg.tool-group .tool-summary {
@@ -319,7 +319,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         margin: 4px 0 2px 14px;
         padding: 0;
         font-family: var(--mono);
-        font-size: 11.5px;
+        font-size: 12.5px;
         color: var(--muted);
       }
       .msg.tool-group.expanded .tool-details { display: block; }
@@ -332,7 +332,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .msg.tool-group .tool-detail .glyph {
         flex: none;
         opacity: 0.75;
-        font-size: 11px;
+        font-size: 12px;
         line-height: 1.45;
       }
       .msg.tool-group .tool-detail .tool-body {
@@ -347,7 +347,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         background: var(--system-bg);
         border-radius: 10px;
         padding: 8px 10px;
-        font-size: 12px;
+        font-size: 13px;
         color: var(--text);
       }
       .msg img.shot {
@@ -424,7 +424,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md pre code {
         background: none;
         padding: 0;
-        font-size: 12px;
+        font-size: 13px;
         line-height: 1.45;
       }
       .md blockquote {
@@ -442,7 +442,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-collapse: collapse;
         width: 100%;
         margin: 0.7em 0;
-        font-size: 12.5px;
+        font-size: 13.5px;
       }
       .md th, .md td {
         border: 1px solid var(--border);
@@ -453,7 +453,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         color: var(--muted);
         text-align: center;
         padding: 40px 20px;
-        font-size: 13px;
+        font-size: 14px;
       }
     </style>
     </head>

@@ -92,11 +92,11 @@ struct SessionChatView: View {
                 statusBadge
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(solidFG)
                         .lineLimit(1)
                     Text(statusLabel)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(solidFG.opacity(0.6))
                 }
                 Spacer(minLength: 0)
@@ -204,7 +204,7 @@ struct SessionChatView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 14)
             Text(item.text)
-                .font(.system(size: 12.5))
+                .font(.system(size: 13.5))
                 .foregroundStyle(.primary)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
