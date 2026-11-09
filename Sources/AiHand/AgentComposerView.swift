@@ -25,6 +25,8 @@ struct AgentComposerView: View {
     var onSend: () -> Void
     var onQueue: (() -> Void)? = nil
     var onStop: (() -> Void)? = nil
+    /// Follow-up only: enter drawing mode and send the capture back to this session.
+    var onDraw: (() -> Void)? = nil
     /// Called when the composer height may have changed (newline, skills list).
     var onLayoutNeeded: (() -> Void)? = nil
     @FocusState.Binding var focused: Bool
@@ -109,6 +111,19 @@ struct AgentComposerView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Stop (⌃C)")
+                }
+
+                if kind == .followUp, let onDraw {
+                    Button(action: onDraw) {
+                        Image(systemName: "pencil.tip.crop.circle.fill")
+                            .font(.system(size: 28))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(Color.primary.opacity(0.85))
+                            .softHoverInnerBorder(Circle(), inset: 2.5)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("d", modifiers: .command)
+                    .help("Draw (⌘D)")
                 }
 
                 Button(action: {

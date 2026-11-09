@@ -28,6 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var pendingStrokes: [StrokeResult] = []
     /// Video waiting for an annotate comment (`⌘S` in video mode).
     private var pendingVideoPath: String?
+    /// When set, annotate → agent follow-ups this session instead of starting a new one.
+    private var annotationTargetSessionID: UUID?
     private var sessionIconBag: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -43,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             // Drawing mode owns the screen — keep sessions/chat out of the way.
             if self.overlay.isActive {
                 self.sessionsPanel.hide()
+            } else {
+                // Esc / exit without send — don't keep a stale chat-draw target.
+                self.annotationTargetSessionID = nil
             }
         }
         overlay.onSoundChanged = { [weak self] in
@@ -104,6 +109,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         sessionsPanel.onStartDrawing = { [weak self] in
             self?.startPointerWithSessions()
+        }
+        sessionsPanel.onDrawForSession = { [weak self] id in
+            self?.startDrawingForSession(id)
         }
         sessionsPanel.onOpenSettings = { [weak self] in
             self?.settings.show()
@@ -267,12 +275,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             settings.show(.workspaces)
             return
         }
+        let targetID = annotationTargetSessionID
+        annotationTargetSessionID = nil
         annotatePanel.hide()
         videoAnnotatePreview.hide()
         overlay.exit()
-        if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: path) {
-            sessionsPanel.openChat(for: session.id)
-        }
+        deliverAnnotation(prompt: prompt, mediaPath: path, targetSessionID: targetID)
     }
 
     private func inkScreenBounds() -> CGRect? {
@@ -299,6 +307,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         let strokes = pendingStrokes
         pendingStrokes = []
+        let targetID = annotationTargetSessionID
+        annotationTargetSessionID = nil
 
         guard let overlayFrame = overlay.overlayFrame else {
             overlay.exit()
@@ -326,9 +336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 }
                 self.overlay.clearInk()
                 self.overlay.exit()
-                if let session = self.sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: outcome.path) {
-                    self.sessionsPanel.openChat(for: session.id)
-                }
+                self.deliverAnnotation(prompt: prompt, mediaPath: outcome.path, targetSessionID: targetID)
             } catch {
                 for stroke in strokes {
                     self.overlay.releaseStrokeHold(stroke, fadeNow: false)
@@ -337,6 +345,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 self.overlay.exit()
                 self.presentCaptureFailure(error, kind: .screenshot)
             }
+        }
+    }
+
+    /// New session, or follow-up on the chat that started Draw (⌘D).
+    private func deliverAnnotation(prompt: String, mediaPath: String, targetSessionID: UUID?) {
+        if let targetSessionID, sessionStore.session(id: targetSessionID) != nil {
+            sessionManager.followUp(
+                sessionID: targetSessionID,
+                text: prompt,
+                submit: .sendNow,
+                imagePath: mediaPath
+            )
+            sessionsPanel.openChat(for: targetSessionID)
+            return
+        }
+        if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: mediaPath) {
+            sessionsPanel.openChat(for: session.id)
         }
     }
 
@@ -638,7 +663,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func startPointerWithSessions() {
+        annotationTargetSessionID = nil
         // onActiveChanged hides sessions once the overlay is actually active.
+        _ = overlay.activate()
+    }
+
+    /// Draw from an open chat — send/annotate follows up on that session.
+    private func startDrawingForSession(_ id: UUID) {
+        guard sessionStore.session(id: id) != nil else { return }
+        annotationTargetSessionID = id
         _ = overlay.activate()
     }
 

@@ -6,6 +6,7 @@ struct SessionChatView: View {
     @ObservedObject var session: AgentSession
     var onSend: (String, FollowUpSubmit) -> Void
     var onStop: () -> Void
+    var onDraw: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
     var compact: Bool = false
     var onPanelDragEnded: (() -> Void)? = nil
@@ -58,6 +59,7 @@ struct SessionChatView: View {
                 onSend: { submit(.sendNow) },
                 onQueue: { submit(.queue) },
                 onStop: onStop,
+                onDraw: onDraw,
                 focused: $composerFocused
             )
             .padding(.horizontal, 12)
