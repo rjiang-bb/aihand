@@ -299,6 +299,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         installShortcutMonitors()
+        store.setGitPollingEnabled(true)
         // Nonactivating panels sometimes need a second pass after ordering front.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isVisible else { return }
@@ -320,6 +321,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         }
         persistListPlacement()
         removeShortcutMonitors()
+        store.setGitPollingEnabled(false)
         selection.showShortcutBadges = false
         selection.closeWorkspacePicker()
         selection.suppressWorkspacePicker = false
@@ -787,6 +789,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) {
         installShortcutMonitors()
+        // Re-probe branch / dirty stats when returning from the editor.
+        store.setGitPollingEnabled(true)
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -1514,6 +1518,12 @@ private struct SessionsSidePanelView: View {
                         Preferences.selectAgentWorktree(path, root: root)
                         store.refreshGitInfo()
                     },
+                    onRemoved: { _, root, wasCurrent in
+                        if wasCurrent {
+                            Preferences.selectAgentWorktree(root, root: root)
+                        }
+                        store.refreshGitInfo()
+                    },
                     onManage: {
                         selection.closeGitPicker(suppressUntilCtrlUp: selection.showGitPicker)
                         onManageWorkspaces()
@@ -1890,6 +1900,8 @@ private struct GitWorktreePicker: View {
     @Binding var pinned: Bool
     var onSelect: (GitWorktreeEntry) -> Void
     var onAdded: (String, String) -> Void
+    /// Called after a linked worktree is removed. `wasCurrent` is true when the deleted path was selected.
+    var onRemoved: (_ path: String, _ root: String, _ wasCurrent: Bool) -> Void
     var onManage: () -> Void
 
     @State private var branchName = ""
@@ -1901,7 +1913,13 @@ private struct GitWorktreePicker: View {
     private var fg: Color { colorScheme == .dark ? .white : .black }
 
     private var current: GitWorktreeEntry? {
-        repo.entry(forPath: currentPath) ?? repo.worktrees.first
+        // Prefer the active path only — do not fall back to “newest” worktree after sort.
+        repo.entry(forPath: currentPath)
+    }
+
+    private var branchTitle: String {
+        let name = current?.branch.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "Branch" : name
     }
 
     private var canAdd: Bool {
@@ -1918,13 +1936,14 @@ private struct GitWorktreePicker: View {
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
                         .frame(width: 30, height: 30)
-                    Text(current?.branch ?? "Branch")
+                    Text(branchTitle)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(fg)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 4)
-                    if let diff = current?.displayedDiff, !diff.isEmpty {
+                    // Working-tree changes only — same idea as the editor “Changes” badge.
+                    if let diff = current?.workingDiff, !diff.isEmpty {
                         GitDiffLinesView(diff: diff)
                     }
                     Image(systemName: "chevron.up.chevron.down")
@@ -1955,7 +1974,8 @@ private struct GitWorktreePicker: View {
                         shortcutIndex: index + 1,
                         isCurrent: SessionStore.sameWorkspace(entry.path, currentPath),
                         fg: fg,
-                        onSelect: { onSelect(entry) }
+                        onSelect: { onSelect(entry) },
+                        onRemove: { removeWorktree(entry) }
                     )
                     if index < repo.worktrees.count - 1 {
                         Rectangle()
@@ -2001,6 +2021,26 @@ private struct GitWorktreePicker: View {
                     onAdded(path, root)
                 } else {
                     errorMessage = result.error ?? "Couldn’t add worktree."
+                }
+            }
+        }
+    }
+
+    private func removeWorktree(_ entry: GitWorktreeEntry) {
+        guard !busy, !entry.isPrimary, entry.workingDiff.isEmpty else { return }
+        busy = true
+        errorMessage = nil
+        let root = workspaceRoot
+        let wasCurrent = SessionStore.sameWorkspace(entry.path, currentPath)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let error = GitWorkspace.removeWorktree(path: entry.path, inRepo: root)
+            DispatchQueue.main.async {
+                busy = false
+                if let error {
+                    errorMessage = error
+                } else {
+                    errorMessage = nil
+                    onRemoved(entry.path, root, wasCurrent)
                 }
             }
         }
@@ -2074,9 +2114,14 @@ private struct GitWorktreeRow: View {
     let isCurrent: Bool
     let fg: Color
     var onSelect: () -> Void
+    var onRemove: () -> Void
 
     @State private var hovering = false
     @Environment(\.colorScheme) private var colorScheme
+
+    private var canRemove: Bool {
+        !entry.isPrimary && entry.workingDiff.isEmpty
+    }
 
     var body: some View {
         Button(action: onSelect) {
@@ -2130,6 +2175,18 @@ private struct GitWorktreeRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if !entry.isPrimary {
+                // Disabled items keep the row from offering a delete that `git worktree remove` would refuse.
+                Button(role: .destructive, action: onRemove) {
+                    Label(
+                        canRemove ? "Delete Worktree" : "Delete Worktree (uncommitted changes)",
+                        systemImage: "trash"
+                    )
+                }
+                .disabled(!canRemove)
+            }
+        }
         .onHover { hovering = $0 }
     }
 }

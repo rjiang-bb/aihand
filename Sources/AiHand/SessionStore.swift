@@ -248,6 +248,13 @@ final class SessionStore: ObservableObject {
     private var saveWork: DispatchWorkItem?
     private let saveQueue = DispatchQueue(label: "net.penguinlabs.aihand.sessions", qos: .utility)
     private var gitRefreshWork: DispatchWorkItem?
+    /// Polls branch / dirty stats while the sessions panel is visible.
+    private var gitPollTimer: Timer?
+    /// Serializes `inspect` runs so a slow poll can’t stack git subprocesses.
+    private let gitProbeQueue = DispatchQueue(label: "net.penguinlabs.aihand.gitprobe", qos: .utility)
+    /// Guarded by `gitProbeQueue`: a probe is running, and the newest root requested meanwhile.
+    private var gitProbeInFlight = false
+    private var gitProbePendingKey: String?
 
     /// Sessions for the current working directory + branch (panel list / ⌘1…9).
     var sessions: [AgentSession] {
@@ -302,6 +309,7 @@ final class SessionStore: ObservableObject {
     }
 
     deinit {
+        gitPollTimer?.invalidate()
         if let prefsObserver {
             NotificationCenter.default.removeObserver(prefsObserver)
         }
@@ -353,15 +361,27 @@ final class SessionStore: ObservableObject {
         scheduleGitRefresh(forRoot: workspaceRoot.isEmpty ? currentWorkspace : workspaceRoot, force: true)
     }
 
+    /// Keep branch name + dirty stats fresh while the sessions panel is on screen.
+    func setGitPollingEnabled(_ enabled: Bool) {
+        if enabled {
+            refreshGitInfo()
+            guard gitPollTimer == nil else { return }
+            let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+                self?.refreshGitInfo()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            gitPollTimer = timer
+        } else {
+            gitPollTimer?.invalidate()
+            gitPollTimer = nil
+        }
+    }
+
     private func scheduleGitRefresh(forRoot root: String, force: Bool = false) {
         let key = Self.normalizedWorkspace(root)
         gitRefreshWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key)
-            DispatchQueue.main.async {
-                self.applyGitInfo(info, activePath: self.currentWorkspace)
-            }
+            self?.startGitProbe(for: key)
         }
         gitRefreshWork = work
         // Debounce rapid workspace flips; force path still waits a tick so UI can settle.
@@ -371,18 +391,58 @@ final class SessionStore: ObservableObject {
         )
     }
 
-    private func applyGitInfo(_ info: GitRepoInfo?, activePath: String) {
-        gitRepo = info
-        if let entry = info?.entry(forPath: activePath) {
-            currentGitBranch = entry.branch
-        } else if let info, info.worktrees.count == 1 {
-            currentGitBranch = info.worktrees[0].branch
-        } else if info == nil {
-            currentGitBranch = ""
-        } else {
-            currentGitBranch = GitWorkspace.currentBranch(in: activePath) ?? ""
+    /// Run one probe at a time. A poll that lands mid-probe coalesces into a single follow-up
+    /// instead of queueing behind every tick (slow repos would otherwise never surface results).
+    private func startGitProbe(for key: String) {
+        gitProbeQueue.async { [weak self] in
+            guard let self else { return }
+            guard !self.gitProbeInFlight else {
+                self.gitProbePendingKey = key
+                return
+            }
+            self.gitProbeInFlight = true
+            self.runGitProbe(for: key)
         }
-        objectWillChange.send()
+    }
+
+    /// Must be called on `gitProbeQueue` so the in-flight flags stay consistent.
+    private func runGitProbe(for key: String) {
+        let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            // Apply only if this root is still the one being shown (the user may have switched).
+            if key == self.probedRootKey {
+                self.applyGitInfo(info, activePath: self.currentWorkspace)
+            }
+            self.gitProbeQueue.async { [weak self] in
+                guard let self else { return }
+                self.gitProbeInFlight = false
+                guard let next = self.gitProbePendingKey else { return }
+                self.gitProbePendingKey = nil
+                self.startGitProbe(for: next)
+            }
+        }
+    }
+
+    private var probedRootKey: String {
+        Self.normalizedWorkspace(workspaceRoot.isEmpty ? currentWorkspace : workspaceRoot)
+    }
+
+    private func applyGitInfo(_ info: GitRepoInfo?, activePath: String) {
+        let branch: String
+        if let entry = info?.entry(forPath: activePath) {
+            branch = entry.branch
+        } else if let info, info.worktrees.count == 1 {
+            branch = info.worktrees[0].branch
+        } else if info == nil {
+            branch = ""
+        } else {
+            branch = GitWorkspace.currentBranch(in: activePath) ?? ""
+        }
+        // Avoid redraw churn when polling finds nothing new.
+        guard gitRepo != info || currentGitBranch != branch else { return }
+        gitRepo = info
+        currentGitBranch = branch
     }
 
     /// Back-compat name used by older call sites / mental model.

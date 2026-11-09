@@ -129,9 +129,45 @@ enum GitWorkspace {
         return nil
     }
 
-    /// Staged + unstaged vs HEAD (dirty working tree).
+    /// Staged + unstaged vs HEAD (dirty working tree), including untracked files as insertions.
+    /// Matches typical editor “Changes” counts more closely than `git diff` alone.
     static func workingDiffStat(in path: String) -> GitDiffStat {
-        parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path)?.stdout)
+        var stat = parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path)?.stdout)
+        guard let listed = runGit(
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            in: path
+        )?.stdout, !listed.isEmpty else {
+            return stat
+        }
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        for relative in listed.split(separator: "\0", omittingEmptySubsequences: true) {
+            let fileURL = root.appendingPathComponent(String(relative))
+            stat.insertions += untrackedInsertionCount(at: fileURL)
+        }
+        return stat
+    }
+
+    private static func untrackedInsertionCount(at fileURL: URL) -> Int {
+        // Stream in chunks: polling re-counts untracked files, and media files can be large.
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return 1 }
+        defer { try? handle.close() }
+        let chunkSize = 64 * 1024
+        var newlines = 0
+        var sawBytes = false
+        var endsWithNewline = false
+        while let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty {
+            // Treat binary as a single added path, like `git diff --numstat` does with `-`.
+            if chunk.contains(0) { return 1 }
+            sawBytes = true
+            newlines += chunk.reduce(into: 0) { count, byte in
+                if byte == 0x0A { count += 1 }
+            }
+            endsWithNewline = chunk.last == 0x0A
+        }
+        // Zero-byte files still count as one added path so they register as a change.
+        guard sawBytes else { return 1 }
+        // Match `wc -l`: count newlines, plus one when the file doesn’t end in a newline.
+        return endsWithNewline ? newlines : newlines + 1
     }
 
     /// Line changes on this checkout since diverging from `base` (`git diff base...HEAD`).
