@@ -6,6 +6,7 @@ final class AgentSessionRunner {
     private var stdout: Pipe?
     private var stderr: Pipe?
     private var stdoutBuffer = Data()
+    private var stderrText = ""
     private let bufferLock = NSLock()
     private var currentAssistantID: UUID?
     /// Claude stream-json re-emits full assistant snapshots that include prior `tool_use` blocks.
@@ -105,6 +106,7 @@ final class AgentSessionRunner {
         stopQuietly()
         bufferLock.lock()
         stdoutBuffer = Data()
+        stderrText = ""
         bufferLock.unlock()
         currentAssistantID = nil
         seenToolUseIDs.removeAll()
@@ -137,15 +139,21 @@ final class AgentSessionRunner {
             }
             self?.consume(data)
         }
-        err.fileHandleForReading.readabilityHandler = { handle in
+        err.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
                 return
             }
-            guard let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !text.isEmpty else { return }
-            Log.write("agent stderr: \(text)")
+            guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+            Log.write("agent stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            self?.bufferLock.lock()
+            self?.stderrText.append(text)
+            // Cap so a noisy CLI cannot grow unbounded.
+            if let self, self.stderrText.count > 8_000 {
+                self.stderrText = String(self.stderrText.suffix(6_000))
+            }
+            self?.bufferLock.unlock()
         }
 
         process.terminationHandler = { [weak self] proc in
@@ -572,7 +580,14 @@ final class AgentSessionRunner {
                 if session.preview.isEmpty { session.preview = "Finished" }
             } else {
                 session.status = .waiting
-                let msg = "Agent exited (\(status)). Check that you’re logged in (\(session.cliKind.loginHint))."
+                bufferLock.lock()
+                let err = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+                bufferLock.unlock()
+                var msg = "Agent exited (\(status)). Check that you’re logged in (\(session.cliKind.loginHint))."
+                if !err.isEmpty {
+                    let snippet = err.count > 400 ? String(err.suffix(400)) : err
+                    msg += "\n\n\(snippet)"
+                }
                 session.errorMessage = msg
                 session.preview = msg
                 session.messages.append(AgentMessage(kind: .system, text: msg))

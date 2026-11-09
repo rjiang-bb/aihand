@@ -285,10 +285,11 @@ struct CodexAgentCLI: AgentCLI {
         // arbitrary folders chosen in Settings.
         var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            // `--` stops greedy `--image` (num_args=1..) from swallowing the prompt
-            // (openai/codex#30106 → exit 1 "No prompt provided via stdin").
-            args += ["--image", imagePath, "--"]
+            // `--image` is greedy (num_args=1..): put the prompt *before* it so clap
+            // does not consume the prompt as another image path (openai/codex#30106 / #40545).
+            // `--` alone does not fix this; prompt-first does.
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
+            args += ["--image", imagePath]
         } else {
             // Video (or unknown): path in prompt so Codex can open the file.
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
@@ -307,9 +308,9 @@ struct CodexAgentCLI: AgentCLI {
         var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         args += ["resume", chatId]
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            // Keep `--` for consistency if resume's --image is ever greedy again.
-            args += ["--image", imagePath, "--"]
+            // resume's --image is num_args=1, but keep prompt-first for consistency.
             args.append(prompt)
+            args += ["--image", imagePath]
         } else if let imagePath {
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         } else {
@@ -336,15 +337,16 @@ struct CodexAgentCLI: AgentCLI {
     }
 
     private func appendPermissionFlags(_ args: inout [String]) {
+        // `codex exec` no longer takes `-a` / `--ask-for-approval` (clap rejects it → exit 2).
         switch Preferences.codexPermissionMode {
         case .workspaceWrite:
             // Matches Cursor's auto-approve editing intent without full --yolo.
             args += ["--sandbox", "workspace-write"]
         case .readOnly:
-            // Never escalate: AiHand has no TTY for approval prompts.
-            args += ["--sandbox", "read-only", "-a", "never"]
+            args += ["--sandbox", "read-only"]
         case .fullAccess:
-            args += ["--sandbox", "danger-full-access", "-a", "never"]
+            // Unattended: skip approvals + sandbox (AiHand has no TTY for prompts).
+            args.append("--dangerously-bypass-approvals-and-sandbox")
         }
     }
 }

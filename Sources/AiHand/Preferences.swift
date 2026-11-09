@@ -211,7 +211,7 @@ enum CodexAgentPermissionMode: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .workspaceWrite: return "Edit and run commands inside the workspace (`--sandbox workspace-write`)."
         case .readOnly: return "Inspect only; no edits (`--sandbox read-only`)."
-        case .fullAccess: return "No sandbox; network and filesystem unrestricted (`danger-full-access`)."
+        case .fullAccess: return "No sandbox or approval prompts (`--dangerously-bypass-approvals-and-sandbox`)."
         }
     }
 }

@@ -432,12 +432,9 @@ enum AgentModelCatalog {
 
     private static var codexFallbackModels: [AgentModelOption] {
         [
-            AgentModelOption(modelId: "gpt-6.1-sol", title: "GPT 6.1 Sol"),
-            AgentModelOption(modelId: "gpt-6.1-terra", title: "GPT 6.1 Terra"),
-            AgentModelOption(modelId: "gpt-5.3-codex", title: "GPT 5.3 Codex"),
-            AgentModelOption(modelId: "gpt-5.2", title: "GPT 5.2"),
-            AgentModelOption(modelId: "o3", title: "o3"),
-            AgentModelOption(modelId: "o4-mini", title: "o4-mini")
+            AgentModelOption(modelId: "gpt-6-luna", title: "GPT-6-Luna"),
+            AgentModelOption(modelId: "gpt-5.6-terra", title: "GPT-5.6-Terra"),
+            AgentModelOption(modelId: "gpt-5.6-luna", title: "GPT-5.6-Luna")
         ]
     }
 
@@ -535,22 +532,24 @@ enum AgentModelCatalog {
         process.executableURL = URL(fileURLWithPath: exe)
         process.arguments = args
         let out = Pipe()
-        let err = Pipe()
+        // Discard stderr — a Pipe we never drain can still deadlock on large/noisy CLIs.
         process.standardOutput = out
-        process.standardError = err
+        process.standardError = FileHandle.nullDevice
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
-        let extras = ["\(home)/.local/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+        let extras = ["\(home)/.local/bin", "/usr/local/bin", "/opt/homebrew/bin", "\(home)/.npm-global/bin"]
         let path = env["PATH"] ?? "/usr/bin:/bin"
         env["PATH"] = (extras + [path]).joined(separator: ":")
         process.environment = env
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return nil
         }
+        // Read before/while waiting. `codex debug models` is ~300KB; waiting first fills the
+        // pipe buffer (~64KB) and deadlocks forever (Settings stuck on "Loading…").
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         let text = String(data: data, encoding: .utf8) ?? ""
         return text.isEmpty ? nil : text
     }

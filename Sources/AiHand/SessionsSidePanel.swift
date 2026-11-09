@@ -1131,7 +1131,10 @@ private enum SessionsListMetrics {
     private static let gitPickerAdd: CGFloat = 44
     private static let pickerManage: CGFloat = 36
     private static let pickerDivider: CGFloat = 1
-    private static let columnGap: CGFloat = 16
+    /// Space between workspace + branch pickers (keep tight — they read as one control stack).
+    private static let pickerStackGap: CGFloat = 6
+    /// Space between the picker stack and the sessions list / empty card.
+    private static let columnGap: CGFloat = 6
     /// Embedded session row: 8+8 pad + 14pt title + 4 gap + 13pt single-line preview.
     private static let row: CGFloat = 54
     private static let rowGap: CGFloat = 4
@@ -1139,8 +1142,8 @@ private enum SessionsListMetrics {
     private static let listPadBottom: CGFloat = 8
     private static let listPadBottomPaginated: CGFloat = 4
     private static let footer: CGFloat = 40
-    /// Empty list card: copy + two action buttons.
-    private static let emptyHint: CGFloat = 160
+    /// Empty list card: 12+12 pad + copy + 12 gap + two 34pt buttons (+ 8 gap).
+    private static let emptyHint: CGFloat = 132
 
     static var maxPanelHeight: CGFloat {
         panelHeight(sessionCount: SessionsListPaging.pageSize + 1)
@@ -1197,7 +1200,7 @@ private enum SessionsListMetrics {
             expanded: workspacePickerExpanded
         )
         let gitH = gitPickerHeight(worktreeCount: gitWorktreeCount, expanded: gitPickerExpanded)
-        let gitGap = gitH > 0 ? columnGap : 0
+        let gitGap = gitH > 0 ? pickerStackGap : 0
         if sessionCount <= 0 {
             return pickerH + gitGap + gitH + columnGap + emptyHint
         }
@@ -1459,76 +1462,78 @@ private struct SessionsSidePanelView: View {
     }
 
     private var sessionsColumn: some View {
-        VStack(spacing: 16) {
-            WorkspacePicker(
-                store: store,
-                folders: store.workspaceFolders,
-                current: store.workspaceRoot.isEmpty ? store.currentWorkspace : store.workspaceRoot,
-                isOpen: selection.workspacePickerExpanded,
-                pinned: Binding(
-                    get: { selection.pinnedWorkspacePicker },
-                    set: {
-                        selection.pinnedWorkspacePicker = $0
-                        if $0 { selection.closeGitPicker() }
-                    }
-                ),
-                onSelect: {
-                    // Stay open while ⌥ is held; collapse only a click-pinned menu.
-                    if !selection.showWorkspacePicker {
-                        selection.closeWorkspacePicker()
-                    }
-                    Preferences.selectAgentWorkspace($0)
-                },
-                onManage: {
-                    // Leave the picker (Settings) even if ⌥ is still down.
-                    selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
-                    onManageWorkspaces()
-                }
-            )
-            if let git = store.gitRepo, !git.worktrees.isEmpty {
-                GitWorktreePicker(
-                    repo: git,
-                    currentPath: store.currentWorkspace,
-                    workspaceRoot: {
-                        let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
-                        return store.workspaceFolders.first {
-                            SessionStore.sameWorkspace($0, preferred)
-                        } ?? preferred
-                    }(),
-                    isOpen: selection.gitPickerExpanded,
+        VStack(spacing: 6) {
+            VStack(spacing: 6) {
+                WorkspacePicker(
+                    store: store,
+                    folders: store.workspaceFolders,
+                    current: store.workspaceRoot.isEmpty ? store.currentWorkspace : store.workspaceRoot,
+                    isOpen: selection.workspacePickerExpanded,
                     pinned: Binding(
-                        get: { selection.pinnedGitPicker },
+                        get: { selection.pinnedWorkspacePicker },
                         set: {
-                            selection.pinnedGitPicker = $0
-                            if $0 { selection.closeWorkspacePicker() }
+                            selection.pinnedWorkspacePicker = $0
+                            if $0 { selection.closeGitPicker() }
                         }
                     ),
-                    onSelect: { entry in
-                        // Stay open while ⌃ is held; collapse only a click-pinned menu.
-                        if !selection.showGitPicker {
-                            selection.closeGitPicker()
+                    onSelect: {
+                        // Stay open while ⌥ is held; collapse only a click-pinned menu.
+                        if !selection.showWorkspacePicker {
+                            selection.closeWorkspacePicker()
                         }
-                        let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
-                        let root = store.workspaceFolders.first {
-                            SessionStore.sameWorkspace($0, preferred)
-                        } ?? preferred
-                        Preferences.selectAgentWorktree(entry.path, root: root)
-                    },
-                    onAdded: { path, root in
-                        Preferences.selectAgentWorktree(path, root: root)
-                        store.refreshGitInfo()
-                    },
-                    onRemoved: { _, root, wasCurrent in
-                        if wasCurrent {
-                            Preferences.selectAgentWorktree(root, root: root)
-                        }
-                        store.refreshGitInfo()
+                        Preferences.selectAgentWorkspace($0)
                     },
                     onManage: {
-                        selection.closeGitPicker(suppressUntilCtrlUp: selection.showGitPicker)
+                        // Leave the picker (Settings) even if ⌥ is still down.
+                        selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
                         onManageWorkspaces()
                     }
                 )
+                if let git = store.gitRepo, !git.worktrees.isEmpty {
+                    GitWorktreePicker(
+                        repo: git,
+                        currentPath: store.currentWorkspace,
+                        workspaceRoot: {
+                            let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
+                            return store.workspaceFolders.first {
+                                SessionStore.sameWorkspace($0, preferred)
+                            } ?? preferred
+                        }(),
+                        isOpen: selection.gitPickerExpanded,
+                        pinned: Binding(
+                            get: { selection.pinnedGitPicker },
+                            set: {
+                                selection.pinnedGitPicker = $0
+                                if $0 { selection.closeWorkspacePicker() }
+                            }
+                        ),
+                        onSelect: { entry in
+                            // Stay open while ⌃ is held; collapse only a click-pinned menu.
+                            if !selection.showGitPicker {
+                                selection.closeGitPicker()
+                            }
+                            let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
+                            let root = store.workspaceFolders.first {
+                                SessionStore.sameWorkspace($0, preferred)
+                            } ?? preferred
+                            Preferences.selectAgentWorktree(entry.path, root: root)
+                        },
+                        onAdded: { path, root in
+                            Preferences.selectAgentWorktree(path, root: root)
+                            store.refreshGitInfo()
+                        },
+                        onRemoved: { _, root, wasCurrent in
+                            if wasCurrent {
+                                Preferences.selectAgentWorktree(root, root: root)
+                            }
+                            store.refreshGitInfo()
+                        },
+                        onManage: {
+                            selection.closeGitPicker(suppressUntilCtrlUp: selection.showGitPicker)
+                            onManageWorkspaces()
+                        }
+                    )
+                }
             }
             if store.sessions.isEmpty {
                 SessionsEmptyStateCard(
@@ -1537,7 +1542,6 @@ private struct SessionsSidePanelView: View {
                     onStartDrawing: onStartDrawing,
                     onManageFolders: onManageWorkspaces
                 )
-                Spacer(minLength: 0)
             } else {
                 sessionsListContainer
             }
@@ -1699,7 +1703,7 @@ private struct SessionsEmptyStateCard: View {
     private var fg: Color { colorScheme == .dark ? .white : .black }
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             Text(hasWorkspace
                  ? "Start a session or draw on screen to annotate."
                  : "Add a working folder to start sessions here.")
@@ -1718,7 +1722,7 @@ private struct SessionsEmptyStateCard: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 18)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .background(SolidCardBackground(cornerRadius: 22, selected: false))
     }
