@@ -1315,7 +1315,8 @@ private struct WorkspacesPage: View {
             return Preferences.sshConnection(id: id)
         }()
         DispatchQueue.global(qos: .userInitiated).async {
-            let ok = GitWorkspace.inspect(path: path, connection: connection) != nil
+            // Cheap probe only — full inspect walks diffs/worktrees and is costly over SSH.
+            let ok = GitWorkspace.isRepository(path: path, connection: connection)
             DispatchQueue.main.async { isGitRepo = ok }
         }
     }

@@ -62,6 +62,13 @@ struct GitDiffLinesView: View {
 }
 
 enum GitWorkspace {
+    /// Cheap check — one `rev-parse`, no worktree/diff walks.
+    static func isRepository(path: String, connection: SSHConnection? = nil) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return runGit(["rev-parse", "--is-inside-work-tree"], in: trimmed, connection: connection)?.stdout == "true"
+    }
+
     /// Probe worktrees + branch/working diff stats for a folder. Returns nil when not a git repo.
     static func inspect(path: String, connection: SSHConnection? = nil) -> GitRepoInfo? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -131,18 +138,16 @@ enum GitWorkspace {
 
     static func workingDiffStat(in path: String, connection: SSHConnection? = nil) -> GitDiffStat {
         var stat = parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path, connection: connection)?.stdout)
+        if let connection {
+            // One remote script — never N SSH round-trips (was catastrophic on large untracked trees).
+            stat.insertions += remoteUntrackedInsertionTotal(connection: connection, repoPath: path)
+            return stat
+        }
         guard let listed = runGit(
             ["ls-files", "--others", "--exclude-standard", "-z"],
             in: path,
-            connection: connection
+            connection: nil
         )?.stdout, !listed.isEmpty else {
-            return stat
-        }
-        if let connection {
-            for relative in listed.split(separator: "\0", omittingEmptySubsequences: true) {
-                let filePath = (path as NSString).appendingPathComponent(String(relative))
-                stat.insertions += remoteUntrackedInsertionCount(connection: connection, path: filePath)
-            }
             return stat
         }
         let root = URL(fileURLWithPath: path, isDirectory: true)
@@ -153,14 +158,27 @@ enum GitWorkspace {
         return stat
     }
 
-    private static func remoteUntrackedInsertionCount(connection: SSHConnection, path: String) -> Int {
-        let escaped = SSHClient.shellEscape(path)
-        let result = SSHClient.runShell(
-            connection,
-            "if [ ! -f \(escaped) ]; then echo 1; elif grep -Iq . \(escaped) 2>/dev/null; then wc -l < \(escaped); else echo 1; fi"
-        )
+    /// Line-count untracked files in a single SSH invocation.
+    private static func remoteUntrackedInsertionTotal(connection: SSHConnection, repoPath: String) -> Int {
+        let escaped = SSHClient.shellEscape(repoPath)
+        let script = """
+        cd \(escaped) || exit 0
+        total=0
+        while IFS= read -r -d '' f; do
+          if [ ! -f "$f" ]; then
+            total=$((total + 1))
+          elif grep -Iq . "$f" 2>/dev/null; then
+            n=$(wc -l < "$f" | tr -d '[:space:]')
+            total=$((total + ${n:-1}))
+          else
+            total=$((total + 1))
+          fi
+        done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+        printf '%s' "$total"
+        """
+        let result = SSHClient.runShell(connection, script)
         let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return Int(trimmed) ?? 1
+        return Int(trimmed) ?? 0
     }
 
     private static func untrackedInsertionCount(at fileURL: URL) -> Int {
