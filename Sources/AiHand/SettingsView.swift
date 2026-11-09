@@ -1918,8 +1918,8 @@ private struct DrawingPage: View {
                 Row(
                     "Capture",
                     detail: Preferences.captureScope == .screen
-                        ? "Saves the whole display. Switch while drawing with ⌘/."
-                        : "Saves the frontmost window. Switch while drawing with ⌘/."
+                        ? "Saves the whole display. Switch while drawing with ⌘B."
+                        : "Saves the frontmost window. Switch while drawing with ⌘B."
                 ) {
                     Picker("", selection: model.binding({ Preferences.captureScope }, { Preferences.captureScope = $0 })) {
                         ForEach(CaptureScope.allCases, id: \.self) { scope in

@@ -151,11 +151,8 @@ struct CursorAgentCLI: AgentCLI {
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
             args += ["--image", imagePath]
         }
-        if let imagePath, Self.isVideoMedia(imagePath) {
-            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
-        } else {
-            args.append(prompt)
-        }
+        // Match start: empty prompt + screenshot still needs a usable instruction + path.
+        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: imagePath != nil))
         return args
     }
 
@@ -308,8 +305,8 @@ struct CodexAgentCLI: AgentCLI {
         var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         args += ["resume", chatId]
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            // resume's --image is num_args=1, but keep prompt-first for consistency.
-            args.append(prompt)
+            // resume's --image is num_args=1; prompt-first matches startArguments.
+            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
             args += ["--image", imagePath]
         } else if let imagePath {
             args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))

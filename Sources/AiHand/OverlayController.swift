@@ -1066,7 +1066,7 @@ final class OverlayController {
                     }
                 }
                 if let id = HotKeyCenter.shared.register(
-                    keyCode: UInt32(kVK_ANSI_Slash),
+                    keyCode: UInt32(kVK_ANSI_B),
                     modifiers: UInt32(cmdKey),
                     action: {
                         Preferences.captureScope = Preferences.captureScope.toggled

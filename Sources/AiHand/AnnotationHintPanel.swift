@@ -17,7 +17,7 @@ final class AnnotationHintPanel {
             (Preferences.clearShortcut.display, "clear drawing"),
             ("⌘⇧S", "save screenshot"),
             ("⌘⇧C", "copy"),
-            ("⌘/", "screen / window"),
+            ("⌘B", "screen / window"),
             ("Enter", "comment"),
             ("⌘↩", "send to agent"),
             ("Right-drag", "video"),

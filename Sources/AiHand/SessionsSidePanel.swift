@@ -8,6 +8,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
     var onStartDrawing: (() -> Void)?
+    /// Draw from the open chat — annotate send follows up on this session.
+    var onDrawForSession: ((UUID) -> Void)?
     var onOpenSettings: (() -> Void)?
     var onManageWorkspaces: (() -> Void)?
     var onDismiss: (() -> Void)?
@@ -200,6 +202,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             },
             onStartDrawing: { [weak self] in
                 self?.onStartDrawing?()
+            },
+            onDrawForSession: { [weak self] id in
+                self?.onDrawForSession?(id)
             },
             onOpenSettings: { [weak self] in
                 self?.onOpenSettings?()
@@ -1023,6 +1028,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return nil
         }
 
+        // ⌘D → draw for the open chat (follow-up annotate, not a new session).
+        if Int(event.keyCode) == kVK_ANSI_D, panel.isKeyWindow, let id = selection.selectedID {
+            onDrawForSession?(id)
+            return nil
+        }
+
         if Int(event.keyCode) == kVK_ANSI_N, panel.isKeyWindow {
             onNew?()
             return nil
@@ -1289,6 +1300,7 @@ private struct SessionsSidePanelView: View {
     var onClose: () -> Void
     var onNew: () -> Void
     var onStartDrawing: () -> Void
+    var onDrawForSession: (UUID) -> Void
     var onOpenSettings: () -> Void
     var onManageWorkspaces: () -> Void
     var onArchive: (UUID) -> Void
@@ -1350,10 +1362,12 @@ private struct SessionsSidePanelView: View {
                     session: session,
                     onSend: { text, submit in onSend(id, text, submit) },
                     onStop: { onStop(id) },
+                    onDraw: { onDrawForSession(id) },
                     onClose: onCloseChat,
                     compact: true,
                     onPanelDragEnded: onPanelDragEnded
                 )
+                .id(id)
                 .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
                 .background(SolidCardBackground(cornerRadius: 22, selected: false))
                 .overlay {

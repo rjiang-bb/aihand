@@ -206,7 +206,7 @@ final class DrawingToolsPanel {
         b.imagePosition = .imageOnly
         b.contentTintColor = dark ? .white : .black
 
-        let badge = NSTextField(labelWithString: "⌘/")
+        let badge = NSTextField(labelWithString: "⌘B")
         badge.font = .systemFont(ofSize: 9, weight: .semibold)
         badge.textColor = (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.45)
         badge.translatesAutoresizingMaskIntoConstraints = false

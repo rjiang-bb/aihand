@@ -25,6 +25,8 @@ struct AgentComposerView: View {
     var onSend: () -> Void
     var onQueue: (() -> Void)? = nil
     var onStop: (() -> Void)? = nil
+    /// Follow-up only: enter drawing mode and send the capture back to this session.
+    var onDraw: (() -> Void)? = nil
     /// Called when the composer height may have changed (newline, skills list).
     var onLayoutNeeded: (() -> Void)? = nil
     @FocusState.Binding var focused: Bool
@@ -109,6 +111,19 @@ struct AgentComposerView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Stop (⌃C)")
+                }
+
+                if kind == .followUp, let onDraw {
+                    Button(action: onDraw) {
+                        Image(systemName: "pencil.tip.crop.circle.fill")
+                            .font(.system(size: 28))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundStyle(Color.primary.opacity(0.85))
+                            .softHoverInnerBorder(Circle(), inset: 2.5)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut("d", modifiers: .command)
+                    .help("Draw (⌘D)")
                 }
 
                 Button(action: {
@@ -236,16 +251,17 @@ struct AgentComposerView: View {
         text = next
     }
 
-    /// ⇧↩ inserts a newline. Updates the SwiftUI binding so vertical TextFields grow
-    /// (needed in the floating annotate panel, which sizes from fittingSize).
+    /// ⇧↩ inserts a newline into the focused field editor and SwiftUI binding.
     private func installNewlineMonitor() {
         guard newlineMonitor == nil else { return }
         newlineMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Don't rely on FocusState — it's flaky inside NSPanels.
+            // Require FocusState so a hidden sessions chat composer doesn't steal
+            // ⇧↩ from the annotate panel (sessions is ordered out, not destroyed).
+            guard focused else { return event }
             guard let textView = Self.editableTextView(), textView.isEditable else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let code = Int(event.keyCode)
-            guard code == kVK_Return || code == 76 else { return event }
+            guard code == kVK_Return || code == kVK_ANSI_KeypadEnter else { return event }
             guard flags.contains(.shift),
                   !flags.contains(.command),
                   !flags.contains(.option),
@@ -256,14 +272,13 @@ struct AgentComposerView: View {
             let range = textView.selectedRange()
             let ns = textView.string as NSString
             let updated = ns.replacingCharacters(in: range, with: "\n")
+            // Mutate the live editor — binding-only updates often don't reach it.
+            textView.string = updated
             text = updated
-            let insertedAt = range.location + 1
+            let insertedAt = min(range.location + 1, (updated as NSString).length)
+            textView.setSelectedRange(NSRange(location: insertedAt, length: 0))
 
             DispatchQueue.main.async {
-                if let textView = Self.editableTextView() {
-                    let maxLoc = (textView.string as NSString).length
-                    textView.setSelectedRange(NSRange(location: min(insertedAt, maxLoc), length: 0))
-                }
                 onLayoutNeeded?()
             }
             return nil

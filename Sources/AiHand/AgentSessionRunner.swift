@@ -65,7 +65,8 @@ final class AgentSessionRunner {
         let appendUser = {
             session.messages.append(AgentMessage(kind: .user, text: prompt, imagePath: imagePath))
             session.status = .working
-            session.preview = prompt
+            let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            session.preview = trimmedPrompt.isEmpty && imagePath != nil ? "Annotation" : prompt
             session.errorMessage = nil
         }
         if Thread.isMainThread {
@@ -674,44 +675,53 @@ final class AgentSessionManager {
         return session
     }
 
-    func followUp(sessionID: UUID, text: String, submit: FollowUpSubmit = .sendNow) {
+    func followUp(
+        sessionID: UUID,
+        text: String,
+        submit: FollowUpSubmit = .sendNow,
+        imagePath: String? = nil
+    ) {
         guard let session = store.session(id: sessionID) else { return }
         let workspace = session.workspace
         guard !workspace.isEmpty else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        // Annotated screenshots can omit the prompt; text-only follow-ups cannot.
+        guard !trimmed.isEmpty || imagePath != nil else { return }
+        let prompt = trimmed
 
         let runner = runners[sessionID] ?? AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
         wireRunner(runner, sessionID: sessionID)
 
         let busy = session.status == .working && runner.isRunning
-        if busy, submit == .queue {
-            session.queuedFollowUps.append(QueuedFollowUp(text: trimmed))
+        // Queue is text-only — media follow-ups always send now.
+        if busy, submit == .queue, imagePath == nil {
+            session.queuedFollowUps.append(QueuedFollowUp(text: prompt))
             return
         }
 
-        if busy, submit == .sendNow {
+        if busy {
             runner.interruptQuietly()
         }
 
         // First message in a blank "New session" starts a fresh agent turn.
         let needsStart = (session.chatId == nil || session.chatId?.isEmpty == true) && session.messages.isEmpty
         if needsStart {
+            let preview = prompt.isEmpty ? "Annotation" : prompt
             let apply = {
-                session.messages.append(AgentMessage(kind: .user, text: trimmed))
+                session.messages.append(AgentMessage(kind: .user, text: prompt, imagePath: imagePath))
                 if session.title == "New session" {
-                    session.title = String(trimmed.prefix(48))
+                    session.title = String(preview.prefix(48))
                 }
-                session.preview = trimmed
+                session.preview = preview
                 session.errorMessage = nil
                 session.status = .working
             }
             if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
-            runner.start(session: session, workspace: workspace, prompt: trimmed, imagePath: nil)
+            runner.start(session: session, workspace: workspace, prompt: prompt, imagePath: imagePath)
             return
         }
 
-        runner.followUp(session: session, workspace: workspace, prompt: trimmed)
+        runner.followUp(session: session, workspace: workspace, prompt: prompt, imagePath: imagePath)
     }
 
     func removeQueuedFollowUp(sessionID: UUID, followUpID: UUID) {

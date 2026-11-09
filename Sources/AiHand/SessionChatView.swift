@@ -6,6 +6,7 @@ struct SessionChatView: View {
     @ObservedObject var session: AgentSession
     var onSend: (String, FollowUpSubmit) -> Void
     var onStop: () -> Void
+    var onDraw: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
     var compact: Bool = false
     var onPanelDragEnded: (() -> Void)? = nil
@@ -58,6 +59,7 @@ struct SessionChatView: View {
                 onSend: { submit(.sendNow) },
                 onQueue: { submit(.queue) },
                 onStop: onStop,
+                onDraw: onDraw,
                 focused: $composerFocused
             )
             .padding(.horizontal, 12)
@@ -70,6 +72,7 @@ struct SessionChatView: View {
             focusComposer()
         }
         .onChange(of: session.id) { _ in
+            draft = ""
             focusComposer()
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
@@ -89,11 +92,11 @@ struct SessionChatView: View {
                 statusBadge
                 VStack(alignment: .leading, spacing: 2) {
                     Text(session.title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(solidFG)
                         .lineLimit(1)
                     Text(statusLabel)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(solidFG.opacity(0.6))
                 }
                 Spacer(minLength: 0)
@@ -201,7 +204,7 @@ struct SessionChatView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 14)
             Text(item.text)
-                .font(.system(size: 12.5))
+                .font(.system(size: 13.5))
                 .foregroundStyle(.primary)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -252,6 +255,10 @@ struct SessionChatView: View {
         // Idle turns treat both as send-now; queue only applies while working.
         let resolved: FollowUpSubmit = (isWorking && mode == .queue) ? .queue : .sendNow
         onSend(text, resolved)
+        // Field editor can write the old string back after we clear; force empty.
+        DispatchQueue.main.async {
+            draft = ""
+        }
     }
 
     private func steerQueued(_ item: QueuedFollowUp) {

@@ -142,16 +142,16 @@ struct SkillSuggestionList: View {
                     } label: {
                         HStack(alignment: .top, spacing: 10) {
                             Image(systemName: "hexagon.fill")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.secondary)
                                 .frame(width: 18, height: 18)
                                 .padding(.top, 1)
                             VStack(alignment: .leading, spacing: 2) {
                                 highlightedName(skill.name, query: query)
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(.system(size: 14, weight: .semibold))
                                 if !skill.description.isEmpty {
                                     Text(skill.description)
-                                        .font(.system(size: 11))
+                                        .font(.system(size: 12))
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)
                                 }
