@@ -111,6 +111,7 @@ struct SessionChatView: View {
                         .foregroundStyle(solidFG)
                         .frame(width: 24, height: 24)
                         .background(Circle().fill(solidFG.opacity(0.1)))
+                        .softHoverInnerBorder(Circle(), inset: 2)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -211,6 +212,13 @@ struct SessionChatView: View {
                 Text("Steer")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.accentColor.opacity(0.12))
+                    )
+                    .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
             }
             .buttonStyle(.plain)
             .help("Interrupt and send this now")
@@ -222,6 +230,7 @@ struct SessionChatView: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 18, height: 18)
                     .background(Circle().fill(Color.primary.opacity(0.08)))
+                    .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
             }
             .buttonStyle(.plain)
             .help("Remove from queue")

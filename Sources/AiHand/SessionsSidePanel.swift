@@ -746,11 +746,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private func selectWorkspace(at index: Int) {
         guard store.workspaceFolders.indices.contains(index) else { return }
-        // Close first so listHeight already reflects collapse when the store notifies.
-        selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
+        // Keep the list open while ⌥ is held; only collapse a click-pinned menu.
+        if !selection.showWorkspacePicker {
+            selection.closeWorkspacePicker()
+            lastLaidOutListHeight = -1
+            relayoutForSessionCountIfNeeded(animateFrame: false)
+        }
         Preferences.selectAgentWorkspace(store.workspaceFolders[index])
-        lastLaidOutListHeight = -1
-        relayoutForSessionCountIfNeeded(animateFrame: false)
     }
 
     /// Slide ⌘ hints in/out inside the list card. List-only grows the panel without
@@ -814,7 +816,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌥1–9 → switch workspace by Settings order (always dismisses the picker).
+        // ⌥1–9 → switch workspace by Settings order (list stays open while ⌥ is held).
         if panel.isKeyWindow,
            flags.contains(.option),
            !flags.contains(.command),
@@ -1015,7 +1017,7 @@ private final class SessionsPanelSelection: ObservableObject {
     @Published var showWorkspacePicker = false
     /// Click-open workspace picker (survives ⌥ release).
     @Published var pinnedWorkspacePicker = false
-    /// After a selection (click or ⌥n), stay closed until ⌥ is released.
+    /// Esc (etc.) while ⌥ is held — stay closed until ⌥ is released.
     @Published var suppressWorkspacePicker = false
     @Published var listPage = 0
 
@@ -1023,7 +1025,8 @@ private final class SessionsPanelSelection: ObservableObject {
         !suppressWorkspacePicker && (showWorkspacePicker || pinnedWorkspacePicker)
     }
 
-    /// Dismiss the open list. If ⌥ is still held, suppress reopen until it is released.
+    /// Dismiss the open list. Pass `suppressUntilAltUp` when ⌥ is still down (e.g. Esc)
+    /// so the hold does not immediately reopen it.
     func closeWorkspacePicker(suppressUntilAltUp: Bool = false) {
         pinnedWorkspacePicker = false
         if suppressUntilAltUp {
@@ -1194,6 +1197,7 @@ private struct SessionsSidePanelView: View {
                             .fill(headerBG)
                             .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
                     )
+                    .softHoverInnerBorder(Capsule(style: .continuous), inset: 2)
             }
             .buttonStyle(.plain)
             .focusable(false)
@@ -1208,6 +1212,7 @@ private struct SessionsSidePanelView: View {
                             .fill(headerBG)
                             .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
                     )
+                    .softHoverInnerBorder(Circle(), inset: 2)
             }
             .buttonStyle(.plain)
             .focusable(false)
@@ -1231,10 +1236,14 @@ private struct SessionsSidePanelView: View {
                     set: { selection.pinnedWorkspacePicker = $0 }
                 ),
                 onSelect: {
-                    selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
+                    // Stay open while ⌥ is held; collapse only a click-pinned menu.
+                    if !selection.showWorkspacePicker {
+                        selection.closeWorkspacePicker()
+                    }
                     Preferences.selectAgentWorkspace($0)
                 },
                 onManage: {
+                    // Leave the picker (Settings) even if ⌥ is still down.
                     selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
                     onManageWorkspaces()
                 }
@@ -1349,6 +1358,15 @@ private struct SessionsSidePanelView: View {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 11, weight: .semibold))
                     .frame(width: 28, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.primary.opacity(0.06))
+                    )
+                    .softHoverInnerBorder(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous),
+                        inset: 1.5,
+                        enabled: page > 0
+                    )
             }
             .buttonStyle(.plain)
             .disabled(page <= 0)
@@ -1366,6 +1384,15 @@ private struct SessionsSidePanelView: View {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
                     .frame(width: 28, height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.primary.opacity(0.06))
+                    )
+                    .softHoverInnerBorder(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous),
+                        inset: 1.5,
+                        enabled: page < pages - 1
+                    )
             }
             .buttonStyle(.plain)
             .disabled(page >= pages - 1)
@@ -1438,6 +1465,10 @@ private struct WorkspacePicker: View {
                 .padding(.vertical, 13)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
+                .softHoverInnerBorder(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous),
+                    inset: 3
+                )
             }
             .buttonStyle(.plain)
             .focusable(false)
@@ -1486,6 +1517,7 @@ private struct WorkspacePickerActionRow: View {
     var onSelect: () -> Void
 
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button(action: onSelect) {
@@ -1501,6 +1533,18 @@ private struct WorkspacePickerActionRow: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 2)
                 )
+                .overlay {
+                    if hovering {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .inset(by: 2)
+                            .strokeBorder(
+                                SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
+                                lineWidth: 1.25
+                            )
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                    }
+                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1517,6 +1561,7 @@ private struct WorkspacePickerRow: View {
     var onSelect: () -> Void
 
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
 
     private var name: String {
         URL(fileURLWithPath: path).lastPathComponent
@@ -1563,6 +1608,18 @@ private struct WorkspacePickerRow: View {
                     .padding(.horizontal, 4)
                     .padding(.vertical, 2)
             )
+            .overlay {
+                if hovering {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .inset(by: 2)
+                        .strokeBorder(
+                            SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
+                            lineWidth: 1.25
+                        )
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1803,10 +1860,6 @@ private struct SolidCardBackground: View {
             .fill(base)
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.accentColor.opacity(selected ? (dark ? 0.22 : 0.12) : 0))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(
                         selected
                             ? Color.accentColor
@@ -1911,14 +1964,12 @@ private struct SessionCardView: View {
                         .foregroundStyle(fg)
                         .frame(width: 28, height: 28)
                         .background {
-                            let dark = colorScheme == .dark
+                            // Stay opaque white/charcoal even over a selected (blue-tint) row.
                             Circle()
-                                .fill(SoftChrome.cardFill(dark: dark))
-                                .overlay(
-                                    Circle().fill(Color.accentColor.opacity(isSelected ? (dark ? 0.22 : 0.12) : 0))
-                                )
+                                .fill(colorScheme == .dark ? SoftChrome.cardFill(dark: true) : Color.white)
                                 .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
                         }
+                        .softHoverInnerBorder(Circle(), inset: 2)
                 }
                 .buttonStyle(.plain)
                 .help("Archive session")
@@ -1963,6 +2014,13 @@ private struct SessionCardView: View {
                             lineWidth: isSelected ? 1.5 : 0.5
                         )
                 )
+                .overlay {
+                    if hovering, !isSelected {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .inset(by: 2.5)
+                            .strokeBorder(SoftChrome.hoverInnerBorder(dark: dark), lineWidth: 1.25)
+                    }
+                }
         } else {
             SolidCardBackground(cornerRadius: 22, selected: isSelected)
         }

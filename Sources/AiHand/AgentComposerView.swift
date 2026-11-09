@@ -105,6 +105,7 @@ struct AgentComposerView: View {
                             .font(.system(size: 28))
                             .symbolRenderingMode(.hierarchical)
                             .foregroundColor(.secondary)
+                            .softHoverInnerBorder(Circle(), inset: 2.5)
                     }
                     .buttonStyle(.plain)
                     .help("Stop (⌃C)")
@@ -121,6 +122,7 @@ struct AgentComposerView: View {
                             canSend ? Color.white : Color.secondary.opacity(0.55),
                             canSend ? Color.accentColor : Color.secondary.opacity(0.25)
                         )
+                        .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
@@ -205,6 +207,7 @@ struct AgentComposerView: View {
                 Capsule(style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.18), lineWidth: 1)
             )
+            .softHoverInnerBorder(Capsule(style: .continuous), inset: 2)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()

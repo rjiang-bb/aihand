@@ -907,6 +907,7 @@ private struct AgentFavoriteRow: View {
                         .foregroundColor(.secondary)
                         .frame(width: 20, height: 20)
                         .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+                        .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -1044,6 +1045,7 @@ private struct WorkspaceFolderRow: View {
                         .foregroundColor(.secondary)
                         .frame(width: 20, height: 20)
                         .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
+                        .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
                 }
                 .buttonStyle(.plain)
                 .focusable(false)
@@ -1246,6 +1248,10 @@ private struct AddSlot: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.16), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
                 )
+                .softHoverInnerBorder(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous),
+                    inset: 3
+                )
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -1379,6 +1385,7 @@ private struct CustomHandChip: View {
     @ObservedObject var model: SettingsModel
     @State private var hovering = false
     @State private var swapping = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let pinned = Preferences.pinnedStyles.contains(style)
@@ -1396,6 +1403,7 @@ private struct CustomHandChip: View {
                     .foregroundColor(.secondary)
                     .frame(width: 16, height: 16)
                     .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0)))
+                    .softHoverInnerBorder(Circle(), inset: 1.25, lineWidth: 1)
             }
             .buttonStyle(.plain)
             .focusable(false)
@@ -1405,6 +1413,16 @@ private struct CustomHandChip: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 5)
         .background(Capsule().fill(Color.primary.opacity(hovering && !pinned ? 0.09 : 0.05)))
+        .overlay {
+            if hovering && !pinned {
+                Capsule()
+                    .inset(by: 1.5)
+                    .strokeBorder(
+                        SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
+                        lineWidth: 1.25
+                    )
+            }
+        }
         .contentShape(Capsule())
         .onTapGesture {
             guard !pinned else {
@@ -1919,6 +1937,7 @@ private struct PillButton: View {
     var disabledHelp: String? = nil
     let action: () -> Void
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button(action: action) {
@@ -1929,6 +1948,15 @@ private struct PillButton: View {
                 .background(
                     Capsule().fill(Color.primary.opacity(enabled ? (hovering ? 0.14 : 0.09) : 0.05))
                 )
+                .overlay {
+                    Capsule()
+                        .inset(by: 2)
+                        .strokeBorder(
+                            SoftChrome.hoverInnerBorder(dark: colorScheme == .dark)
+                                .opacity(enabled && hovering ? 1 : 0),
+                            lineWidth: 1.25
+                        )
+                }
                 .foregroundColor(enabled ? .primary : .secondary)
         }
         .buttonStyle(.plain)
@@ -2121,6 +2149,7 @@ private struct PrimaryButton: View {
     var primary = true
     let action: () -> Void
     @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button(action: action) {
@@ -2138,6 +2167,15 @@ private struct PrimaryButton: View {
             .background(Capsule().fill(primary
                 ? Color.accentColor.opacity(hovering ? 0.88 : 1)
                 : Color.primary.opacity(hovering ? 0.14 : 0.09)))
+            .overlay {
+                Capsule()
+                    .inset(by: 2)
+                    .strokeBorder(
+                        SoftChrome.hoverInnerBorder(dark: colorScheme == .dark)
+                            .opacity(hovering ? 1 : 0),
+                        lineWidth: 1.25
+                    )
+            }
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
