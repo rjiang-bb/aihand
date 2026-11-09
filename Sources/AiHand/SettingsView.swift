@@ -3,7 +3,7 @@ import ApplicationServices
 import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general, agent, pointers, appearance, drawing, sound, about
+    case general, agent, workspaces, pointers, appearance, drawing, sound, about
 
     var id: String { rawValue }
 
@@ -11,6 +11,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "General"
         case .agent: return "Agent"
+        case .workspaces: return "Workspaces"
         case .pointers: return "Pointers"
         case .appearance: return "Appearance"
         case .drawing: return "Drawing"
@@ -23,6 +24,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape.fill"
         case .agent: return "terminal.fill"
+        case .workspaces: return "folder.fill"
         case .pointers: return "hand.point.up.left.fill"
         case .appearance: return "sparkles"
         case .drawing: return "pencil.tip"
@@ -35,6 +37,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return Color(white: 0.55)
         case .agent: return Color(red: 0.2, green: 0.7, blue: 0.55)
+        case .workspaces: return Color(red: 0.35, green: 0.62, blue: 0.95)
         case .pointers: return Color(red: 0.55, green: 0.42, blue: 0.95)
         case .appearance: return Color(red: 0.95, green: 0.45, blue: 0.6)
         case .drawing: return Color(red: 0.96, green: 0.58, blue: 0.2)
@@ -388,6 +391,7 @@ struct SettingsView: View {
         switch model.section {
         case .general: GeneralPage(model: model)
         case .agent: AgentPage(model: model)
+        case .workspaces: WorkspacesPage(model: model)
         case .pointers:
             if model.makingHand {
                 MakeHandPage(model: model)
@@ -528,9 +532,6 @@ private struct AgentPage: View {
             Card(title: "Favorites") {
                 AgentFavoritesBlock(model: model)
                     .id(Preferences.agentCLI.rawValue)
-            }
-            Card(title: "Workspaces") {
-                WorkspaceFoldersBlock(model: model)
             }
         }
         .onAppear { refreshCLIAvailability() }
@@ -922,11 +923,37 @@ private struct AgentFavoriteRow: View {
     }
 }
 
+private struct WorkspacesPage: View {
+    @ObservedObject var model: SettingsModel
+    @State private var isGitRepo = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Card(title: "Folders") {
+                WorkspaceFoldersBlock(model: model)
+            }
+            if isGitRepo {
+                Card(title: "Worktrees") {
+                    WorkspaceWorktreesBlock(model: model)
+                }
+            }
+        }
+        .onAppear { refreshWorktreesVisibility() }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            refreshWorktreesVisibility()
+        }
+    }
+
+    private func refreshWorktreesVisibility() {
+        isGitRepo = GitWorkspace.inspect(path: Preferences.agentWorkspaceRoot) != nil
+    }
+}
+
 private struct WorkspaceFoldersBlock: View {
     @ObservedObject var model: SettingsModel
     /// Local copies so add/remove/select refresh this list (Preferences alone isn’t observed).
     @State private var folders: [String] = Preferences.agentWorkspaces
-    @State private var current: String = Preferences.agentWorkspace
+    @State private var currentRoot: String = Preferences.agentWorkspaceRoot
 
     var body: some View {
         VStack(spacing: 0) {
@@ -938,7 +965,7 @@ private struct WorkspaceFoldersBlock: View {
                 ForEach(Array(folders.enumerated()), id: \.element) { index, path in
                     WorkspaceFolderRow(
                         path: path,
-                        isCurrent: path == current,
+                        isCurrent: path == currentRoot,
                         onSelect: {
                             Preferences.selectAgentWorkspace(path)
                             reload()
@@ -972,7 +999,7 @@ private struct WorkspaceFoldersBlock: View {
 
     private func reload() {
         folders = Preferences.agentWorkspaces
-        current = Preferences.agentWorkspace
+        currentRoot = Preferences.agentWorkspaceRoot
         model.refresh()
     }
 
@@ -982,8 +1009,8 @@ private struct WorkspaceFoldersBlock: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = true
-        if !current.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: current)
+        if !currentRoot.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: currentRoot)
         }
         panel.prompt = "Add"
         guard panel.runModal() == .OK else { return }
@@ -991,6 +1018,224 @@ private struct WorkspaceFoldersBlock: View {
             Preferences.addAgentWorkspace(url.path)
         }
         reload()
+    }
+}
+
+private struct WorkspaceWorktreesBlock: View {
+    @ObservedObject var model: SettingsModel
+    @State private var root: String = Preferences.agentWorkspaceRoot
+    @State private var activePath: String = Preferences.agentWorkspace
+    @State private var repo: GitRepoInfo?
+    @State private var branchName = ""
+    @State private var statusMessage: String?
+    @State private var statusIsError = false
+    @State private var busy = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let repo, !repo.worktrees.isEmpty {
+                ForEach(Array(repo.worktrees.enumerated()), id: \.element.id) { index, entry in
+                    WorkspaceWorktreeRow(
+                        entry: entry,
+                        isSelected: SessionStore.sameWorkspace(entry.path, activePath),
+                        canRemove: !entry.isPrimary && entry.workingDiff.isEmpty,
+                        removeBlockedReason: removeBlockedReason(for: entry),
+                        onSelect: {
+                            Preferences.selectAgentWorktree(entry.path, root: root)
+                            reload()
+                        },
+                        onRemove: { remove(entry) }
+                    )
+                    if index < repo.worktrees.count - 1 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(height: 1)
+                            .padding(.leading, 14)
+                    }
+                }
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+                    .padding(.leading, 14)
+            } else {
+                Row("No worktrees", detail: "Couldn’t read git worktrees for this folder.") {
+                    EmptyView()
+                }
+            }
+
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Add worktree")
+                        .font(.system(size: 13))
+                        .foregroundColor(.primary)
+                    Text("Creates a sibling folder for the branch name.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                PlainField(placeholder: "branch-name", text: $branchName)
+                    .frame(width: 160)
+                PillButton(title: busy ? "…" : "Add", enabled: canAdd) {
+                    addWorktree()
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(minHeight: 44)
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(statusIsError ? Color(red: 0.85, green: 0.28, blue: 0.28) : .secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
+        }
+        .onAppear { reload() }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            reload()
+        }
+    }
+
+    private var canAdd: Bool {
+        !busy && !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func removeBlockedReason(for entry: GitWorktreeEntry) -> String? {
+        if entry.isPrimary { return "Main checkout can’t be removed" }
+        if !entry.workingDiff.isEmpty { return "Commit or stash before removing" }
+        return nil
+    }
+
+    private func reload() {
+        root = Preferences.agentWorkspaceRoot
+        activePath = Preferences.agentWorkspace
+        repo = GitWorkspace.inspect(path: root)
+        model.refresh()
+    }
+
+    private func addWorktree() {
+        let name = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !busy else { return }
+        busy = true
+        statusMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = GitWorkspace.addWorktree(branch: name, inRepo: root)
+            DispatchQueue.main.async {
+                busy = false
+                if let path = result.path {
+                    branchName = ""
+                    Preferences.selectAgentWorktree(path, root: root)
+                    statusIsError = false
+                    statusMessage = "Added worktree at \(path)"
+                    reload()
+                } else {
+                    statusIsError = true
+                    statusMessage = result.error ?? "Couldn’t add worktree."
+                }
+            }
+        }
+    }
+
+    private func remove(_ entry: GitWorktreeEntry) {
+        guard !busy else { return }
+        busy = true
+        statusMessage = nil
+        let switchingAway = SessionStore.sameWorkspace(entry.path, activePath)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let error = GitWorkspace.removeWorktree(path: entry.path, inRepo: root)
+            DispatchQueue.main.async {
+                busy = false
+                if let error {
+                    statusIsError = true
+                    statusMessage = error
+                } else {
+                    if switchingAway {
+                        Preferences.selectAgentWorktree(root, root: root)
+                    }
+                    statusIsError = false
+                    statusMessage = "Removed \(entry.branch)"
+                    reload()
+                }
+            }
+        }
+    }
+}
+
+private struct WorkspaceWorktreeRow: View {
+    let entry: GitWorktreeEntry
+    let isSelected: Bool
+    let canRemove: Bool
+    let removeBlockedReason: String?
+    let onSelect: () -> Void
+    let onRemove: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: onSelect) {
+                HStack(spacing: 10) {
+                    Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "square.on.square")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(isSelected ? Color(red: 0.2, green: 0.55, blue: 0.98) : .secondary)
+                        .frame(width: 18, alignment: .center)
+                        .help(entry.isPrimary ? "Main checkout" : "Linked worktree")
+                    HStack(spacing: 6) {
+                        Text(entry.branch)
+                            .font(.system(size: 13))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        if entry.isPrimary {
+                            Text("Main")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.primary.opacity(0.08)))
+                        }
+                        if isSelected {
+                            Text("Active")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.primary.opacity(0.08)))
+                        }
+                        Spacer(minLength: 8)
+                        if !entry.displayedDiff.isEmpty {
+                            GitDiffLinesView(diff: entry.displayedDiff)
+                        }
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(isSelected ? "Active worktree" : "Use this worktree")
+
+            if !entry.isPrimary, hovering || canRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(canRemove ? .secondary : Color.secondary.opacity(0.35))
+                        .frame(width: 20, height: 20)
+                        .background(Circle().fill(Color.primary.opacity(hovering && canRemove ? 0.12 : 0.06)))
+                        .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .disabled(!canRemove)
+                .help(removeBlockedReason ?? "Remove worktree")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(minHeight: 44)
+        .background(Color.primary.opacity(hovering ? 0.03 : 0))
+        .onHover { hovering = $0 }
     }
 }
 

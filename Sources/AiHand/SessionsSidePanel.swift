@@ -7,6 +7,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onFollowUp: ((UUID, String, FollowUpSubmit) -> Void)?
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
+    var onStartDrawing: (() -> Void)?
     var onManageWorkspaces: (() -> Void)?
     var onDismiss: (() -> Void)?
 
@@ -40,7 +41,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             sessionCount: store.sessions.count,
             showShortcutHints: selection.showShortcutBadges,
             workspaceFolderCount: store.workspaceFolders.count,
-            workspacePickerExpanded: selection.workspacePickerExpanded
+            workspacePickerExpanded: selection.workspacePickerExpanded,
+            gitWorktreeCount: store.gitRepo?.worktrees.count ?? 0,
+            gitPickerExpanded: selection.gitPickerExpanded
         )
     }
     /// Floor at the default expanded size — users can only grow the chat from here.
@@ -194,6 +197,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onNew: { [weak self] in
                 self?.onNew?()
             },
+            onStartDrawing: { [weak self] in
+                self?.onStartDrawing?()
+            },
             onManageWorkspaces: { [weak self] in
                 self?.onManageWorkspaces?()
             },
@@ -238,10 +244,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
                 DispatchQueue.main.async { self?.relayoutForSessionCountIfNeeded() }
             }
             .store(in: &cancellables)
-        // Click-pin / selection-suppress change list height (⌥ hold uses setWorkspacePickerHeld).
-        Publishers.Merge(
+        // Click-pin / selection-suppress change list height (⌥/⌃ hold use set*PickerHeld).
+        Publishers.MergeMany(
             selection.$pinnedWorkspacePicker.map { _ in () },
-            selection.$suppressWorkspacePicker.map { _ in () }
+            selection.$suppressWorkspacePicker.map { _ in () },
+            selection.$pinnedGitPicker.map { _ in () },
+            selection.$showGitPicker.map { _ in () },
+            selection.$suppressGitPicker.map { _ in () }
         )
         .dropFirst()
         .receive(on: RunLoop.main)
@@ -256,6 +265,15 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] next in
                 self?.workspaceDidChange(to: next)
+            }
+            .store(in: &cancellables)
+        // Git worktree list toggles panel height when a repo is detected / refreshed.
+        store.$gitRepo
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.lastLaidOutListHeight = -1
+                self.relayoutForSessionCountIfNeeded(animateFrame: false)
             }
             .store(in: &cancellables)
         lastLaidOutListHeight = listHeight
@@ -301,6 +319,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         selection.showShortcutBadges = false
         selection.closeWorkspacePicker()
         selection.suppressWorkspacePicker = false
+        selection.closeGitPicker()
         panel.orderOut(nil)
         onDismiss?()
     }
@@ -400,7 +419,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Leaving workspace A remembers its open chat; entering B restores B’s if any.
+    /// Leaving workspace/worktree A remembers its open chat; entering B restores B’s if any.
     private func workspaceDidChange(to next: String) {
         let nextKey = workspaceKey(next)
         let previousKey = trackedWorkspaceKey
@@ -427,7 +446,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
         if let id = selection.selectedID,
            let session = store.allSessions.first(where: { $0.id == id }),
-           !SessionStore.sameWorkspace(session.workspace, nextKey) {
+           !store.matchesCurrentScope(session) {
             // Collapse chat for the destination without wiping the remembered id for `previousKey`.
             let expanded = panel.frame
             discardBlankDraftIfLeaving()
@@ -773,6 +792,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         selection.showShortcutBadges = false
         selection.closeWorkspacePicker()
         selection.suppressWorkspacePicker = false
+        selection.closeGitPicker()
     }
 
     private func installShortcutMonitors() {
@@ -801,6 +821,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         selection.showShortcutBadges = false
         selection.closeWorkspacePicker()
         selection.suppressWorkspacePicker = false
+        selection.closeGitPicker()
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
@@ -828,11 +849,32 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         if selection.showWorkspacePicker != showOpt {
             setWorkspacePickerHeld(showOpt)
         }
+
+        let ctrlAlone = flags.contains(.control)
+            && !flags.contains(.command)
+            && !flags.contains(.shift)
+            && !flags.contains(.option)
+        let showCtrl = ctrlAlone && !(store.gitRepo?.worktrees.isEmpty ?? true)
+        if !showCtrl, selection.suppressGitPicker {
+            selection.suppressGitPicker = false
+        }
+        if selection.showGitPicker != showCtrl {
+            setGitPickerHeld(showCtrl)
+        }
     }
 
     /// Grow / shrink the list for ⌥-held workspace picker (top edge stays put).
     private func setWorkspacePickerHeld(_ show: Bool) {
         selection.showWorkspacePicker = show
+        if show { selection.closeGitPicker() }
+        lastLaidOutListHeight = -1
+        relayoutForSessionCountIfNeeded(animateFrame: false)
+    }
+
+    /// Grow / shrink the list for ⌃-held branch / worktree picker.
+    private func setGitPickerHeld(_ show: Bool) {
+        selection.showGitPicker = show
+        if show { selection.closeWorkspacePicker() }
         lastLaidOutListHeight = -1
         relayoutForSessionCountIfNeeded(animateFrame: false)
     }
@@ -846,6 +888,23 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             relayoutForSessionCountIfNeeded(animateFrame: false)
         }
         Preferences.selectAgentWorkspace(store.workspaceFolders[index])
+    }
+
+    private func selectWorktree(at index: Int) {
+        guard let git = store.gitRepo,
+              git.worktrees.indices.contains(index) else { return }
+        let entry = git.worktrees[index]
+        // Keep the list open while ⌃ is held; only collapse a click-pinned menu.
+        if !selection.showGitPicker {
+            selection.closeGitPicker()
+            lastLaidOutListHeight = -1
+            relayoutForSessionCountIfNeeded(animateFrame: false)
+        }
+        let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
+        let root = store.workspaceFolders.first {
+            SessionStore.sameWorkspace($0, preferred)
+        } ?? preferred
+        Preferences.selectAgentWorktree(entry.path, root: root)
     }
 
     /// Slide ⌘ hints in/out inside the list card. List-only grows the panel without
@@ -886,6 +945,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
                 relayoutForSessionCountIfNeeded(animateFrame: false)
                 return nil
             }
+            if selection.gitPickerExpanded {
+                selection.closeGitPicker(suppressUntilCtrlUp: selection.showGitPicker)
+                lastLaidOutListHeight = -1
+                relayoutForSessionCountIfNeeded(animateFrame: false)
+                return nil
+            }
             if selection.selectedID != nil {
                 closeChat()
             } else {
@@ -906,6 +971,19 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
            let id = selection.selectedID,
            store.session(id: id)?.status == .working {
             onStop?(id)
+            return nil
+        }
+
+        // ⌃1–9 → switch worktree by recent→oldest order (list stays open while ⌃ is held).
+        if panel.isKeyWindow,
+           flags.contains(.control),
+           !flags.contains(.command),
+           !flags.contains(.option),
+           !flags.contains(.shift),
+           let index = shortcutIndex(for: event),
+           let count = store.gitRepo?.worktrees.count,
+           index < count {
+            selectWorktree(at: index)
             return nil
         }
 
@@ -1037,8 +1115,12 @@ private enum SessionsListMetrics {
     static let chromeVertical: CGFloat = 68 + 14
     /// Workspace picker closed: 13+13 pad + ~34pt title/path stack.
     static let picker: CGFloat = 60
+    /// Branch / worktree picker closed height.
+    static let gitPicker: CGFloat = 52
     /// Expanded picker row (name + path + pads).
     private static let pickerRow: CGFloat = 50
+    private static let gitPickerRow: CGFloat = 44
+    private static let gitPickerAdd: CGFloat = 44
     private static let pickerManage: CGFloat = 36
     private static let pickerDivider: CGFloat = 1
     private static let columnGap: CGFloat = 16
@@ -1049,7 +1131,8 @@ private enum SessionsListMetrics {
     private static let listPadBottom: CGFloat = 8
     private static let listPadBottomPaginated: CGFloat = 4
     private static let footer: CGFloat = 40
-    private static let emptyHint: CGFloat = 92
+    /// Empty list card: copy + two action buttons.
+    private static let emptyHint: CGFloat = 160
 
     static var maxPanelHeight: CGFloat {
         panelHeight(sessionCount: SessionsListPaging.pageSize + 1)
@@ -1066,17 +1149,30 @@ private enum SessionsListMetrics {
         return picker + seps + rows + pickerManage
     }
 
+    static func gitPickerHeight(worktreeCount: Int, expanded: Bool) -> CGFloat {
+        guard worktreeCount > 0 else { return 0 }
+        guard expanded else { return gitPicker }
+        let rows = CGFloat(max(worktreeCount, 1)) * gitPickerRow
+        // Separators between rows, before Add, and before Manage.
+        let seps = CGFloat(max(worktreeCount, 1) + 1) * pickerDivider
+        return gitPicker + pickerDivider + rows + seps + gitPickerAdd + pickerManage
+    }
+
     static func panelHeight(
         sessionCount: Int,
         showShortcutHints: Bool = false,
         workspaceFolderCount: Int = 0,
-        workspacePickerExpanded: Bool = false
+        workspacePickerExpanded: Bool = false,
+        gitWorktreeCount: Int = 0,
+        gitPickerExpanded: Bool = false
     ) -> CGFloat {
         chromeVertical + columnHeight(
             sessionCount: sessionCount,
             showShortcutHints: showShortcutHints,
             workspaceFolderCount: workspaceFolderCount,
-            workspacePickerExpanded: workspacePickerExpanded
+            workspacePickerExpanded: workspacePickerExpanded,
+            gitWorktreeCount: gitWorktreeCount,
+            gitPickerExpanded: gitPickerExpanded
         )
     }
 
@@ -1084,14 +1180,18 @@ private enum SessionsListMetrics {
         sessionCount: Int,
         showShortcutHints: Bool = false,
         workspaceFolderCount: Int = 0,
-        workspacePickerExpanded: Bool = false
+        workspacePickerExpanded: Bool = false,
+        gitWorktreeCount: Int = 0,
+        gitPickerExpanded: Bool = false
     ) -> CGFloat {
         let pickerH = pickerHeight(
             folderCount: workspaceFolderCount,
             expanded: workspacePickerExpanded
         )
+        let gitH = gitPickerHeight(worktreeCount: gitWorktreeCount, expanded: gitPickerExpanded)
+        let gitGap = gitH > 0 ? columnGap : 0
         if sessionCount <= 0 {
-            return pickerH + columnGap + emptyHint
+            return pickerH + gitGap + gitH + columnGap + emptyHint
         }
         let paginate = SessionsListPaging.needsPagination(sessionCount)
         // Paginated lists already have a footer; ⌘ hints reuse that slot.
@@ -1099,7 +1199,7 @@ private enum SessionsListMetrics {
         let rows = CGFloat(paginate ? SessionsListPaging.pageSize : sessionCount)
         let stack = rows * row + max(0, rows - 1) * rowGap
         let bottomPad = showFooter ? listPadBottomPaginated : listPadBottom
-        return pickerH + columnGap + listPadTop + bottomPad + stack + (showFooter ? footer : 0)
+        return pickerH + gitGap + gitH + columnGap + listPadTop + bottomPad + stack + (showFooter ? footer : 0)
     }
 }
 
@@ -1112,10 +1212,20 @@ private final class SessionsPanelSelection: ObservableObject {
     @Published var pinnedWorkspacePicker = false
     /// Esc (etc.) while ⌥ is held — stay closed until ⌥ is released.
     @Published var suppressWorkspacePicker = false
+    /// ⌃ held — force-open the branch / worktree picker.
+    @Published var showGitPicker = false
+    /// Click-open git branch / worktree picker (survives ⌃ release).
+    @Published var pinnedGitPicker = false
+    /// Esc while ⌃ is held — stay closed until ⌃ is released.
+    @Published var suppressGitPicker = false
     @Published var listPage = 0
 
     var workspacePickerExpanded: Bool {
         !suppressWorkspacePicker && (showWorkspacePicker || pinnedWorkspacePicker)
+    }
+
+    var gitPickerExpanded: Bool {
+        !suppressGitPicker && (showGitPicker || pinnedGitPicker)
     }
 
     /// Dismiss the open list. Pass `suppressUntilAltUp` when ⌥ is still down (e.g. Esc)
@@ -1127,6 +1237,16 @@ private final class SessionsPanelSelection: ObservableObject {
         } else {
             showWorkspacePicker = false
             suppressWorkspacePicker = false
+        }
+    }
+
+    func closeGitPicker(suppressUntilCtrlUp: Bool = false) {
+        pinnedGitPicker = false
+        if suppressUntilCtrlUp {
+            suppressGitPicker = true
+        } else {
+            showGitPicker = false
+            suppressGitPicker = false
         }
     }
 
@@ -1157,6 +1277,7 @@ private struct SessionsSidePanelView: View {
     var onCloseChat: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
+    var onStartDrawing: () -> Void
     var onManageWorkspaces: () -> Void
     var onArchive: (UUID) -> Void
     var onArchiveAllBelow: (UUID) -> Void
@@ -1196,7 +1317,9 @@ private struct SessionsSidePanelView: View {
             sessionCount: allSessions.count,
             showShortcutHints: selection.showShortcutBadges,
             workspaceFolderCount: store.workspaceFolders.count,
-            workspacePickerExpanded: selection.workspacePickerExpanded
+            workspacePickerExpanded: selection.workspacePickerExpanded,
+            gitWorktreeCount: store.gitRepo?.worktrees.count ?? 0,
+            gitPickerExpanded: selection.gitPickerExpanded
         )
     }
 
@@ -1320,11 +1443,14 @@ private struct SessionsSidePanelView: View {
             WorkspacePicker(
                 store: store,
                 folders: store.workspaceFolders,
-                current: store.currentWorkspace,
+                current: store.workspaceRoot.isEmpty ? store.currentWorkspace : store.workspaceRoot,
                 isOpen: selection.workspacePickerExpanded,
                 pinned: Binding(
                     get: { selection.pinnedWorkspacePicker },
-                    set: { selection.pinnedWorkspacePicker = $0 }
+                    set: {
+                        selection.pinnedWorkspacePicker = $0
+                        if $0 { selection.closeGitPicker() }
+                    }
                 ),
                 onSelect: {
                     // Stay open while ⌥ is held; collapse only a click-pinned menu.
@@ -1339,16 +1465,52 @@ private struct SessionsSidePanelView: View {
                     onManageWorkspaces()
                 }
             )
+            if let git = store.gitRepo, !git.worktrees.isEmpty {
+                GitWorktreePicker(
+                    repo: git,
+                    currentPath: store.currentWorkspace,
+                    workspaceRoot: {
+                        let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
+                        return store.workspaceFolders.first {
+                            SessionStore.sameWorkspace($0, preferred)
+                        } ?? preferred
+                    }(),
+                    isOpen: selection.gitPickerExpanded,
+                    pinned: Binding(
+                        get: { selection.pinnedGitPicker },
+                        set: {
+                            selection.pinnedGitPicker = $0
+                            if $0 { selection.closeWorkspacePicker() }
+                        }
+                    ),
+                    onSelect: { entry in
+                        // Stay open while ⌃ is held; collapse only a click-pinned menu.
+                        if !selection.showGitPicker {
+                            selection.closeGitPicker()
+                        }
+                        let preferred = store.workspaceRoot.isEmpty ? git.repoRoot : store.workspaceRoot
+                        let root = store.workspaceFolders.first {
+                            SessionStore.sameWorkspace($0, preferred)
+                        } ?? preferred
+                        Preferences.selectAgentWorktree(entry.path, root: root)
+                    },
+                    onAdded: { path, root in
+                        Preferences.selectAgentWorktree(path, root: root)
+                        store.refreshGitInfo()
+                    },
+                    onManage: {
+                        selection.closeGitPicker(suppressUntilCtrlUp: selection.showGitPicker)
+                        onManageWorkspaces()
+                    }
+                )
+            }
             if store.sessions.isEmpty {
-                Text(store.currentWorkspace.isEmpty
-                     ? "Add a working folder to start sessions here."
-                     : "Tap New to start a prompt, or draw on screen to annotate.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary.opacity(0.72))
-                    .multilineTextAlignment(.center)
-                    .padding(20)
-                    .frame(maxWidth: .infinity)
-                    .background(SolidCardBackground(cornerRadius: 22, selected: false))
+                SessionsEmptyStateCard(
+                    hasWorkspace: !store.currentWorkspace.isEmpty,
+                    onNew: onNew,
+                    onStartDrawing: onStartDrawing,
+                    onManageFolders: onManageWorkspaces
+                )
                 Spacer(minLength: 0)
             } else {
                 sessionsListContainer
@@ -1502,6 +1664,70 @@ private struct SessionsSidePanelView: View {
     }
 }
 
+private struct SessionsEmptyStateCard: View {
+    let hasWorkspace: Bool
+    var onNew: () -> Void
+    var onStartDrawing: () -> Void
+    var onManageFolders: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fg: Color { colorScheme == .dark ? .white : .black }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(hasWorkspace
+                 ? "Start a session or draw on screen to annotate."
+                 : "Add a working folder to start sessions here.")
+                .font(.system(size: 13))
+                .foregroundStyle(.primary.opacity(0.72))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(spacing: 8) {
+                if hasWorkspace {
+                    emptyActionButton(title: "New agent session", symbol: "plus", action: onNew)
+                } else {
+                    emptyActionButton(title: "Add folders…", symbol: "folder.badge.plus", action: onManageFolders)
+                }
+                emptyActionButton(title: "Start drawing", symbol: "pencil.tip", action: onStartDrawing)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity)
+        .background(SolidCardBackground(cornerRadius: 22, selected: false))
+    }
+
+    private func emptyActionButton(title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 14)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(fg)
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+            )
+            .softHoverInnerBorder(
+                RoundedRectangle(cornerRadius: 12, style: .continuous),
+                inset: 2
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .focusable(false)
+    }
+}
+
 private struct WorkspacePicker: View {
     @ObservedObject var store: SessionStore
     let folders: [String]
@@ -1640,6 +1866,262 @@ private struct WorkspacePickerActionRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+    }
+}
+
+private struct GitWorktreePicker: View {
+    let repo: GitRepoInfo
+    let currentPath: String
+    let workspaceRoot: String
+    var isOpen: Bool
+    @Binding var pinned: Bool
+    var onSelect: (GitWorktreeEntry) -> Void
+    var onAdded: (String, String) -> Void
+    var onManage: () -> Void
+
+    @State private var branchName = ""
+    @State private var busy = false
+    @State private var errorMessage: String?
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var fg: Color { colorScheme == .dark ? .white : .black }
+
+    private var current: GitWorktreeEntry? {
+        repo.entry(forPath: currentPath) ?? repo.worktrees.first
+    }
+
+    private var canAdd: Bool {
+        !busy && !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                pinned.toggle()
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 30, height: 30)
+                    Text(current?.branch ?? "Branch")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    if let diff = current?.displayedDiff, !diff.isEmpty {
+                        GitDiffLinesView(diff: diff)
+                    }
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(fg.opacity(0.45))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .softHoverInnerBorder(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous),
+                    inset: 3
+                )
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(current.map { "\($0.branch) — \($0.path)" } ?? "Git worktrees")
+
+            if isOpen {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.horizontal, 12)
+
+                ForEach(Array(repo.worktrees.enumerated()), id: \.element.id) { index, entry in
+                    GitWorktreeRow(
+                        entry: entry,
+                        shortcutIndex: index + 1,
+                        isCurrent: SessionStore.sameWorkspace(entry.path, currentPath),
+                        fg: fg,
+                        onSelect: { onSelect(entry) }
+                    )
+                    if index < repo.worktrees.count - 1 {
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.07))
+                            .frame(height: 1)
+                            .padding(.leading, 14)
+                    }
+                }
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+                GitWorktreeAddRow(
+                    branchName: $branchName,
+                    busy: busy,
+                    enabled: canAdd,
+                    errorMessage: errorMessage,
+                    fg: fg,
+                    onAdd: addWorktree
+                )
+                Rectangle()
+                    .fill(Color.primary.opacity(0.07))
+                    .frame(height: 1)
+                WorkspacePickerActionRow(title: "Manage worktrees…", fg: fg, onSelect: onManage)
+            }
+        }
+        .background(WorkspacePickerBackground(cornerRadius: 22))
+        .animation(.easeOut(duration: 0.14), value: isOpen)
+    }
+
+    private func addWorktree() {
+        let name = branchName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !busy else { return }
+        busy = true
+        errorMessage = nil
+        let root = workspaceRoot
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = GitWorkspace.addWorktree(branch: name, inRepo: root)
+            DispatchQueue.main.async {
+                busy = false
+                if let path = result.path {
+                    branchName = ""
+                    errorMessage = nil
+                    onAdded(path, root)
+                } else {
+                    errorMessage = result.error ?? "Couldn’t add worktree."
+                }
+            }
+        }
+    }
+}
+
+private struct GitWorktreeAddRow: View {
+    @Binding var branchName: String
+    var busy: Bool
+    var enabled: Bool
+    var errorMessage: String?
+    var fg: Color
+    var onAdd: () -> Void
+
+    @FocusState private var focused: Bool
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("branch-name", text: $branchName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(fg)
+                    .focused($focused)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.primary.opacity(0.06))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(
+                                focused
+                                    ? Color.accentColor.opacity(0.7)
+                                    : Color.primary.opacity(0.08),
+                                lineWidth: focused ? 1.25 : 1
+                            )
+                    )
+                    .onSubmit { if enabled { onAdd() } }
+                Button(action: onAdd) {
+                    Text(busy ? "…" : "Add")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(enabled ? fg : fg.opacity(0.35))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule().fill(Color.primary.opacity(enabled ? 0.1 : 0.05))
+                        )
+                        .softHoverInnerBorder(Capsule(), inset: 2)
+                }
+                .buttonStyle(.plain)
+                .disabled(!enabled)
+                .help("Create a worktree for this branch")
+            }
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(red: 0.9, green: 0.35, blue: 0.35))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+}
+
+private struct GitWorktreeRow: View {
+    let entry: GitWorktreeEntry
+    let shortcutIndex: Int
+    let isCurrent: Bool
+    let fg: Color
+    var onSelect: () -> Void
+
+    @State private var hovering = false
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "square.on.square")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(entry.isPrimary ? Color.accentColor : fg.opacity(0.45))
+                    .frame(width: 18, alignment: .center)
+                    .help(entry.isPrimary ? "Main checkout" : "Linked worktree")
+                Text(entry.branch)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(fg)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                if !entry.displayedDiff.isEmpty {
+                    GitDiffLinesView(diff: entry.displayedDiff)
+                }
+                if isCurrent {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                if shortcutIndex <= 9 {
+                    Text("⌃\(shortcutIndex)")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(fg.opacity(0.45))
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(hovering || isCurrent ? 0.08 : 0))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+            )
+            .overlay {
+                if hovering {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .inset(by: 2)
+                        .strokeBorder(
+                            SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
+                            lineWidth: 1.25
+                        )
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("\(entry.branch) — \(entry.path)")
     }
 }
 

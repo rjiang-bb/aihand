@@ -590,13 +590,41 @@ enum Preferences {
         }
     }
 
-    /// Current working folder for new agent sessions.
+    /// Registered folder selected in the sessions workspace picker (always one of `agentWorkspaces`).
+    static var agentWorkspaceRoot: String {
+        get {
+            let folders = agentWorkspaces
+            let stored = (defaults.string(forKey: "agentWorkspaceRoot") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if folders.contains(stored) { return stored }
+            let active = (defaults.string(forKey: "agentWorkspace") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if folders.contains(active) { return active }
+            return folders.first ?? ""
+        }
+        set {
+            let path = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty, agentWorkspaces.contains(path) else { return }
+            defaults.set(path, forKey: "agentWorkspaceRoot")
+            let active = rememberedWorktree(forRoot: path) ?? path
+            defaults.set(active, forKey: "agentWorkspace")
+            NotificationCenter.default.post(name: changed, object: nil)
+        }
+    }
+
+    /// Active working directory for new agent sessions (registered root or a git worktree under it).
     static var agentWorkspace: String {
         get {
             let folders = agentWorkspaces
-            let stored = (defaults.string(forKey: "agentWorkspace") ?? "")
+            let active = (defaults.string(forKey: "agentWorkspace") ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if folders.contains(stored) { return stored }
+            if !active.isEmpty {
+                if folders.contains(active) { return active }
+                // Worktree paths are allowed without being registered folders.
+                let root = (defaults.string(forKey: "agentWorkspaceRoot") ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if folders.contains(root) { return active }
+            }
             return folders.first ?? ""
         }
         set {
@@ -606,8 +634,10 @@ enum Preferences {
             if !folders.contains(path) {
                 folders.append(path)
                 defaults.set(folders, forKey: "agentWorkspaces")
+                defaults.set(path, forKey: "agentWorkspaceRoot")
             }
-            set(path, "agentWorkspace")
+            defaults.set(path, forKey: "agentWorkspace")
+            NotificationCenter.default.post(name: changed, object: nil)
         }
     }
 
@@ -625,13 +655,51 @@ enum Preferences {
     static func removeAgentWorkspace(_ path: String) {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        clearRememberedWorktree(forRoot: trimmed)
         agentWorkspaces = agentWorkspaces.filter { $0 != trimmed }
     }
 
+    /// Select a registered workspace root in the picker (restores last worktree for that root).
     static func selectAgentWorkspace(_ path: String) {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard agentWorkspaces.contains(trimmed) else { return }
-        set(trimmed, "agentWorkspace")
+        agentWorkspaceRoot = trimmed
+    }
+
+    /// Select a git worktree (or the main checkout path) under the current registered root.
+    static func selectAgentWorktree(_ path: String, root: String) {
+        let worktree = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rootPath = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !worktree.isEmpty, !rootPath.isEmpty, agentWorkspaces.contains(rootPath) else { return }
+        rememberWorktree(worktree, forRoot: rootPath)
+        defaults.set(rootPath, forKey: "agentWorkspaceRoot")
+        defaults.set(worktree, forKey: "agentWorkspace")
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    /// Branch name for the active working directory (empty when not a git repo).
+    static var agentGitBranch: String {
+        GitWorkspace.currentBranch(in: agentWorkspace) ?? ""
+    }
+
+    private static func worktreeMemoryKey() -> String { "agentWorktreeByRoot" }
+
+    private static func rememberedWorktree(forRoot root: String) -> String? {
+        let map = defaults.dictionary(forKey: worktreeMemoryKey()) as? [String: String] ?? [:]
+        let value = map[root]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+
+    private static func rememberWorktree(_ path: String, forRoot root: String) {
+        var map = defaults.dictionary(forKey: worktreeMemoryKey()) as? [String: String] ?? [:]
+        map[root] = path
+        defaults.set(map, forKey: worktreeMemoryKey())
+    }
+
+    private static func clearRememberedWorktree(forRoot root: String) {
+        var map = defaults.dictionary(forKey: worktreeMemoryKey()) as? [String: String] ?? [:]
+        map.removeValue(forKey: root)
+        defaults.set(map, forKey: worktreeMemoryKey())
     }
 
     static var screenshotsFolder: String {
@@ -756,7 +824,8 @@ enum Preferences {
     static func resetAll() {
         for key in ["shortcut.toggle", "shortcut.clear", "shortcut.sessions", "pointerSize", "showShadow", "theme", "fadeSeconds",
                     "sound.hands", "sound.laser", "interactKey", "interactKeepsHand", "pinnedStyles", "pointerStyle",
-                    "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI", "agentWorkspace", "agentWorkspaces",
+                    "inkChoice", "showInkButton", "drawTool", "strokeThickness", "captureScope", "tapSound", "agentCLI",
+                    "agentWorkspace", "agentWorkspaceRoot", "agentWorkspaces", "agentWorktreeByRoot",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY",
                     "sessionsPanelExpandedOriginX", "sessionsPanelExpandedOriginY"] {
