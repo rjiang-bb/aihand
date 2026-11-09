@@ -105,6 +105,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         sessionsPanel.onStartDrawing = { [weak self] in
             self?.startPointerWithSessions()
         }
+        sessionsPanel.onOpenSettings = { [weak self] in
+            self?.settings.show()
+        }
         sessionsPanel.onManageWorkspaces = { [weak self] in
             self?.settings.show(.workspaces)
         }

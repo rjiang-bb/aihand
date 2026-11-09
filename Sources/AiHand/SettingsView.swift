@@ -1177,11 +1177,10 @@ private struct WorkspaceWorktreeRow: View {
         HStack(spacing: 12) {
             Button(action: onSelect) {
                 HStack(spacing: 10) {
-                    Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "square.on.square")
+                    Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "rectangle.split.2x1")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(isSelected ? Color(red: 0.2, green: 0.55, blue: 0.98) : .secondary)
                         .frame(width: 18, alignment: .center)
-                        .help(entry.isPrimary ? "Main checkout" : "Linked worktree")
                     HStack(spacing: 6) {
                         Text(entry.branch)
                             .font(.system(size: 13))

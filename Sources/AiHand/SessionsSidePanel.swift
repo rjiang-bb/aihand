@@ -8,6 +8,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
     var onStartDrawing: (() -> Void)?
+    var onOpenSettings: (() -> Void)?
     var onManageWorkspaces: (() -> Void)?
     var onDismiss: (() -> Void)?
 
@@ -199,6 +200,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             },
             onStartDrawing: { [weak self] in
                 self?.onStartDrawing?()
+            },
+            onOpenSettings: { [weak self] in
+                self?.onOpenSettings?()
             },
             onManageWorkspaces: { [weak self] in
                 self?.onManageWorkspaces?()
@@ -1278,6 +1282,7 @@ private struct SessionsSidePanelView: View {
     var onClose: () -> Void
     var onNew: () -> Void
     var onStartDrawing: () -> Void
+    var onOpenSettings: () -> Void
     var onManageWorkspaces: () -> Void
     var onArchive: (UUID) -> Void
     var onArchiveAllBelow: (UUID) -> Void
@@ -1416,6 +1421,21 @@ private struct SessionsSidePanelView: View {
             .buttonStyle(.plain)
             .focusable(false)
             .help("Start a new session")
+            Button(action: onOpenSettings) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(headerFG)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(headerBG)
+                            .shadow(color: .black.opacity(0.2), radius: 6, y: 2)
+                    )
+                    .softHoverInnerBorder(Circle(), inset: 2)
+            }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help("Settings")
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .bold))
@@ -1929,7 +1949,6 @@ private struct GitWorktreePicker: View {
             }
             .buttonStyle(.plain)
             .focusable(false)
-            .help(current.map { "\($0.branch) — \($0.path)" } ?? "Git worktrees")
 
             if isOpen {
                 Rectangle()
@@ -2070,11 +2089,10 @@ private struct GitWorktreeRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "square.on.square")
+                Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "rectangle.split.2x1")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(entry.isPrimary ? Color.accentColor : fg.opacity(0.45))
                     .frame(width: 18, alignment: .center)
-                    .help(entry.isPrimary ? "Main checkout" : "Linked worktree")
                 Text(entry.branch)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(fg)
@@ -2121,7 +2139,6 @@ private struct GitWorktreeRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("\(entry.branch) — \(entry.path)")
     }
 }
 
