@@ -529,7 +529,7 @@ private struct AgentPage: View {
                 AgentFavoritesBlock(model: model)
                     .id(Preferences.agentCLI.rawValue)
             }
-            Card(title: "Workspace") {
+            Card(title: "Workspaces") {
                 WorkspaceFoldersBlock(model: model)
             }
         }

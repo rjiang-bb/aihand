@@ -24,17 +24,19 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var applyingLayout = false
     private var chatResizeStartFrame: NSRect?
     private var panelMoveStartOrigin: CGPoint?
-    private var hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
+    private var hasCustomPlacement = false
     private var cancellables = Set<AnyCancellable>()
     private var lastLaidOutListHeight: CGFloat = 0
     private var hintHideWork: DispatchWorkItem?
 
     private let listWidth: CGFloat = 360
-    /// Grows with session count up to 10 rows + pagination (+ ⌘ hints when shown).
+    /// Grows with session count up to 10 rows + pagination (+ ⌘ hints / open workspace picker).
     private var listHeight: CGFloat {
         SessionsListMetrics.panelHeight(
             sessionCount: store.sessions.count,
-            showShortcutHints: selection.showShortcutBadges
+            showShortcutHints: selection.showShortcutBadges,
+            workspaceFolderCount: store.workspaceFolders.count,
+            workspacePickerExpanded: selection.workspacePickerExpanded
         )
     }
     /// Floor at the default expanded size — users can only grow the chat from here.
@@ -143,6 +145,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     init(store: SessionStore) {
         self.store = store
+        // Scrub (0,0) placements left by older builds that re-persisted after orderOut.
+        Self.scrubDeferredZeroOriginsFromPreferences()
+        hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
         panel = Panel(
             contentRect: NSRect(
                 x: 0,
@@ -229,6 +234,19 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
                 DispatchQueue.main.async { self?.relayoutForSessionCountIfNeeded() }
             }
             .store(in: &cancellables)
+        // Click-pin / selection-suppress change list height (⌥ hold uses setWorkspacePickerHeld).
+        Publishers.Merge(
+            selection.$pinnedWorkspacePicker.map { _ in () },
+            selection.$suppressWorkspacePicker.map { _ in () }
+        )
+        .dropFirst()
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            guard let self else { return }
+            self.lastLaidOutListHeight = -1
+            self.relayoutForSessionCountIfNeeded(animateFrame: false)
+        }
+        .store(in: &cancellables)
         lastLaidOutListHeight = listHeight
     }
 
@@ -257,15 +275,21 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     func hide() {
+        // Already ordered out: do not re-persist. After orderOut AppKit can reset
+        // the live frame to the init contentRect (0,0) — a second hide (e.g.
+        // starting draw while sessions is already closed) would overwrite the
+        // real placement with bottom-left.
+        guard isVisible else { return }
         // Keep selected session/chat so the next show restores the same state.
-        // Always snapshot placement — after orderOut the live frame can reset, and
-        // send-to-agent reopens from prefs (not from a stale/zero origin).
+        // Snapshot placement *before* orderOut so send-to-agent reopens from prefs.
         if selection.selectedID != nil {
             persistExpandedPlacement()
         }
         persistListPlacement()
         removeShortcutMonitors()
         selection.showShortcutBadges = false
+        selection.closeWorkspacePicker()
+        selection.suppressWorkspacePicker = false
         panel.orderOut(nil)
         onDismiss?()
     }
@@ -351,30 +375,29 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         // frame so clamp-from-list-home doesn’t shove the panel to a corner.
         let frame: NSRect
         if expanded, listOriginOverride == nil, restoringHidden,
-           let savedOrigin = Preferences.sessionsPanelExpandedOrigin {
+           let savedOrigin = Preferences.sessionsPanelExpandedOrigin,
+           !isDeferredZeroOrigin(savedOrigin) {
             frame = clampFrame(NSRect(origin: savedOrigin, size: size), to: visible)
         } else {
             // Expanded: pin the list’s leading edge so chat grows to the right.
             // Collapsing passes `listOriginOverride` so the list’s trailing edge
             // matches the chat’s former trailing edge. Otherwise prefer the live
             // frame while visible, then the saved list-home, then the default dock.
+            // Never fall back to the hidden/init frame — that contentRect is (0,0)
+            // (AppKit bottom-left) and would pin the list to the corner.
             let listOrigin: CGPoint = {
                 if let listOriginOverride {
                     return listOriginOverride
                 }
-                if panel.isVisible, panel.frame.width > 1 {
+                if panel.isVisible, isPlacedFrame(panel.frame) {
                     return listOnlyOrigin(from: panel.frame)
                 }
-                if hasCustomPlacement, let saved = Preferences.sessionsPanelOrigin {
+                if hasCustomPlacement,
+                   let saved = Preferences.sessionsPanelOrigin,
+                   !isDeferredZeroOrigin(saved) {
                     return saved
                 }
-                if panel.frame.width > 1 {
-                    return listOnlyOrigin(from: panel.frame)
-                }
-                return CGPoint(
-                    x: visible.maxX - listWidth - 12,
-                    y: visible.minY + (visible.height - listHeight) / 2
-                )
+                return defaultListOrigin(in: visible)
             }()
             frame = clampFramePreservingList(
                 frameAlignedToListOrigin(listOrigin, size: size),
@@ -400,6 +423,38 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             x: frame.minX,
             y: frame.maxY - listHeight
         )
+    }
+
+    /// Trailing, vertically centered dock when nothing has been placed yet.
+    private func defaultListOrigin(in visible: NSRect) -> CGPoint {
+        CGPoint(
+            x: visible.maxX - listWidth - 12,
+            y: visible.minY + (visible.height - listHeight) / 2
+        )
+    }
+
+    /// True once the panel has a real on-screen frame (not the init / post-orderOut rect).
+    private func isPlacedFrame(_ frame: NSRect) -> Bool {
+        frame.width > 1 && frame.height > 1 && !isDeferredZeroOrigin(frame.origin)
+    }
+
+    /// Init `contentRect` and some post-`orderOut` resets land at AppKit (0,0) =
+    /// primary display bottom-left. Treat that as “unset”, not a user placement.
+    private func isDeferredZeroOrigin(_ origin: CGPoint) -> Bool {
+        Self.isDeferredZeroOrigin(origin)
+    }
+
+    private static func isDeferredZeroOrigin(_ origin: CGPoint) -> Bool {
+        abs(origin.x) < 0.5 && abs(origin.y) < 0.5
+    }
+
+    private static func scrubDeferredZeroOriginsFromPreferences() {
+        if let origin = Preferences.sessionsPanelOrigin, isDeferredZeroOrigin(origin) {
+            Preferences.sessionsPanelOrigin = nil
+        }
+        if let origin = Preferences.sessionsPanelExpandedOrigin, isDeferredZeroOrigin(origin) {
+            Preferences.sessionsPanelExpandedOrigin = nil
+        }
     }
 
     /// Panel frame for `size` with the list fixed at `listOrigin` and chat to its right.
@@ -436,8 +491,15 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private func persistListPlacement(from frame: NSRect? = nil) {
         guard let screen = panel.screen ?? NSScreen.main else { return }
-        let source = frame ?? panel.frame
-        guard source.width > 1, source.height > 1 else { return }
+        // Only read the live frame while visible — ordered-out windows can report (0,0).
+        let source: NSRect
+        if let frame {
+            source = frame
+        } else {
+            guard panel.isVisible else { return }
+            source = panel.frame
+        }
+        guard isPlacedFrame(source) else { return }
         let listSize = NSSize(width: listWidth, height: listHeight)
         let listFrame = clampFrame(
             NSRect(origin: listOnlyOrigin(from: source), size: listSize),
@@ -449,8 +511,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
     private func persistExpandedPlacement(from frame: NSRect? = nil) {
         guard let screen = panel.screen ?? NSScreen.main else { return }
-        let source = frame ?? panel.frame
-        guard source.width > 1, source.height > 1 else { return }
+        let source: NSRect
+        if let frame {
+            source = frame
+        } else {
+            guard panel.isVisible else { return }
+            source = panel.frame
+        }
+        guard isPlacedFrame(source) else { return }
         let clamped = clampFrame(source, to: screen.visibleFrame)
         Preferences.sessionsPanelExpandedOrigin = clamped.origin
         Preferences.sessionsPanelWidth = clamped.width
@@ -610,6 +678,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         // picker briefly resign key; collapsing would clear the selection and
         // make model cycling a no-op. Esc / the chat close button dismiss chat.
         selection.showShortcutBadges = false
+        selection.closeWorkspacePicker()
+        selection.suppressWorkspacePicker = false
     }
 
     private func installShortcutMonitors() {
@@ -636,6 +706,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         flagsMonitor = nil
         keyMonitor = nil
         selection.showShortcutBadges = false
+        selection.closeWorkspacePicker()
+        selection.suppressWorkspacePicker = false
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
@@ -645,9 +717,40 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             && !flags.contains(.shift)
             && !flags.contains(.option)
             && !flags.contains(.control)
-        let show = cmdAlone && !store.sessions.isEmpty
-        guard selection.showShortcutBadges != show else { return }
-        setShortcutHintsVisible(show)
+        let optAlone = flags.contains(.option)
+            && !flags.contains(.command)
+            && !flags.contains(.shift)
+            && !flags.contains(.control)
+
+        let showCmd = cmdAlone && !store.sessions.isEmpty
+        if selection.showShortcutBadges != showCmd {
+            setShortcutHintsVisible(showCmd)
+        }
+
+        let showOpt = optAlone && !store.workspaceFolders.isEmpty
+        // Releasing ⌥ clears selection-suppress so the next hold can open again.
+        if !showOpt, selection.suppressWorkspacePicker {
+            selection.suppressWorkspacePicker = false
+        }
+        if selection.showWorkspacePicker != showOpt {
+            setWorkspacePickerHeld(showOpt)
+        }
+    }
+
+    /// Grow / shrink the list for ⌥-held workspace picker (top edge stays put).
+    private func setWorkspacePickerHeld(_ show: Bool) {
+        selection.showWorkspacePicker = show
+        lastLaidOutListHeight = -1
+        relayoutForSessionCountIfNeeded(animateFrame: false)
+    }
+
+    private func selectWorkspace(at index: Int) {
+        guard store.workspaceFolders.indices.contains(index) else { return }
+        // Close first so listHeight already reflects collapse when the store notifies.
+        selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
+        Preferences.selectAgentWorkspace(store.workspaceFolders[index])
+        lastLaidOutListHeight = -1
+        relayoutForSessionCountIfNeeded(animateFrame: false)
     }
 
     /// Slide ⌘ hints in/out inside the list card. List-only grows the panel without
@@ -682,6 +785,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard isVisible else { return event }
 
         if Int(event.keyCode) == kVK_Escape, panel.isKeyWindow {
+            if selection.workspacePickerExpanded {
+                selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
+                lastLaidOutListHeight = -1
+                relayoutForSessionCountIfNeeded(animateFrame: false)
+                return nil
+            }
             if selection.selectedID != nil {
                 closeChat()
             } else {
@@ -702,6 +811,18 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
            let id = selection.selectedID,
            store.session(id: id)?.status == .working {
             onStop?(id)
+            return nil
+        }
+
+        // ⌥1–9 → switch workspace by Settings order (always dismisses the picker).
+        if panel.isKeyWindow,
+           flags.contains(.option),
+           !flags.contains(.command),
+           !flags.contains(.control),
+           !flags.contains(.shift),
+           let index = shortcutIndex(for: event),
+           store.workspaceFolders.indices.contains(index) {
+            selectWorkspace(at: index)
             return nil
         }
 
@@ -819,8 +940,12 @@ private enum SessionsListPaging {
 /// List panel height grows with session count up to one full page + pagination.
 private enum SessionsListMetrics {
     static let chromeVertical: CGFloat = 68 + 14
-    /// Workspace picker: 13+13 pad + ~34pt title/path stack.
-    private static let picker: CGFloat = 60
+    /// Workspace picker closed: 13+13 pad + ~34pt title/path stack.
+    static let picker: CGFloat = 60
+    /// Expanded picker row (name + path + pads).
+    private static let pickerRow: CGFloat = 50
+    private static let pickerManage: CGFloat = 36
+    private static let pickerDivider: CGFloat = 1
     private static let columnGap: CGFloat = 16
     /// Embedded session row: 8+8 pad + 14pt title + 4 gap + 13pt single-line preview.
     private static let row: CGFloat = 54
@@ -835,13 +960,43 @@ private enum SessionsListMetrics {
         panelHeight(sessionCount: SessionsListPaging.pageSize + 1)
     }
 
-    static func panelHeight(sessionCount: Int, showShortcutHints: Bool = false) -> CGFloat {
-        chromeVertical + columnHeight(sessionCount: sessionCount, showShortcutHints: showShortcutHints)
+    static func pickerHeight(folderCount: Int, expanded: Bool) -> CGFloat {
+        guard expanded else { return picker }
+        if folderCount <= 0 {
+            return picker + pickerDivider + pickerManage
+        }
+        let rows = CGFloat(folderCount) * pickerRow
+        // Separators between rows + before Manage.
+        let seps = CGFloat(folderCount) * pickerDivider
+        return picker + seps + rows + pickerManage
     }
 
-    static func columnHeight(sessionCount: Int, showShortcutHints: Bool = false) -> CGFloat {
+    static func panelHeight(
+        sessionCount: Int,
+        showShortcutHints: Bool = false,
+        workspaceFolderCount: Int = 0,
+        workspacePickerExpanded: Bool = false
+    ) -> CGFloat {
+        chromeVertical + columnHeight(
+            sessionCount: sessionCount,
+            showShortcutHints: showShortcutHints,
+            workspaceFolderCount: workspaceFolderCount,
+            workspacePickerExpanded: workspacePickerExpanded
+        )
+    }
+
+    static func columnHeight(
+        sessionCount: Int,
+        showShortcutHints: Bool = false,
+        workspaceFolderCount: Int = 0,
+        workspacePickerExpanded: Bool = false
+    ) -> CGFloat {
+        let pickerH = pickerHeight(
+            folderCount: workspaceFolderCount,
+            expanded: workspacePickerExpanded
+        )
         if sessionCount <= 0 {
-            return picker + columnGap + emptyHint
+            return pickerH + columnGap + emptyHint
         }
         let paginate = SessionsListPaging.needsPagination(sessionCount)
         // Paginated lists already have a footer; ⌘ hints reuse that slot.
@@ -849,14 +1004,35 @@ private enum SessionsListMetrics {
         let rows = CGFloat(paginate ? SessionsListPaging.pageSize : sessionCount)
         let stack = rows * row + max(0, rows - 1) * rowGap
         let bottomPad = showFooter ? listPadBottomPaginated : listPadBottom
-        return picker + columnGap + listPadTop + bottomPad + stack + (showFooter ? footer : 0)
+        return pickerH + columnGap + listPadTop + bottomPad + stack + (showFooter ? footer : 0)
     }
 }
 
 private final class SessionsPanelSelection: ObservableObject {
     @Published var selectedID: UUID?
     @Published var showShortcutBadges = false
+    /// ⌥ held — force-open the workspace picker dropdown.
+    @Published var showWorkspacePicker = false
+    /// Click-open workspace picker (survives ⌥ release).
+    @Published var pinnedWorkspacePicker = false
+    /// After a selection (click or ⌥n), stay closed until ⌥ is released.
+    @Published var suppressWorkspacePicker = false
     @Published var listPage = 0
+
+    var workspacePickerExpanded: Bool {
+        !suppressWorkspacePicker && (showWorkspacePicker || pinnedWorkspacePicker)
+    }
+
+    /// Dismiss the open list. If ⌥ is still held, suppress reopen until it is released.
+    func closeWorkspacePicker(suppressUntilAltUp: Bool = false) {
+        pinnedWorkspacePicker = false
+        if suppressUntilAltUp {
+            suppressWorkspacePicker = true
+        } else {
+            showWorkspacePicker = false
+            suppressWorkspacePicker = false
+        }
+    }
 
     func pagedSessions(_ sessions: [AgentSession]) -> [AgentSession] {
         let range = SessionsListPaging.slice(page: listPage, total: sessions.count)
@@ -901,6 +1077,16 @@ private struct SessionsSidePanelView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var headerFG: Color { colorScheme == .dark ? .white : .black }
+
+    /// Same cursor mark as the menu-bar icon, templated for the black title pill.
+    private static let headerLogoImage: NSImage = {
+        let image = (Bundle.main.image(forResource: "menubar_on")?.copy() as? NSImage)
+            ?? NSImage(systemSymbolName: "hand.point.up.left.fill", accessibilityDescription: nil)
+            ?? NSImage(size: NSSize(width: 14, height: 14))
+        image.size = NSSize(width: 14, height: 14)
+        image.isTemplate = true
+        return image
+    }()
     private var headerBG: Color { SoftChrome.cardFill(dark: colorScheme == .dark) }
 
     private var allSessions: [AgentSession] { store.sessions }
@@ -912,7 +1098,9 @@ private struct SessionsSidePanelView: View {
     private var listContentHeight: CGFloat {
         SessionsListMetrics.columnHeight(
             sessionCount: allSessions.count,
-            showShortcutHints: selection.showShortcutBadges
+            showShortcutHints: selection.showShortcutBadges,
+            workspaceFolderCount: store.workspaceFolders.count,
+            workspacePickerExpanded: selection.workspacePickerExpanded
         )
     }
 
@@ -972,21 +1160,28 @@ private struct SessionsSidePanelView: View {
 
     private var floatingHeader: some View {
         HStack(alignment: .center) {
-            Text("AI sessions")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 5)
-                .background(
-                    Capsule(style: .continuous)
-                        .fill(Color.black)
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(Color.white, lineWidth: 1.25)
-                        )
-                )
-                .panelDragHandle(onEnded: onPanelDragEnded)
-                .help("Drag to move")
+            HStack(spacing: 7) {
+                Image(nsImage: Self.headerLogoImage)
+                    .resizable()
+                    .renderingMode(.template)
+                    .frame(width: 14, height: 14)
+                Text("Ai Sessions")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.leading, 10)
+            .padding(.trailing, 14)
+            .padding(.vertical, 5)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.black)
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.white, lineWidth: 1.25)
+                    )
+            )
+            .panelDragHandle(onEnded: onPanelDragEnded)
+            .help("Drag to move")
             Spacer(minLength: 8)
             Button(action: onNew) {
                 Text("New")
@@ -1027,10 +1222,22 @@ private struct SessionsSidePanelView: View {
     private var sessionsColumn: some View {
         VStack(spacing: 16) {
             WorkspacePicker(
+                store: store,
                 folders: store.workspaceFolders,
                 current: store.currentWorkspace,
-                onSelect: { Preferences.selectAgentWorkspace($0) },
-                onManage: onManageWorkspaces
+                isOpen: selection.workspacePickerExpanded,
+                pinned: Binding(
+                    get: { selection.pinnedWorkspacePicker },
+                    set: { selection.pinnedWorkspacePicker = $0 }
+                ),
+                onSelect: {
+                    selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
+                    Preferences.selectAgentWorkspace($0)
+                },
+                onManage: {
+                    selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
+                    onManageWorkspaces()
+                }
             )
             if store.sessions.isEmpty {
                 Text(store.currentWorkspace.isEmpty
@@ -1178,8 +1385,11 @@ private struct SessionsSidePanelView: View {
 }
 
 private struct WorkspacePicker: View {
+    @ObservedObject var store: SessionStore
     let folders: [String]
     let current: String
+    var isOpen: Bool
+    @Binding var pinned: Bool
     var onSelect: (String) -> Void
     var onManage: () -> Void
 
@@ -1193,70 +1403,200 @@ private struct WorkspacePicker: View {
     }
 
     var body: some View {
-        // Draw the card ourselves — Menu’s borderless label swallows custom backgrounds.
-        HStack(spacing: 12) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 30, height: 30)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(fg)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(current.isEmpty ? "Choose a working folder" : current)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(fg.opacity(0.55))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.up.chevron.down")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(fg.opacity(0.45))
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 13)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(WorkspacePickerBackground(cornerRadius: 22))
-        .overlay {
-            Menu {
+        // Expand in-flow inside one card — pushes sessions down; no floating overlay.
+        VStack(spacing: 0) {
+            Button {
                 if folders.isEmpty {
-                    Button("Add folders…", action: onManage)
+                    onManage()
                 } else {
-                    ForEach(folders, id: \.self) { path in
-                        Button {
-                            onSelect(path)
-                        } label: {
-                            // One primary string — Menu drops a second Text “subtitle” on macOS.
-                            if SessionStore.sameWorkspace(path, current) {
-                                Label(menuLabel(for: path), systemImage: "checkmark")
-                            } else {
-                                Text(menuLabel(for: path))
-                            }
-                        }
-                    }
-                    Divider()
-                    Button("Manage folders…", action: onManage)
+                    pinned.toggle()
                 }
             } label: {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .contentShape(Rectangle())
+                HStack(spacing: 12) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 30, height: 30)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(fg)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Text(current.isEmpty ? "Choose a working folder" : current)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(fg.opacity(0.55))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(fg.opacity(0.45))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 13)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-        }
-        .help(current.isEmpty ? "Choose a working folder" : current)
-    }
+            .buttonStyle(.plain)
+            .focusable(false)
+            .help(current.isEmpty ? "Choose a working folder" : current)
 
-    private func menuTitle(for path: String) -> String {
+            if isOpen {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 1)
+                    .padding(.horizontal, 12)
+
+                if folders.isEmpty {
+                    WorkspacePickerActionRow(title: "Add folders…", fg: fg, onSelect: onManage)
+                } else {
+                    ForEach(Array(folders.enumerated()), id: \.element) { index, path in
+                        WorkspacePickerRow(
+                            path: path,
+                            shortcutIndex: index + 1,
+                            isCurrent: SessionStore.sameWorkspace(path, current),
+                            counts: store.sessionCounts(for: path),
+                            fg: fg,
+                            onSelect: { onSelect(path) }
+                        )
+                        if index < folders.count - 1 {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.07))
+                                .frame(height: 1)
+                                .padding(.leading, 14)
+                        }
+                    }
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(height: 1)
+                    WorkspacePickerActionRow(title: "Manage folders…", fg: fg, onSelect: onManage)
+                }
+            }
+        }
+        .background(WorkspacePickerBackground(cornerRadius: 22))
+        .animation(.easeOut(duration: 0.14), value: isOpen)
+    }
+}
+
+private struct WorkspacePickerActionRow: View {
+    let title: String
+    let fg: Color
+    var onSelect: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(fg.opacity(hovering ? 0.9 : 0.7))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.primary.opacity(hovering ? 0.08 : 0))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 2)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+private struct WorkspacePickerRow: View {
+    let path: String
+    let shortcutIndex: Int
+    let isCurrent: Bool
+    let counts: (inProgress: Int, succeeded: Int)
+    let fg: Color
+    var onSelect: () -> Void
+
+    @State private var hovering = false
+
+    private var name: String {
         URL(fileURLWithPath: path).lastPathComponent
     }
 
-    private func menuLabel(for path: String) -> String {
-        "\(menuTitle(for: path)) - \(path)"
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Text(name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(fg)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        sessionCounts
+                        Spacer(minLength: 4)
+                    }
+                    Text(path)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(fg.opacity(0.5))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+                if isCurrent {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                if shortcutIndex <= 9 {
+                    Text("⌥\(shortcutIndex)")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(fg.opacity(0.45))
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(hovering || isCurrent ? 0.08 : 0))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("\(name) — \(path)")
+    }
+
+    @ViewBuilder
+    private var sessionCounts: some View {
+        HStack(spacing: 6) {
+            if counts.inProgress > 0 {
+                WorkspaceSessionCount(dot: Color.accentColor, count: counts.inProgress)
+            }
+            if counts.succeeded > 0 {
+                WorkspaceSessionCount(dot: .green, count: counts.succeeded)
+            }
+        }
+    }
+}
+
+private struct WorkspaceSessionCount: View {
+    let dot: Color
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Circle()
+                .fill(dot)
+                .frame(width: 6, height: 6)
+            Text("\(count)")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
     }
 }
 
