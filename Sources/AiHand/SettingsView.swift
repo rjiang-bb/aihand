@@ -1203,17 +1203,26 @@ private struct WorkspaceWorktreeRow: View {
             .focusable(false)
 
             if !entry.isPrimary, hovering || canRemove {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(canRemove ? .secondary : Color.secondary.opacity(0.35))
-                        .frame(width: 20, height: 20)
-                        .background(Circle().fill(Color.primary.opacity(hovering && canRemove ? 0.12 : 0.06)))
-                        .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
+                ZStack {
+                    Button(action: onRemove) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(canRemove ? .secondary : Color.secondary.opacity(0.35))
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(Color.primary.opacity(hovering && canRemove ? 0.12 : 0.06)))
+                            .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1, enabled: canRemove)
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .disabled(!canRemove)
+
+                    // Disabled controls don’t receive hover, so host the tooltip on a clear overlay.
+                    if !canRemove {
+                        Color.clear
+                            .frame(width: 20, height: 20)
+                            .help("There are still uncommitted changes")
+                    }
                 }
-                .buttonStyle(.plain)
-                .focusable(false)
-                .disabled(!canRemove)
             }
         }
         .padding(.horizontal, 14)
