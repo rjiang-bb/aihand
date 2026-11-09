@@ -529,6 +529,10 @@ private struct AgentPage: View {
                     }
                 }
             }
+            Card(title: "Permissions") {
+                AgentPermissionsBlock(model: model)
+                    .id(Preferences.agentCLI.rawValue)
+            }
             Card(title: "Favorites") {
                 AgentFavoritesBlock(model: model)
                     .id(Preferences.agentCLI.rawValue)
@@ -540,6 +544,76 @@ private struct AgentPage: View {
     private func refreshCLIAvailability() {
         let kind = Preferences.agentCLI
         missingCLI = AgentCLIFactory.make(kind).resolveExecutable() == nil ? kind : nil
+    }
+}
+
+private struct AgentPermissionsBlock: View {
+    @ObservedObject var model: SettingsModel
+
+    private var cli: AgentCLIKind { Preferences.agentCLI }
+
+    var body: some View {
+        switch cli {
+        case .cursor:
+            permissionRow(
+                title: "Cursor Agent",
+                detail: Preferences.cursorPermissionMode.detail,
+                selection: model.binding(
+                    { Preferences.cursorPermissionMode },
+                    { Preferences.cursorPermissionMode = $0 }
+                )
+            ) {
+                ForEach(CursorAgentPermissionMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+        case .claude:
+            permissionRow(
+                title: "Claude Code",
+                detail: Preferences.claudePermissionMode.detail,
+                selection: model.binding(
+                    { Preferences.claudePermissionMode },
+                    { Preferences.claudePermissionMode = $0 }
+                )
+            ) {
+                ForEach(ClaudeAgentPermissionMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+        case .codex:
+            permissionRow(
+                title: "Codex",
+                detail: Preferences.codexPermissionMode.detail,
+                selection: model.binding(
+                    { Preferences.codexPermissionMode },
+                    { Preferences.codexPermissionMode = $0 }
+                )
+            ) {
+                ForEach(CodexAgentPermissionMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+        }
+    }
+
+    private func permissionRow<Mode: Hashable, Content: View>(
+        title: String,
+        detail: String,
+        selection: Binding<Mode>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Row(
+            title,
+            detail: "Saved for \(cli.title) only. \(detail)"
+        ) {
+            Picker("", selection: selection) {
+                content()
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .focusable(false)
+        }
     }
 }
 

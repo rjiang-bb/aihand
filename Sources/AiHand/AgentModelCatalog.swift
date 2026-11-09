@@ -171,7 +171,7 @@ enum AgentModelCatalog {
         switch kind {
         case .cursor: return groupCursor(discoverCursorFlat())
         case .claude: return familiesWithEffortFlag(discoverClaudeFlat())
-        case .codex: return familiesWithEffortFlag(discoverCodexFlat())
+        case .codex: return discoverCodexFamilies()
         }
     }
 
@@ -342,10 +342,11 @@ enum AgentModelCatalog {
     }
 
     private static func effortLabel(_ token: String) -> String {
-        switch token {
+        switch token.lowercased() {
         case "xhigh": return "Extra High"
         case "none": return "None"
         case "minimal": return "Minimal"
+        case "ultra": return "Ultra"
         default:
             return AgentEffortLevel(rawValue: token)?.title ?? token.capitalized
         }
@@ -362,8 +363,9 @@ enum AgentModelCatalog {
         else if t.hasPrefix("high") { rank = 5 }
         else if t.hasPrefix("extra") { rank = 6 }
         else if t.hasPrefix("max") { rank = 7 }
-        else if t == "fast" { rank = 8 }
-        else { rank = 9 }
+        else if t.hasPrefix("ultra") { rank = 8 }
+        else if t == "fast" { rank = 9 }
+        else { rank = 10 }
         let fast = t.contains("fast") ? 1 : 0
         return String(format: "%02d-%d-%@", rank, fast, t)
     }
@@ -409,19 +411,104 @@ enum AgentModelCatalog {
         ]
     }
 
-    private static func discoverCodexFlat() -> [AgentModelOption] {
+    /// Live catalog from `codex debug models` (JSON). Falls back to legacy text list, then static ids.
+    private static func discoverCodexFamilies() -> [AgentModelFamily] {
         let exe = AgentPathLookup.resolve("codex")
         if let exe {
+            if let json = run(exe, ["debug", "models"]),
+               let families = parseCodexDebugModels(json),
+               !families.isEmpty {
+                return sortFamiliesByRecency(families)
+            }
+            // Older CLIs / alternate list formats.
             let output = run(exe, ["models"]) ?? run(exe, ["--list-models"]) ?? ""
             let parsed = parseIdTitleList(output)
-            if !parsed.isEmpty { return parsed }
+            if !parsed.isEmpty {
+                return familiesWithEffortFlag(parsed)
+            }
         }
-        return [
-            AgentModelOption(modelId: "gpt-5.3-codex", title: "Codex 5.3"),
-            AgentModelOption(modelId: "gpt-5.2", title: "GPT-5.2"),
-            AgentModelOption(modelId: "o3", title: "o3"),
-            AgentModelOption(modelId: "o4-mini", title: "o4-mini")
+        return familiesWithEffortFlag(codexFallbackModels)
+    }
+
+    private static var codexFallbackModels: [AgentModelOption] {
+        [
+            AgentModelOption(modelId: "gpt-6-luna", title: "GPT-6-Luna"),
+            AgentModelOption(modelId: "gpt-5.6-terra", title: "GPT-5.6-Terra"),
+            AgentModelOption(modelId: "gpt-5.6-luna", title: "GPT-5.6-Luna")
         ]
+    }
+
+    /// Parses `codex debug models` JSON: `{ "models": [ { slug, visibility, supported_reasoning_levels } ] }`.
+    private static func parseCodexDebugModels(_ text: String) -> [AgentModelFamily]? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let start = trimmed.firstIndex(of: "{"),
+              let data = String(trimmed[start...]).data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let models = root["models"] as? [[String: Any]] ?? []
+        guard !models.isEmpty else { return nil }
+
+        var families: [AgentModelFamily] = []
+        var seen = Set<String>()
+        for model in models {
+            if let visibility = model["visibility"] as? String,
+               visibility.lowercased() != "list" {
+                continue
+            }
+            guard let slug = (model["slug"] as? String) ?? (model["id"] as? String),
+                  !slug.isEmpty,
+                  seen.insert(slug).inserted else {
+                continue
+            }
+            let title = (model["display_name"] as? String)
+                ?? (model["name"] as? String)
+                ?? prettyCodexTitle(slug)
+
+            let levelEntries = model["supported_reasoning_levels"] as? [[String: Any]] ?? []
+            var efforts: [String] = []
+            var effortSeen = Set<String>()
+            for entry in levelEntries {
+                guard let effort = entry["effort"] as? String,
+                      !effort.isEmpty,
+                      effortSeen.insert(effort).inserted else { continue }
+                efforts.append(effort)
+            }
+
+            let variants: [AgentModelVariant]
+            if efforts.isEmpty {
+                // Catalog didn't advertise levels — keep a usable Default + common ladder.
+                variants = [AgentModelVariant(id: slug, title: "Default", modelId: slug, effort: nil)]
+                    + AgentEffortLevel.allCases.map { level in
+                        AgentModelVariant(
+                            id: "\(slug)|\(level.rawValue)",
+                            title: level.title,
+                            modelId: slug,
+                            effort: level.rawValue
+                        )
+                    }
+            } else {
+                variants = efforts.map { effort in
+                    AgentModelVariant(
+                        id: "\(slug)|\(effort)",
+                        title: effortLabel(effort),
+                        modelId: slug,
+                        effort: effort
+                    )
+                }
+            }
+            families.append(AgentModelFamily(id: slug, title: title, variants: variants))
+        }
+        return families.isEmpty ? nil : families
+    }
+
+    private static func prettyCodexTitle(_ slug: String) -> String {
+        slug.split(separator: "-").map { part -> String in
+            let s = String(part)
+            if s.lowercased() == "gpt" { return "GPT" }
+            if s.first?.isNumber == true { return s }
+            return s.prefix(1).uppercased() + s.dropFirst().lowercased()
+        }.joined(separator: " ")
     }
 
     private static func parseIdTitleList(_ text: String) -> [AgentModelOption] {
@@ -445,22 +532,24 @@ enum AgentModelCatalog {
         process.executableURL = URL(fileURLWithPath: exe)
         process.arguments = args
         let out = Pipe()
-        let err = Pipe()
+        // Discard stderr — a Pipe we never drain can still deadlock on large/noisy CLIs.
         process.standardOutput = out
-        process.standardError = err
+        process.standardError = FileHandle.nullDevice
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
-        let extras = ["\(home)/.local/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+        let extras = ["\(home)/.local/bin", "/usr/local/bin", "/opt/homebrew/bin", "\(home)/.npm-global/bin"]
         let path = env["PATH"] ?? "/usr/bin:/bin"
         env["PATH"] = (extras + [path]).joined(separator: ":")
         process.environment = env
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return nil
         }
+        // Read before/while waiting. `codex debug models` is ~300KB; waiting first fills the
+        // pipe buffer (~64KB) and deadlocks forever (Settings stuck on "Loading…").
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
         let text = String(data: data, encoding: .utf8) ?? ""
         return text.isEmpty ? nil : text
     }

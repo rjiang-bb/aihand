@@ -19,6 +19,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
 #if swift(>=5.9)
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
@@ -40,7 +41,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         uc.removeScriptMessageHandler(forName: "imageMenu")
     }
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         private var ready = false
         private var pendingMessages: [AgentMessage] = []
@@ -55,6 +56,49 @@ struct ChatTranscriptView: NSViewRepresentable {
             imagesSentToPage.removeAll()
             lastPayload = ""
             push(messages: pendingMessages, sessionID: pendingSessionID ?? boundSessionID, forceScroll: true)
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            // Keep the in-memory transcript shell; never navigate the web view away.
+            if url.isFileURL || url.scheme?.lowercased() == "about" {
+                decisionHandler(.allow)
+                return
+            }
+            if Self.openInDefaultBrowser(url) {
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.cancel)
+        }
+
+        /// `target="_blank"` markdown links never hit decidePolicy unless we handle this.
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if let url = navigationAction.request.url {
+                _ = Self.openInDefaultBrowser(url)
+            }
+            return nil
+        }
+
+        @discardableResult
+        private static func openInDefaultBrowser(_ url: URL) -> Bool {
+            guard let scheme = url.scheme?.lowercased(),
+                  ["http", "https", "mailto"].contains(scheme) else {
+                return false
+            }
+            return NSWorkspace.shared.open(url)
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -361,7 +405,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md h3 { font-size: 1.05em; }
       .md ul, .md ol { margin: 0.45em 0; padding-left: 1.35em; }
       .md li { margin: 0.2em 0; }
-      .md a { color: var(--link); }
+      .md a { color: var(--link); cursor: pointer; text-decoration: underline; }
       .md code {
         font-family: var(--mono);
         font-size: 0.9em;
@@ -430,6 +474,8 @@ struct ChatTranscriptView: NSViewRepresentable {
       s = s.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
       s = s.replace(/(^|[^*])\\*([^*]+)\\*(?!\\*)/g, '$1<em>$2</em>');
       s = s.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+      // Autolink bare http(s) URLs that aren't already inside an href attribute.
+      s = s.replace(/(^|[^"'>=])(https?:\\/\\/[^\\s<]+[^\\s<.,;:!?)\\]])/g, '$1<a href="$2" target="_blank" rel="noreferrer">$2</a>');
       return s;
     }
 

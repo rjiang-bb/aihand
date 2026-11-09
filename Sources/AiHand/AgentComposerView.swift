@@ -97,6 +97,7 @@ struct AgentComposerView: View {
                             onSend()
                         }
                     }
+                    .help("Type / for skills · ⇧↩ for a new line")
 
                 if isWorking, let onStop {
                     Button(action: onStop) {
@@ -107,6 +108,7 @@ struct AgentComposerView: View {
                             .softHoverInnerBorder(Circle(), inset: 2.5)
                     }
                     .buttonStyle(.plain)
+                    .help("Stop (⌃C)")
                 }
 
                 Button(action: {
@@ -125,6 +127,7 @@ struct AgentComposerView: View {
                 .buttonStyle(.plain)
                 .disabled(!canSend)
                 .keyboardShortcut(.return, modifiers: .command)
+                .help(kind == .followUp ? "Send / Steer (⌘↩)" : "Send (⌘↩)")
             }
 
             HStack(alignment: .center, spacing: 14) {
