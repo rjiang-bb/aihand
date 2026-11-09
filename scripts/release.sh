@@ -8,14 +8,16 @@ PROFILE="${NOTARY_PROFILE:-notarytool-profile}"
 SKIP_NOTARIZE=false
 SKIP_PUBLISH=false
 NO_BUMP=false
+ALPHA=false
 for arg in "$@"; do
     case "$arg" in
         --skip-notarize) SKIP_NOTARIZE=true ;;
         --skip-publish) SKIP_PUBLISH=true ;;
         --no-bump) NO_BUMP=true ;;
+        --alpha) ALPHA=true ;;
         -h|--help)
             cat <<'USAGE'
-Usage: ./scripts/release.sh [--skip-notarize] [--skip-publish] [--no-bump]
+Usage: ./scripts/release.sh [--skip-notarize] [--skip-publish] [--no-bump] [--alpha]
 
   Bumps VERSION (patch), builds a universal signed DMG, and uploads it to a
   GitHub release (rjiang-bb/aihand). Dist artifacts are local-only — not git.
@@ -23,6 +25,8 @@ Usage: ./scripts/release.sh [--skip-notarize] [--skip-publish] [--no-bump]
   --skip-notarize  Skip Apple notarization (still codesigns).
   --skip-publish   Build only; do not create/upload a GitHub release.
   --no-bump        Keep the current VERSION file as-is.
+  --alpha          Cut a GitHub prerelease (e.g. 1.0.10-alpha.1) for debugging.
+                   Does not rewrite VERSION or become /releases/latest (Sparkle stays on mainline).
 
   Env:
     AIHAND_VERSION   If set, use this version and skip bumping (CI/tags).
@@ -41,16 +45,41 @@ done
 
 INSTALL_NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
 
-bump_patch_version() {
+read_base_version() {
     local major minor patch
     IFS=. read -r major minor patch < "$ROOT/VERSION"
-    if [[ -z "${major:-}" || -z "${minor:-}" || -z "${patch:-}" ]]; then
+    # Strip any accidental prerelease suffix from the file.
+    patch="${patch%%-*}"
+    if [[ -z "${major:-}" || -z "${minor:-}" || -z "${patch:-}" || ! "$patch" =~ ^[0-9]+$ ]]; then
         echo "error: VERSION must be major.minor.patch (got: $(tr -d '[:space:]' < "$ROOT/VERSION"))" >&2
         exit 1
     fi
+    printf '%s %s %s' "$major" "$minor" "$patch"
+}
+
+bump_patch_version() {
+    local major minor patch
+    read -r major minor patch < <(read_base_version)
     patch=$((patch + 1))
     printf '%s.%s.%s\n' "$major" "$minor" "$patch" > "$ROOT/VERSION"
     VERSION="${major}.${minor}.${patch}"
+}
+
+# Next unused alpha tag for the upcoming patch (does not touch VERSION).
+next_alpha_version() {
+    local major minor patch n candidate
+    read -r major minor patch < <(read_base_version)
+    patch=$((patch + 1))
+    n=1
+    while true; do
+        candidate="${major}.${minor}.${patch}-alpha.${n}"
+        if ! git rev-parse "v${candidate}" >/dev/null 2>&1 \
+            && ! gh release view "v${candidate}" --repo "$REPO" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+        n=$((n + 1))
+    done
 }
 
 # Previous published release tag (local tags, then GitHub), excluding the current version.
@@ -96,10 +125,18 @@ generate_release_notes() {
     return 1
 }
 
+if [[ "$ALPHA" == true && -n "${AIHAND_VERSION:-}" ]]; then
+    echo "error: use either --alpha or AIHAND_VERSION, not both" >&2
+    exit 1
+fi
+
 if [[ -n "${AIHAND_VERSION:-}" ]]; then
     VERSION="$AIHAND_VERSION"
     printf '%s\n' "$VERSION" > "$ROOT/VERSION"
     echo "==> Using AIHAND_VERSION=$VERSION"
+elif [[ "$ALPHA" == true ]]; then
+    VERSION="$(next_alpha_version)"
+    echo "==> Alpha prerelease VERSION=$VERSION (VERSION file left at $(tr -d '[:space:]' < "$ROOT/VERSION"))"
 elif [[ "$NO_BUMP" == true ]]; then
     VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
     echo "==> Keeping VERSION=$VERSION"
@@ -121,6 +158,11 @@ else
     else
         echo "==> Release notes since previous tag"
     fi
+fi
+if [[ "$ALPHA" == true ]]; then
+    NOTES="**Alpha / debug build** — GitHub prerelease only. Sparkle \`/releases/latest\` stays on the last stable release; install this DMG manually for testing.
+
+${NOTES}"
 fi
 
 notarize() {
@@ -158,20 +200,37 @@ publish_github_release() {
         exit 1
     fi
     local tag="v$VERSION"
+    local title="$VERSION"
     local assets=("$OUT/$APP_NAME.dmg" "$OUT/appcast.xml")
     local args=(
         release create "$tag"
         "${assets[@]}"
         --repo "$REPO"
-        --title "$VERSION"
+        --title "$title"
         --notes "$NOTES"
     )
+    if [[ "$ALPHA" == true ]]; then
+        title="$VERSION (alpha)"
+        args=(
+            release create "$tag"
+            "${assets[@]}"
+            --repo "$REPO"
+            --title "$title"
+            --notes "$NOTES"
+            --prerelease
+            --latest=false
+        )
+    fi
     if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
         echo "==> Release $tag already exists; uploading assets"
         gh release upload "$tag" "${assets[@]}" --repo "$REPO" --clobber
-        gh release edit "$tag" --repo "$REPO" --title "$VERSION" --notes "$NOTES"
+        local edit=(release edit "$tag" --repo "$REPO" --title "$title" --notes "$NOTES")
+        if [[ "$ALPHA" == true ]]; then
+            edit+=(--prerelease --latest=false)
+        fi
+        gh "${edit[@]}"
     else
-        echo "==> Creating GitHub release $tag"
+        echo "==> Creating GitHub release $tag$([ "$ALPHA" == true ] && echo ' (prerelease)')"
         gh "${args[@]}"
     fi
     echo "Release: https://github.com/$REPO/releases/tag/$tag"
