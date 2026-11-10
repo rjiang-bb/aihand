@@ -270,17 +270,21 @@ struct ChatTranscriptView: NSViewRepresentable {
         flex-direction: column;
         gap: 14px;
       }
-      .msg { max-width: 100%; }
+      .msg { max-width: 100%; min-width: 0; }
       .msg.user {
         align-self: flex-end;
         max-width: 88%;
+        /* Flex items default min-width:auto — long URLs otherwise refuse to shrink. */
+        min-width: 0;
+        overflow-wrap: anywhere;
+        word-break: break-word;
         background: var(--user-bg);
         border: 1px solid var(--user-border);
         border-radius: 14px;
         padding: 10px 12px;
         color: var(--text);
       }
-      .msg.assistant { align-self: stretch; padding: 2px 0; color: var(--text); }
+      .msg.assistant { align-self: stretch; padding: 2px 0; color: var(--text); min-width: 0; }
       .msg.tool-group {
         align-self: stretch;
         max-width: 100%;
@@ -392,6 +396,10 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-width: 8px 0 8px 12px;
         border-color: transparent transparent transparent #fff;
       }
+      .md {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
       .md > *:first-child { margin-top: 0; }
       .md > *:last-child { margin-bottom: 0; }
       .md p { margin: 0.55em 0; }
@@ -405,7 +413,14 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md h3 { font-size: 1.05em; }
       .md ul, .md ol { margin: 0.45em 0; padding-left: 1.35em; }
       .md li { margin: 0.2em 0; }
-      .md a { color: var(--link); cursor: pointer; text-decoration: underline; }
+      .md a {
+        color: var(--link);
+        cursor: pointer;
+        text-decoration: underline;
+        /* Bare autolinks are one long token — break inside the bubble, not past it. */
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
       .md code {
         font-family: var(--mono);
         font-size: 0.9em;
