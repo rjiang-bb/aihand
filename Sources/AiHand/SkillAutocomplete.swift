@@ -11,6 +11,7 @@ final class SkillAutocompleteController: ObservableObject {
     private var keyMonitor: Any?
     private var workspace: String = ""
     private var connectionID: UUID?
+    private var cli: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget)
     /// Bumped on every dismiss so in-flight skill scans can't reopen a dismissed picker.
     private var dismissGeneration: Int = 0
     /// After a pick, ignore `/<name>` until the user starts a new `/` token.
@@ -20,10 +21,15 @@ final class SkillAutocompleteController: ObservableObject {
     /// Host replaces the `/query` with the chosen skill (same path as click).
     var onPick: ((AgentSkill) -> Void)?
 
-    func configure(workspace: String, connectionID: UUID? = Preferences.agentWorkspaceConnectionID) {
-        if self.workspace != workspace || self.connectionID != connectionID {
+    func configure(
+        workspace: String,
+        connectionID: UUID? = Preferences.agentWorkspaceConnectionID,
+        cli: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget)
+    ) {
+        if self.workspace != workspace || self.connectionID != connectionID || self.cli != cli {
             self.workspace = workspace
             self.connectionID = connectionID
+            self.cli = cli
             skills = []
             refreshSkills()
         } else if skills.isEmpty {
@@ -34,15 +40,17 @@ final class SkillAutocompleteController: ObservableObject {
     func refreshSkills() {
         let ws = workspace
         let conn = connectionID
+        let kind = cli
         let gen = dismissGeneration
         if conn != nil {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let list = SkillCatalog.skills(
                     workspace: ws.isEmpty ? nil : ws,
-                    connectionID: conn
+                    connectionID: conn,
+                    cli: kind
                 )
                 DispatchQueue.main.async {
-                    guard let self, self.workspace == ws, self.connectionID == conn else { return }
+                    guard let self, self.workspace == ws, self.connectionID == conn, self.cli == kind else { return }
                     self.skills = list
                     guard self.dismissGeneration == gen else { return }
                     let text = self.readText()
@@ -55,7 +63,8 @@ final class SkillAutocompleteController: ObservableObject {
         }
         skills = SkillCatalog.skills(
             workspace: ws.isEmpty ? nil : ws,
-            connectionID: nil
+            connectionID: nil,
+            cli: kind
         )
     }
 

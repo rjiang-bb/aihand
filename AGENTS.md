@@ -66,6 +66,28 @@ Composer editing (lists, quotes, fences, inline code, height) has a real-keystro
 - Run `./scripts/composer-probe.sh` (or pass sections: `quotes lists ordered fences inline height`). Exits non-zero on failure; renders land in `/tmp/probe-*.png`.
 - Run it after any change to `ComposerMarkdownStyler` / `ComposerPromptEditor`, and add checks for new behaviour or reported bugs.
 
+## Skill catalog roots
+
+`/` autocomplete (`SkillCatalog`) scans personal, workspace, and plugin skill folders **for the selected CLI only** (`cli` / session `cliKind`). Keep local (`skillContainerRoots` / `pluginSkillTrees`) and remote SSH roots in sync, and gate each CLI’s dirs behind its `AgentCLIKind` case.
+
+Shared for every CLI: `~/.agents/skills` and workspace `.agents/skills`.
+
+CLI-specific today:
+
+- **Cursor** — `~/.cursor/skills`, `~/.cursor/skills-cursor`, workspace `.cursor/skills`, `~/.cursor/plugins`
+- **Claude** — `~/.claude/skills`, workspace `.claude/skills`, `~/.claude/plugins`
+- **Codex** — `~/.codex/skills`, `~/.codex/skills/.system`, workspace `.codex/skills`, `~/.codex/plugins` + `~/.codex/.tmp/plugins`
+
+Plugin trees discover containers named `skills`, `skills-*`, or `*-skills`.
+
+When adding another agent CLI (or a CLI changes where it stores skills/plugins):
+
+- Add a new `AgentCLIKind` branch in `skillContainerRoots` / `pluginSkillTrees` (and the matching remote `roots` / `pluginTrees` lists). Do **not** scan that CLI’s dirs unless it is the selected CLI.
+- Wire `cliKind` through the composer / autocomplete callers if a new surface can change CLI.
+- Extend `SkillCatalogTests` for the new paths + “other CLI does not see them”; run `swift test --filter SkillCatalogTests`.
+
+Earlier roots win on name collisions — personal / shared before that CLI’s plugin caches.
+
 ## Test suites
 
 - `swift test` — headless unit/logic tests (`Tests/AiHandTests`): CLI args, transcript markdown, composer handlers, chips/media paste import + paste routing, session persistence, autocomplete / skill roots (Cursor + `~/.codex` / `~/.claude` + installed plugins), and the agent send path (`FakeAgentTests`: a fake CLI via `AgentPathLookup.overrides` records argv/cwd and emits stream-json for cursor/claude/codex). Prefs/Application Support / skill-home are sandboxed (`SandboxedTestCase`).

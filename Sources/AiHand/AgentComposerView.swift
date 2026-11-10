@@ -23,6 +23,8 @@ struct AgentComposerView: View {
     var workspace: String
     /// SSH connection for the open session (skills + `@` file index). Falls back to prefs.
     var connectionID: UUID? = nil
+    /// Which agent CLI this composer is bound to — gates `/` skill roots.
+    var cliKind: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget)
     var favorites: [AgentFavorite]
     var selectedFavoriteID: UUID?
     var favoriteMenuTitle: String? = nil
@@ -131,9 +133,12 @@ struct AgentComposerView: View {
         .onChange(of: connectionID) { _ in
             configureAutocomplete()
         }
+        .onChange(of: cliKind) { _ in
+            configureAutocomplete()
+        }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
             // No invalidate here: every prefs change (including a workspace click) used to wipe the
-            // cache and force a fresh SSH skill scan. The 30s TTL + per-workspace key cover staleness.
+            // cache and force a fresh SSH skill scan. The 30s TTL + per-workspace/CLI key cover staleness.
             configureAutocomplete()
         }
         .onChange(of: text) { _ in
@@ -177,7 +182,7 @@ struct AgentComposerView: View {
 
     private func configureAutocomplete() {
         let conn = resolvedConnectionID
-        skillAC.configure(workspace: workspace, connectionID: conn)
+        skillAC.configure(workspace: workspace, connectionID: conn, cli: cliKind)
         skillAC.readText = { text }
         skillAC.writeText = { text = $0 }
         skillAC.onPick = { [self] skill in

@@ -64,6 +64,7 @@ struct SessionChatView: View {
                 attachments: $attachments,
                 workspace: workspace,
                 connectionID: session.connectionID,
+                cliKind: session.cliKind,
                 favorites: favorites,
                 selectedFavoriteID: currentFavorite?.id,
                 onSelectFavorite: { session.applyFavorite($0) },

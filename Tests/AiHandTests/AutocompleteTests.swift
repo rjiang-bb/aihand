@@ -119,14 +119,16 @@ final class SkillCatalogTests: SandboxedTestCase {
         """, under: ws)
         try write(".agents/skills/zz-noname/SKILL.md", "---\ndescription: fallback to dir name\n---\n", under: ws)
         try write(".cursor/skills/zz-broken/SKILL.md", "no frontmatter at all", under: ws)
-        let found = SkillCatalog.skills(workspace: ws.path, connectionID: nil, forceRefresh: true)
+        let found = SkillCatalog.skills(
+            workspace: ws.path, connectionID: nil, cli: .cursor, forceRefresh: true
+        )
         let demo = try XCTUnwrap(found.first { $0.name == "zz-demo-skill" })
         XCTAssertTrue(demo.description.contains("Does a demo thing"))
         XCTAssertNotNil(found.first { $0.name == "zz-noname" }, "falls back to directory name")
         XCTAssertNil(found.first { $0.name == "zz-broken" })
     }
 
-    func testCodexAndClaudePersonalAndSystemSkillsAreDiscovered() throws {
+    func testCLISpecificRootsAreGatedBySelectedCLI() throws {
         let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
         try write(".codex/skills/zz-codex-user/SKILL.md", """
         ---
@@ -146,44 +148,76 @@ final class SkillCatalogTests: SandboxedTestCase {
         description: from ~/.claude/skills
         ---
         """, under: home)
+        try write(".cursor/skills/zz-cursor-user/SKILL.md", """
+        ---
+        name: zz-cursor-user
+        description: from ~/.cursor/skills
+        ---
+        """, under: home)
+        try write(".agents/skills/zz-shared/SKILL.md", """
+        ---
+        name: zz-shared
+        description: shared agents skill
+        ---
+        """, under: home)
 
-        let found = SkillCatalog.skills(workspace: nil, connectionID: nil, forceRefresh: true)
-        XCTAssertNotNil(found.first { $0.name == "zz-codex-user" })
-        XCTAssertNotNil(found.first { $0.name == "zz-codex-system" },
+        let codex = SkillCatalog.skills(connectionID: nil, cli: .codex, forceRefresh: true)
+        XCTAssertNotNil(codex.first { $0.name == "zz-codex-user" })
+        XCTAssertNotNil(codex.first { $0.name == "zz-codex-system" },
                         "~/.codex/skills/.system is a hidden folder — must still be scanned")
-        XCTAssertNotNil(found.first { $0.name == "zz-claude-user" })
+        XCTAssertNotNil(codex.first { $0.name == "zz-shared" }, "shared .agents/skills for every CLI")
+        XCTAssertNil(codex.first { $0.name == "zz-claude-user" })
+        XCTAssertNil(codex.first { $0.name == "zz-cursor-user" })
+
+        let claude = SkillCatalog.skills(connectionID: nil, cli: .claude, forceRefresh: true)
+        XCTAssertNotNil(claude.first { $0.name == "zz-claude-user" })
+        XCTAssertNotNil(claude.first { $0.name == "zz-shared" })
+        XCTAssertNil(claude.first { $0.name == "zz-codex-user" })
+        XCTAssertNil(claude.first { $0.name == "zz-cursor-user" })
+
+        let cursor = SkillCatalog.skills(connectionID: nil, cli: .cursor, forceRefresh: true)
+        XCTAssertNotNil(cursor.first { $0.name == "zz-cursor-user" })
+        XCTAssertNotNil(cursor.first { $0.name == "zz-shared" })
+        XCTAssertNil(cursor.first { $0.name == "zz-codex-user" })
+        XCTAssertNil(cursor.first { $0.name == "zz-claude-user" })
     }
 
-    func testPluginSkillContainersAreDiscovered() throws {
+    func testPluginSkillContainersAreGatedByCLI() throws {
         let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
-        // Codex installed plugin cache shape: plugins/cache/<mkt>/<plugin>/<ver>/skills/<name>/
         try write(
             ".codex/plugins/cache/mkt/demo/1.0.0/skills/zz-codex-plugin/SKILL.md",
             "---\nname: zz-codex-plugin\ndescription: codex plugin skill\n---\n",
             under: home
         )
-        // Claude marketplace plugin shape.
         try write(
             ".claude/plugins/marketplaces/official/plugins/demo/skills/zz-claude-plugin/SKILL.md",
             "---\nname: zz-claude-plugin\ndescription: claude plugin skill\n---\n",
             under: home
         )
-        // Cursor cache also uses skills-* / *-skills folder names.
         try write(
             ".cursor/plugins/cache/pub/hash/skills-figquery/zz-cursor-plugin/SKILL.md",
             "---\nname: zz-cursor-plugin\ndescription: cursor plugin skill\n---\n",
             under: home
         )
 
-        let containers = SkillCatalog.discoverPluginSkillContainers(
-            under: home.appendingPathComponent(".codex/plugins")
+        XCTAssertTrue(
+            SkillCatalog.discoverPluginSkillContainers(
+                under: home.appendingPathComponent(".codex/plugins")
+            ).contains { $0.path.hasSuffix("/skills") }
         )
-        XCTAssertTrue(containers.contains { $0.path.hasSuffix("/skills") })
 
-        let found = SkillCatalog.skills(workspace: nil, connectionID: nil, forceRefresh: true)
-        XCTAssertNotNil(found.first { $0.name == "zz-codex-plugin" })
-        XCTAssertNotNil(found.first { $0.name == "zz-claude-plugin" })
-        XCTAssertNotNil(found.first { $0.name == "zz-cursor-plugin" })
+        let codex = SkillCatalog.skills(connectionID: nil, cli: .codex, forceRefresh: true)
+        XCTAssertNotNil(codex.first { $0.name == "zz-codex-plugin" })
+        XCTAssertNil(codex.first { $0.name == "zz-claude-plugin" })
+        XCTAssertNil(codex.first { $0.name == "zz-cursor-plugin" })
+
+        let claude = SkillCatalog.skills(connectionID: nil, cli: .claude, forceRefresh: true)
+        XCTAssertNotNil(claude.first { $0.name == "zz-claude-plugin" })
+        XCTAssertNil(claude.first { $0.name == "zz-codex-plugin" })
+
+        let cursor = SkillCatalog.skills(connectionID: nil, cli: .cursor, forceRefresh: true)
+        XCTAssertNotNil(cursor.first { $0.name == "zz-cursor-plugin" })
+        XCTAssertNil(cursor.first { $0.name == "zz-codex-plugin" })
     }
 
     func testCursorPersonalSkillBeatsPluginWithSameName() throws {
@@ -195,11 +229,11 @@ final class SkillCatalogTests: SandboxedTestCase {
         ---
         """, under: home)
         try write(
-            ".codex/plugins/cache/m/p/1/skills/zz-dup/SKILL.md",
+            ".cursor/plugins/cache/m/p/1/skills/zz-dup/SKILL.md",
             "---\nname: zz-dup\ndescription: from plugin\n---\n",
             under: home
         )
-        let found = SkillCatalog.skills(workspace: nil, connectionID: nil, forceRefresh: true)
+        let found = SkillCatalog.skills(connectionID: nil, cli: .cursor, forceRefresh: true)
         let skill = try XCTUnwrap(found.first { $0.name == "zz-dup" })
         XCTAssertEqual(skill.description, "from cursor personal",
                        "earlier roots win; plugins must not override personal Cursor skills")

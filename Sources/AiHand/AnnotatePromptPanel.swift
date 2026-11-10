@@ -353,6 +353,7 @@ private struct AnnotatePromptView: View {
                 placeholder: model.requirePrompt ? "Prompt…" : "Optional prompt…",
                 text: $model.text,
                 workspace: workspace,
+                cliKind: Preferences.agentCLI(for: Preferences.runtimeAgentTarget),
                 favorites: model.favorites,
                 selectedFavoriteID: model.selectedFavoriteID,
                 favoriteMenuTitle: model.favoriteMenuTitle,

@@ -11,9 +11,10 @@ enum SkillCatalog {
     private struct CacheKey: Hashable {
         var connectionKey: String
         var workspace: String
+        var cli: AgentCLIKind
     }
 
-    /// Per-(machine, workspace) cache so flipping between folders doesn't rescan over SSH.
+    /// Per-(machine, workspace, CLI) cache so flipping between folders / CLIs doesn't rescan over SSH.
     /// Touched from main and background threads — always under `lock`.
     private static var cache: [CacheKey: (skills: [AgentSkill], at: Date)] = [:]
     private static let lock = NSLock()
@@ -25,11 +26,13 @@ enum SkillCatalog {
     static func skills(
         workspace: String? = nil,
         connectionID: UUID? = Preferences.agentWorkspaceConnectionID,
+        cli: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget),
         forceRefresh: Bool = false
     ) -> [AgentSkill] {
         let key = CacheKey(
             connectionKey: connectionID?.uuidString ?? "local",
-            workspace: workspace ?? ""
+            workspace: workspace ?? "",
+            cli: cli
         )
         if !forceRefresh {
             lock.lock()
@@ -43,12 +46,12 @@ enum SkillCatalog {
         if let connectionID {
             // Missing connection must not fall through to local scan of a remote path.
             if let connection = Preferences.sshConnection(id: connectionID) {
-                list = scanRemote(connection: connection, workspace: workspace)
+                list = scanRemote(connection: connection, workspace: workspace, cli: cli)
             } else {
                 list = []
             }
         } else {
-            list = scanLocal(workspace: workspace)
+            list = scanLocal(workspace: workspace, cli: cli)
         }
         lock.lock()
         cache[key] = (list, Date())
@@ -132,40 +135,62 @@ enum SkillCatalog {
     }
 
     /// Skill containers whose immediate children are `name/SKILL.md` folders.
-    /// First root wins when names collide (Cursor/agents before CLI/plugin caches).
-    static func skillContainerRoots(workspace: String?) -> [URL] {
+    /// Only the selected CLI’s dirs are included (plus shared `~/.agents/skills`).
+    /// First root wins when names collide (personal before plugins).
+    static func skillContainerRoots(
+        workspace: String?,
+        cli: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget)
+    ) -> [URL] {
         let home = homeDirectory
         var roots: [URL] = [
-            home.appendingPathComponent(".cursor/skills"),
+            // Shared cross-agent personal / repo skills (industry `agents` layout).
             home.appendingPathComponent(".agents/skills"),
-            home.appendingPathComponent(".cursor/skills-cursor"),
         ]
         if let workspace, !workspace.isEmpty {
             let base = URL(fileURLWithPath: workspace, isDirectory: true)
-            roots.append(base.appendingPathComponent(".cursor/skills"))
             roots.append(base.appendingPathComponent(".agents/skills"))
-            roots.append(base.appendingPathComponent(".claude/skills"))
-            roots.append(base.appendingPathComponent(".codex/skills"))
-            roots.append(base.appendingPathComponent(".codex/skills/.system"))
+            switch cli {
+            case .cursor:
+                roots.append(base.appendingPathComponent(".cursor/skills"))
+            case .claude:
+                roots.append(base.appendingPathComponent(".claude/skills"))
+            case .codex:
+                roots.append(base.appendingPathComponent(".codex/skills"))
+                roots.append(base.appendingPathComponent(".codex/skills/.system"))
+            }
         }
-        // CLI-specific personal + bundled system skills.
-        roots.append(home.appendingPathComponent(".claude/skills"))
-        roots.append(home.appendingPathComponent(".codex/skills"))
-        roots.append(home.appendingPathComponent(".codex/skills/.system"))
-        // Installed plugins (Codex / Claude / Cursor) — lowest priority.
-        for tree in pluginSkillTrees(home: home) {
+        switch cli {
+        case .cursor:
+            roots.append(home.appendingPathComponent(".cursor/skills"))
+            roots.append(home.appendingPathComponent(".cursor/skills-cursor"))
+        case .claude:
+            roots.append(home.appendingPathComponent(".claude/skills"))
+        case .codex:
+            roots.append(home.appendingPathComponent(".codex/skills"))
+            roots.append(home.appendingPathComponent(".codex/skills/.system"))
+        }
+        // Installed plugins for this CLI only — lowest priority.
+        for tree in pluginSkillTrees(home: home, cli: cli) {
             roots.append(contentsOf: discoverPluginSkillContainers(under: tree))
         }
         return roots
     }
 
-    private static func pluginSkillTrees(home: URL) -> [URL] {
-        [
-            home.appendingPathComponent(".codex/plugins"),
-            home.appendingPathComponent(".codex/.tmp/plugins"),
-            home.appendingPathComponent(".claude/plugins"),
-            home.appendingPathComponent(".cursor/plugins"),
-        ]
+    static func pluginSkillTrees(
+        home: URL,
+        cli: AgentCLIKind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget)
+    ) -> [URL] {
+        switch cli {
+        case .cursor:
+            return [home.appendingPathComponent(".cursor/plugins")]
+        case .claude:
+            return [home.appendingPathComponent(".claude/plugins")]
+        case .codex:
+            return [
+                home.appendingPathComponent(".codex/plugins"),
+                home.appendingPathComponent(".codex/.tmp/plugins"),
+            ]
+        }
     }
 
     /// Directories named `skills`, `skills-*`, or `*-skills` that hold skill folders.
@@ -201,9 +226,9 @@ enum SkillCatalog {
         return found
     }
 
-    private static func scanLocal(workspace: String?) -> [AgentSkill] {
+    private static func scanLocal(workspace: String?, cli: AgentCLIKind) -> [AgentSkill] {
         var byName: [String: AgentSkill] = [:]
-        for root in skillContainerRoots(workspace: workspace) {
+        for root in skillContainerRoots(workspace: workspace, cli: cli) {
             for skill in loadSkillsLocal(in: root) where byName[skill.name] == nil {
                 byName[skill.name] = skill
             }
@@ -247,34 +272,51 @@ enum SkillCatalog {
 
     // MARK: - Remote scan
 
-    private static func scanRemote(connection: SSHConnection, workspace: String?) -> [AgentSkill] {
+    private static func scanRemote(
+        connection: SSHConnection,
+        workspace: String?,
+        cli: AgentCLIKind
+    ) -> [AgentSkill] {
         // Highest priority first (first skill name wins). `$HOME` expands remotely, so the whole
         // scan is ONE ssh round-trip instead of 1 (home) + 1 per root.
-        var roots = [
-            "\"$HOME/.cursor/skills\"",
-            "\"$HOME/.agents/skills\"",
-            "\"$HOME/.cursor/skills-cursor\""
-        ]
+        // Only the selected CLI’s dirs (+ shared `.agents/skills`) — same as local.
+        var roots = ["\"$HOME/.agents/skills\""]
         if let workspace, !workspace.isEmpty {
             let ws = SSHClient.shellEscape(workspace)
-            roots.append("\(ws)/.cursor/skills")
             roots.append("\(ws)/.agents/skills")
-            roots.append("\(ws)/.claude/skills")
-            roots.append("\(ws)/.codex/skills")
-            roots.append("\(ws)/.codex/skills/.system")
+            switch cli {
+            case .cursor:
+                roots.append("\(ws)/.cursor/skills")
+            case .claude:
+                roots.append("\(ws)/.claude/skills")
+            case .codex:
+                roots.append("\(ws)/.codex/skills")
+                roots.append("\(ws)/.codex/skills/.system")
+            }
         }
-        roots.append(contentsOf: [
-            "\"$HOME/.claude/skills\"",
-            "\"$HOME/.codex/skills\"",
-            "\"$HOME/.codex/skills/.system\""
-        ])
+        switch cli {
+        case .cursor:
+            roots.append("\"$HOME/.cursor/skills\"")
+            roots.append("\"$HOME/.cursor/skills-cursor\"")
+        case .claude:
+            roots.append("\"$HOME/.claude/skills\"")
+        case .codex:
+            roots.append("\"$HOME/.codex/skills\"")
+            roots.append("\"$HOME/.codex/skills/.system\"")
+        }
 
-        let pluginTrees = [
-            "\"$HOME/.codex/plugins\"",
-            "\"$HOME/.codex/.tmp/plugins\"",
-            "\"$HOME/.claude/plugins\"",
-            "\"$HOME/.cursor/plugins\""
-        ]
+        let pluginTrees: [String]
+        switch cli {
+        case .cursor:
+            pluginTrees = ["\"$HOME/.cursor/plugins\""]
+        case .claude:
+            pluginTrees = ["\"$HOME/.claude/plugins\""]
+        case .codex:
+            pluginTrees = [
+                "\"$HOME/.codex/plugins\"",
+                "\"$HOME/.codex/.tmp/plugins\""
+            ]
+        }
 
         // Emit per skill: dirname\0first-16KB-of-SKILL.md\0\0, roots in priority order.
         // Plugin trees: find `skills` / `skills-*` / `*-skills` containers (depth ≤ 8).
