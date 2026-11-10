@@ -215,7 +215,8 @@ struct AgentWorkspaceRef: Codable, Identifiable, Equatable, Hashable {
     var target: AgentExecutionTarget { AgentExecutionTarget(connectionID: connectionID) }
 
     var displayName: String {
-        URL(fileURLWithPath: path).lastPathComponent
+        // Pure string op — `URL(fileURLWithPath:)` stats the path, and `/home` is autofs on macOS.
+        (path as NSString).lastPathComponent
     }
 
     static func local(_ path: String, id: UUID = UUID()) -> AgentWorkspaceRef {

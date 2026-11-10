@@ -287,9 +287,10 @@ enum SSHClient {
             captured.stderr = err.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
+        let timedOut: Bool
         do {
             try process.run()
-            wait(for: process, timeout: commandTimeoutSeconds)
+            timedOut = wait(for: process, timeout: commandTimeoutSeconds)
         } catch {
             try? out.fileHandleForWriting.close()
             try? err.fileHandleForWriting.close()
@@ -302,7 +303,11 @@ enum SSHClient {
         var errText = String(data: captured.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if process.terminationStatus != 0, errText.isEmpty {
-            errText = "SSH command timed out."
+            // Empty stderr is common (remote scripts redirect noise). Don't call a fast
+            // exit 1 a "timeout" — that only applies when we killed the child ourselves.
+            errText = timedOut
+                ? "SSH command timed out."
+                : "SSH exited \(process.terminationStatus)."
         }
         return SSHRunResult(
             ok: process.terminationStatus == 0,
@@ -327,12 +332,16 @@ enum SSHClient {
         }
     }
 
-    private static func wait(for process: Process, timeout: TimeInterval) {
+    /// Waits up to `timeout`. Returns `true` if the process was killed for exceeding it.
+    @discardableResult
+    private static func wait(for process: Process, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
+        var timedOut = false
         if process.isRunning {
+            timedOut = true
             process.terminate()
             let killDeadline = Date().addingTimeInterval(2)
             while process.isRunning, Date() < killDeadline {
@@ -343,6 +352,7 @@ enum SSHClient {
             }
         }
         process.waitUntilExit()
+        return timedOut
     }
 
     /// Map ssh argv (with -p) onto scp argv (with -P).

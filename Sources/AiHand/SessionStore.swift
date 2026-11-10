@@ -375,7 +375,10 @@ final class SessionStore: ObservableObject {
     static func normalizedWorkspace(_ path: String) -> String {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
-        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+        // `isDirectory:` is required: without it Foundation stats the path to decide, and on macOS
+        // `/home` is an autofs mount — every `/home/...` (SSH) path cost ~30–50ms on the main
+        // thread, and this runs per session on every filter/render pass (seconds per click).
+        return URL(fileURLWithPath: trimmed, isDirectory: true).standardizedFileURL.path
     }
 
     static func sameWorkspace(_ a: String, _ b: String) -> Bool {

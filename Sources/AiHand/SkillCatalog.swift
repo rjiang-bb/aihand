@@ -110,8 +110,9 @@ enum SkillCatalog {
         roots.append(home.appendingPathComponent(".agents/skills"))
         roots.append(home.appendingPathComponent(".cursor/skills-cursor"))
         if let workspace, !workspace.isEmpty {
-            roots.append(URL(fileURLWithPath: workspace).appendingPathComponent(".cursor/skills"))
-            roots.append(URL(fileURLWithPath: workspace).appendingPathComponent(".agents/skills"))
+            let base = URL(fileURLWithPath: workspace, isDirectory: true)
+            roots.append(base.appendingPathComponent(".cursor/skills"))
+            roots.append(base.appendingPathComponent(".agents/skills"))
         }
 
         var byName: [String: AgentSkill] = [:]

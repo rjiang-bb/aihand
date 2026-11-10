@@ -144,9 +144,14 @@ enum GitWorkspace {
     /// Single SSH: toplevel + `worktree list --porcelain` (branches included). No diffs.
     private static func inspectRemoteMetadata(path: String, connection: SSHConnection) -> GitRepoInfo? {
         let escaped = SSHClient.shellEscape(path)
+        // Surface real failure reasons on stderr (empty stderr used to be mislabeled "timed out").
         let script = """
-        cd \(escaped) || exit 1
-        root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+        cd \(escaped) || { echo "cd failed: \(escaped)" >&2; exit 1; }
+        if ! command -v git >/dev/null 2>&1; then
+          echo "git not found on PATH=$PATH" >&2
+          exit 127
+        fi
+        root=$(git rev-parse --show-toplevel) || { echo "not a git repo: $(pwd)" >&2; exit 1; }
         printf '%s\\n' "$root"
         printf '---WORKTREES---\\n'
         git worktree list --porcelain 2>/dev/null || true
@@ -334,8 +339,8 @@ enum GitWorkspace {
     }
 
     static func suggestedWorktreePath(repoRoot: String, branch: String) -> String {
-        let parent = URL(fileURLWithPath: repoRoot).deletingLastPathComponent()
-        let repoName = URL(fileURLWithPath: repoRoot).lastPathComponent
+        let parent = URL(fileURLWithPath: repoRoot, isDirectory: true).deletingLastPathComponent()
+        let repoName = (repoRoot as NSString).lastPathComponent
         let slug = branch
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: " ", with: "-")
