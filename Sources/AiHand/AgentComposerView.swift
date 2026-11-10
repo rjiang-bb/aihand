@@ -36,10 +36,14 @@ struct AgentComposerView: View {
     var onLayoutNeeded: (() -> Void)? = nil
     @FocusState.Binding var focused: Bool
 
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var skillAC = SkillAutocompleteController()
     @StateObject private var fileAC = FileAutocompleteController()
     @State private var keyMonitor: Any?
+    @State private var plusMenuMouseMonitor: Any?
     @State private var dropTargeted = false
+    @State private var plusMenuOpen = false
+    @State private var ignoreNextPlusMenuDismiss = false
     @State private var shortcutButtonHovered = false
     @State private var shortcutPopoverHovered = false
     @State private var shortcutDismissWork: DispatchWorkItem?
@@ -95,6 +99,11 @@ struct AgentComposerView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity)
+            } else if plusMenuOpen {
+                // Custom + menu sits above the field (same slot as @ / skill lists).
+                composerPlusMenu
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
             }
 
             HStack(alignment: .bottom, spacing: 8) {
@@ -172,17 +181,31 @@ struct AgentComposerView: View {
             updateAutocomplete(for: text)
             onLayoutNeeded?()
         }
-        .onChange(of: skillAC.isActive) { _ in
+        .onChange(of: skillAC.isActive) { active in
+            if active { plusMenuOpen = false }
             onLayoutNeeded?()
         }
-        .onChange(of: fileAC.isActive) { _ in
+        .onChange(of: fileAC.isActive) { active in
+            if active { plusMenuOpen = false }
             onLayoutNeeded?()
         }
         .onChange(of: attachments?.wrappedValue.count ?? -1) { _ in
             onLayoutNeeded?()
         }
+        .onChange(of: plusMenuOpen) { open in
+            if open {
+                fileAC.clear()
+                skillAC.clear()
+                ignoreNextPlusMenuDismiss = true
+                installPlusMenuMouseMonitor()
+            } else {
+                removePlusMenuMouseMonitor()
+            }
+            onLayoutNeeded?()
+        }
         .onDisappear {
             removeKeyMonitor()
+            removePlusMenuMouseMonitor()
             skillAC.teardown()
             fileAC.teardown()
         }
@@ -222,15 +245,22 @@ struct AgentComposerView: View {
             if let attachments, !attachments.wrappedValue.isEmpty {
                 attachmentArea(attachments)
             }
-            TextField(placeholder, text: $text, axis: .vertical)
-                // Match chat transcript body (14.5px) — system default is smaller.
-                .font(.system(size: 14.5))
-                .lineLimit(1...12)
-                .textFieldStyle(.plain)
-                .foregroundStyle(.primary)
-                .focused($focused)
+            HStack(alignment: .center, spacing: 6) {
+                composerPlusButton
+                TextField(placeholder, text: $text, axis: .vertical)
+                    // Match chat transcript body (14.5px) — system default is smaller.
+                    .font(.system(size: 14.5))
+                    .lineLimit(1...12)
+                    .textFieldStyle(.plain)
+                    .foregroundStyle(.primary)
+                    .focused($focused)
+                    // Optical: plain TextField glyphs sit ~1pt high vs the plus circle.
+                    .offset(y: 1)
+            }
         }
-        .padding(10)
+        .padding(.leading, 8)
+        .padding(.trailing, 10)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -269,6 +299,142 @@ struct AgentComposerView: View {
                 )
             }
         }
+    }
+
+    private var composerPlusButton: some View {
+        Button {
+            plusMenuOpen.toggle()
+        } label: {
+            Image(systemName: "plus.circle.fill")
+                .font(.system(size: 20, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(Color.primary.opacity(0.72))
+                .frame(width: 22, height: 22)
+                .softHoverInnerBorder(Circle(), inset: 1.25)
+        }
+        .buttonStyle(.plain)
+        .help("Plan or attach files")
+    }
+
+    private var composerPlusMenu: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            composerPlusMenuRow(
+                symbol: "list.bullet.clipboard",
+                title: "Plan",
+                subtitle: "Generate an implementation plan"
+            ) {
+                plusMenuOpen = false
+                insertPlanCommand()
+            }
+
+            if attachments != nil {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.10))
+                    .frame(height: 1)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+
+                composerPlusMenuRow(
+                    symbol: "paperclip",
+                    title: "Attach",
+                    subtitle: nil
+                ) {
+                    plusMenuOpen = false
+                    presentAttachPanel()
+                }
+            }
+        }
+        .padding(4)
+        .frame(width: 280, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(SoftChrome.cardFill(dark: colorScheme == .dark))
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.18), radius: 16, y: 6)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
+        )
+    }
+
+    private func composerPlusMenuRow(
+        symbol: String,
+        title: String,
+        subtitle: String?,
+        action: @escaping () -> Void
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return Button(action: action) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.primary.opacity(0.75))
+                    .frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, subtitle == nil ? 8 : 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(shape)
+            .softHoverInnerBorder(shape, inset: 1.5)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func insertPlanCommand() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            text = "/plan "
+        } else if trimmed.lowercased().hasPrefix("/plan") {
+            // Already planning — just focus.
+        } else {
+            text = "/plan " + trimmed
+        }
+        focused = true
+        DispatchQueue.main.async {
+            ComposerFieldEditor.setStringPlacingCaretAtEnd(text)
+        }
+        updateAutocomplete(for: text)
+        onLayoutNeeded?()
+    }
+
+    private func presentAttachPanel() {
+        guard attachments != nil else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Attach"
+        panel.message = "Attach files or folders to this message"
+        let ws = workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !ws.isEmpty, resolvedConnectionID == nil {
+            panel.directoryURL = URL(fileURLWithPath: ws)
+        }
+        guard panel.runModal() == .OK else { return }
+        let existing = Set(attachments?.wrappedValue.map(\.path) ?? [])
+        let imported = ComposerMediaImport.attachments(fromFileURLs: panel.urls)
+            .filter { !existing.contains($0.path) }
+        // Directories aren't imported by ComposerMediaImport — add as chips.
+        var extras: [ComposerAttachment] = []
+        for url in panel.urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+            if existing.contains(url.path) { continue }
+            if imported.contains(where: { $0.path == url.path }) { continue }
+            extras.append(ComposerAttachment(path: url.path, ownsFile: false, isDirectory: true))
+        }
+        appendAttachments(imported + extras)
     }
 
     private func attachmentArea(_ binding: Binding<[ComposerAttachment]>) -> some View {
@@ -387,43 +553,49 @@ struct AgentComposerView: View {
                 scheduleShortcutDismissFromButton()
             }
         }
-        .popover(isPresented: shortcutPopoverBinding, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(shortcutHints.enumerated()), id: \.offset) { _, hint in
-                    HStack(spacing: 10) {
-                        Text(hint.key)
-                            .font(.system(size: 11, weight: .semibold).monospaced())
-                            .foregroundStyle(Color.primary.opacity(0.85))
-                            .frame(minWidth: 52, alignment: .leading)
-                        Text(hint.label)
-                            .font(.system(size: 11))
-                            .foregroundStyle(Color.primary.opacity(0.6))
-                        Spacer(minLength: 0)
+        .zIndex(showShortcutPopover ? 2 : 0)
+        .overlay(alignment: .topLeading) {
+            if showShortcutPopover {
+                shortcutsHoverPanel
+                    // Pin the panel’s bottom just above the Shortcuts label.
+                    .alignmentGuide(.top) { d in d.height + 6 }
+                    .onHover { hovering in
+                        shortcutDismissWork?.cancel()
+                        shortcutPopoverHovered = hovering
+                        if !hovering {
+                            scheduleShortcutDismissFromPopover()
+                        }
                     }
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .frame(minWidth: 180)
-            .onHover { hovering in
-                shortcutDismissWork?.cancel()
-                shortcutPopoverHovered = hovering
-                if !hovering {
-                    scheduleShortcutDismissFromPopover()
-                }
             }
         }
     }
 
-    private var shortcutPopoverBinding: Binding<Bool> {
-        Binding(
-            get: { showShortcutPopover },
-            set: { presented in
-                if !presented {
-                    shortcutButtonHovered = false
-                    shortcutPopoverHovered = false
+    private var shortcutsHoverPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(shortcutHints.enumerated()), id: \.offset) { _, hint in
+                HStack(spacing: 10) {
+                    Text(hint.key)
+                        .font(.system(size: 11, weight: .semibold).monospaced())
+                        .foregroundStyle(Color.primary.opacity(0.85))
+                        .frame(minWidth: 52, alignment: .leading)
+                    Text(hint.label)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.primary.opacity(0.6))
+                    Spacer(minLength: 0)
                 }
             }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(minWidth: 180, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(SoftChrome.cardFill(dark: colorScheme == .dark))
+                .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.18), radius: 16, y: 6)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
         )
     }
 
@@ -537,11 +709,18 @@ struct AgentComposerView: View {
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let code = Int(event.keyCode)
+
+            if plusMenuOpen, code == kVK_Escape,
+               flags.isEmpty || flags == .function {
+                plusMenuOpen = false
+                return nil
+            }
+
             // Require FocusState so a hidden sessions chat composer doesn't steal
             // keys from the annotate panel (sessions is ordered out, not destroyed).
             guard focused else { return event }
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let code = Int(event.keyCode)
 
             if code == kVK_ANSI_V,
                flags.contains(.command),
@@ -587,6 +766,32 @@ struct AgentComposerView: View {
             NSEvent.removeMonitor(keyMonitor)
         }
         keyMonitor = nil
+    }
+
+    private func installPlusMenuMouseMonitor() {
+        guard plusMenuMouseMonitor == nil else { return }
+        plusMenuMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { event in
+            // Skip the click that opened the menu; any later click dismisses
+            // (menu rows close it themselves before this runs meaningfully).
+            DispatchQueue.main.async {
+                if ignoreNextPlusMenuDismiss {
+                    ignoreNextPlusMenuDismiss = false
+                    return
+                }
+                if plusMenuOpen {
+                    plusMenuOpen = false
+                }
+            }
+            return event
+        }
+    }
+
+    private func removePlusMenuMouseMonitor() {
+        if let plusMenuMouseMonitor {
+            NSEvent.removeMonitor(plusMenuMouseMonitor)
+        }
+        plusMenuMouseMonitor = nil
+        ignoreNextPlusMenuDismiss = false
     }
 
     static func editableTextView() -> NSTextView? {
