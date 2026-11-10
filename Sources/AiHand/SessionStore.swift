@@ -21,15 +21,78 @@ struct AgentMessage: Identifiable, Equatable, Codable {
     let id: UUID
     var kind: AgentMessageKind
     var text: String
-    var imagePath: String?
+    /// Attached media paths (screenshots / pasted images / videos).
+    var imagePaths: [String]
     var createdAt: Date
 
-    init(id: UUID = UUID(), kind: AgentMessageKind, text: String, imagePath: String? = nil, createdAt: Date = Date()) {
+    /// First attachment — kept for call sites that only need one path.
+    var imagePath: String? {
+        get { imagePaths.first }
+        set {
+            if let newValue {
+                if imagePaths.isEmpty {
+                    imagePaths = [newValue]
+                } else {
+                    imagePaths[0] = newValue
+                }
+            } else {
+                imagePaths = []
+            }
+        }
+    }
+
+    init(
+        id: UUID = UUID(),
+        kind: AgentMessageKind,
+        text: String,
+        imagePath: String? = nil,
+        imagePaths: [String] = [],
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.kind = kind
         self.text = text
-        self.imagePath = imagePath
+        if !imagePaths.isEmpty {
+            self.imagePaths = imagePaths
+        } else if let imagePath {
+            self.imagePaths = [imagePath]
+        } else {
+            self.imagePaths = []
+        }
         self.createdAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, text, imagePath, imagePaths, createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decode(AgentMessageKind.self, forKey: .kind)
+        text = try c.decode(String.self, forKey: .text)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        if let paths = try c.decodeIfPresent([String].self, forKey: .imagePaths), !paths.isEmpty {
+            imagePaths = paths
+        } else if let one = try c.decodeIfPresent(String.self, forKey: .imagePath) {
+            imagePaths = [one]
+        } else {
+            imagePaths = []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(text, forKey: .text)
+        try c.encode(createdAt, forKey: .createdAt)
+        if imagePaths.count == 1 {
+            try c.encode(imagePaths[0], forKey: .imagePath)
+        } else if imagePaths.count > 1 {
+            try c.encode(imagePaths, forKey: .imagePaths)
+            try c.encode(imagePaths[0], forKey: .imagePath)
+        }
     }
 }
 
@@ -615,7 +678,7 @@ final class SessionStore: ObservableObject {
         var paths = Set<String>()
         if let path = session.screenshotPath { paths.insert(path) }
         for message in session.messages {
-            if let path = message.imagePath { paths.insert(path) }
+            for path in message.imagePaths { paths.insert(path) }
         }
         let fm = FileManager.default
         for path in paths {

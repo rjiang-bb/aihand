@@ -4,9 +4,11 @@ import Combine
 import SwiftUI
 
 final class SessionsSidePanel: NSObject, NSWindowDelegate {
-    var onFollowUp: ((UUID, String, FollowUpSubmit) -> Void)?
+    var onFollowUp: ((UUID, String, FollowUpSubmit, [String]) -> Void)?
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
+    /// New blank session with the composer prefilled (selection → new session).
+    var onNewWithDraft: ((String) -> Void)?
     var onStartDrawing: (() -> Void)?
     /// Draw from the open chat — annotate send follows up on this session.
     var onDrawForSession: ((UUID) -> Void)?
@@ -79,6 +81,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard isVisible else { return }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// Prefill the next opened chat composer (consumed once by `SessionChatView`).
+    func setComposerSeed(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        selection.pendingComposerSeed = trimmed.isEmpty ? nil : trimmed
     }
 
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
@@ -200,6 +208,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onNew: { [weak self] in
                 self?.onNew?()
             },
+            onNewWithDraft: { [weak self] text in
+                self?.onNewWithDraft?(text)
+            },
             onStartDrawing: { [weak self] in
                 self?.onStartDrawing?()
             },
@@ -221,8 +232,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onArchiveAll: { [weak self] in
                 self?.archiveAll()
             },
-            onSend: { [weak self] id, text, submit in
-                self?.onFollowUp?(id, text, submit)
+            onSend: { [weak self] id, text, submit, imagePaths in
+                self?.onFollowUp?(id, text, submit, imagePaths)
             },
             onStop: { [weak self] id in
                 self?.onStop?(id)
@@ -980,6 +991,18 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        // ⌘L / ⇧⌘L → add chat selection to composer / new session.
+        if panel.isKeyWindow,
+           selection.selectedID != nil,
+           Int(event.keyCode) == kVK_ANSI_L,
+           flags.contains(.command),
+           !flags.contains(.option),
+           !flags.contains(.control) {
+            if ChatSelectionHotkeys.perform(addToNewSession: flags.contains(.shift)) {
+                return nil
+            }
+        }
+
         // ⌃C stops the open chat (same as the Stop button).
         if panel.isKeyWindow,
            Int(event.keyCode) == kVK_ANSI_C,
@@ -1247,6 +1270,8 @@ private final class SessionsPanelSelection: ObservableObject {
     /// Esc while ⌃ is held — stay closed until ⌃ is released.
     @Published var suppressGitPicker = false
     @Published var listPage = 0
+    /// One-shot composer prefill for the next chat open (selection → new session).
+    @Published var pendingComposerSeed: String?
 
     var workspacePickerExpanded: Bool {
         !suppressWorkspacePicker && (showWorkspacePicker || pinnedWorkspacePicker)
@@ -1305,6 +1330,7 @@ private struct SessionsSidePanelView: View {
     var onCloseChat: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
+    var onNewWithDraft: (String) -> Void
     var onStartDrawing: () -> Void
     var onDrawForSession: (UUID) -> Void
     var onOpenSettings: () -> Void
@@ -1312,7 +1338,7 @@ private struct SessionsSidePanelView: View {
     var onArchive: (UUID) -> Void
     var onArchiveAllBelow: (UUID) -> Void
     var onArchiveAll: () -> Void
-    var onSend: (UUID, String, FollowUpSubmit) -> Void
+    var onSend: (UUID, String, FollowUpSubmit, [String]) -> Void
     var onStop: (UUID) -> Void
     var onChatResizeBegan: () -> Void
     var onChatResizeChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
@@ -1366,12 +1392,17 @@ private struct SessionsSidePanelView: View {
             if let id = selection.selectedID, let session = store.session(id: id) {
                 SessionChatView(
                     session: session,
-                    onSend: { text, submit in onSend(id, text, submit) },
+                    onSend: { text, submit, imagePaths in onSend(id, text, submit, imagePaths) },
                     onStop: { onStop(id) },
                     onDraw: { onDrawForSession(id) },
                     onClose: onCloseChat,
                     compact: true,
-                    onPanelDragEnded: onPanelDragEnded
+                    onPanelDragEnded: onPanelDragEnded,
+                    composerSeed: $selection.pendingComposerSeed,
+                    onAddSelectionToNewSession: { text in
+                        let quote = ChatSelectionQuote.blockquoted(text)
+                        onNewWithDraft(quote.isEmpty ? text : quote + "\n")
+                    }
                 )
                 .id(id)
                 .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)

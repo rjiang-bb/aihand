@@ -22,12 +22,19 @@ final class AgentSessionRunner {
     var isRunning: Bool { process?.isRunning == true }
 
     func start(session: AgentSession, workspace: String, prompt: String, imagePath: String?) {
+        start(session: session, workspace: workspace, prompt: prompt, imagePaths: imagePath.map { [$0] } ?? [])
+    }
+
+    func start(session: AgentSession, workspace: String, prompt: String, imagePaths: [String]) {
         self.session = session
-        prepareAndLaunch(session: session, workspace: workspace, imagePath: imagePath) { remoteImage in
-            self.cli.startArguments(
+        let paths = imagePaths.filter { FileManager.default.fileExists(atPath: $0) }
+        prepareAndLaunch(session: session, workspace: workspace, imagePaths: paths) { remapped in
+            let primary = Self.primaryMediaPath(remapped)
+            let enriched = Self.enrichPrompt(prompt, paths: remapped, primary: primary)
+            return self.cli.startArguments(
                 workspace: workspace,
-                prompt: prompt,
-                imagePath: remoteImage,
+                prompt: enriched,
+                imagePath: primary,
                 model: session.modelId,
                 effort: session.effort
             )
@@ -35,6 +42,10 @@ final class AgentSessionRunner {
     }
 
     func followUp(session: AgentSession, workspace: String, prompt: String, imagePath: String? = nil) {
+        followUp(session: session, workspace: workspace, prompt: prompt, imagePaths: imagePath.map { [$0] } ?? [])
+    }
+
+    func followUp(session: AgentSession, workspace: String, prompt: String, imagePaths: [String]) {
         self.session = session
         guard let chatId = session.chatId, !chatId.isEmpty else {
             DispatchQueue.main.async {
@@ -44,11 +55,12 @@ final class AgentSessionRunner {
             }
             return
         }
+        let paths = imagePaths.filter { FileManager.default.fileExists(atPath: $0) }
         let appendUser = {
-            session.messages.append(AgentMessage(kind: .user, text: prompt, imagePath: imagePath))
+            session.messages.append(AgentMessage(kind: .user, text: prompt, imagePaths: paths))
             session.status = .working
             let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            session.preview = trimmedPrompt.isEmpty && imagePath != nil ? "Annotation" : prompt
+            session.preview = trimmedPrompt.isEmpty && !paths.isEmpty ? "Annotation" : prompt
             session.errorMessage = nil
         }
         if Thread.isMainThread {
@@ -56,24 +68,54 @@ final class AgentSessionRunner {
         } else {
             DispatchQueue.main.sync(execute: appendUser)
         }
-        prepareAndLaunch(session: session, workspace: workspace, imagePath: imagePath) { remoteImage in
-            self.cli.followUpArguments(
+        prepareAndLaunch(session: session, workspace: workspace, imagePaths: paths) { remapped in
+            let primary = Self.primaryMediaPath(remapped)
+            let enriched = Self.enrichPrompt(prompt, paths: remapped, primary: primary)
+            return self.cli.followUpArguments(
                 workspace: workspace,
                 chatId: chatId,
-                prompt: prompt,
-                imagePath: remoteImage,
+                prompt: enriched,
+                imagePath: primary,
                 model: session.modelId,
                 effort: session.effort
             )
         }
     }
 
+    /// Prefer a still for `--image`; otherwise the first path (video → prompt only).
+    private static func primaryMediaPath(_ paths: [String]) -> String? {
+        paths.first { !Self.isVideoMedia($0) } ?? paths.first
+    }
+
+    private static func isVideoMedia(_ path: String) -> Bool {
+        switch (path as NSString).pathExtension.lowercased() {
+        case "mov", "mp4", "m4v", "webm": return true
+        default: return false
+        }
+    }
+
+    /// Extra attachments beyond the primary are listed in the prompt (CLI takes one `--image`).
+    private static func enrichPrompt(_ prompt: String, paths: [String], primary: String?) -> String {
+        guard paths.count > 1 else { return prompt }
+        var parts: [String] = []
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { parts.append(trimmed) }
+        for path in paths where path != primary {
+            parts.append(
+                Self.isVideoMedia(path)
+                    ? "Screen recording: \(path)"
+                    : "Attached image: \(path)"
+            )
+        }
+        return parts.joined(separator: "\n\n")
+    }
+
     /// Resolve local/remote executable, optionally upload media, then launch.
     private func prepareAndLaunch(
         session: AgentSession,
         workspace: String,
-        imagePath: String?,
-        makeArgs: @escaping (String?) -> [String]
+        imagePaths: [String],
+        makeArgs: @escaping ([String]) -> [String]
     ) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -86,13 +128,14 @@ final class AgentSessionRunner {
                     self.failMissingCLI(session: session)
                     return
                 }
-                var remoteImage: String? = nil
-                if let imagePath, FileManager.default.fileExists(atPath: imagePath) {
+                var remapped: [String] = []
+                for (index, imagePath) in imagePaths.enumerated() {
+                    guard FileManager.default.fileExists(atPath: imagePath) else { continue }
                     let ext = (imagePath as NSString).pathExtension
-                    let remote = "/tmp/aihand-\(session.id.uuidString).\(ext.isEmpty ? "png" : ext)"
+                    let remote = "/tmp/aihand-\(session.id.uuidString)-\(index).\(ext.isEmpty ? "png" : ext)"
                     let upload = SSHClient.upload(connection: connection, localPath: imagePath, remotePath: remote)
                     if upload.ok {
-                        remoteImage = remote
+                        remapped.append(remote)
                     } else {
                         Log.write("ssh upload failed: \(upload.stderr)")
                         self.failUpload(session: session, host: connection.hostname, detail: upload.stderr)
@@ -100,7 +143,7 @@ final class AgentSessionRunner {
                     }
                 }
                 let args = AgentCLIRuntime.withPermissionTarget(session.executionTarget) {
-                    makeArgs(remoteImage)
+                    makeArgs(remapped)
                 }
                 self.launchRemote(
                     connection: connection,
@@ -117,7 +160,7 @@ final class AgentSessionRunner {
                 return
             }
             let args = AgentCLIRuntime.withPermissionTarget(session.executionTarget) {
-                makeArgs(imagePath)
+                makeArgs(imagePaths)
             }
             self.launch(exe: exe, args: args, session: session)
         }
@@ -794,14 +837,20 @@ final class AgentSessionManager {
         sessionID: UUID,
         text: String,
         submit: FollowUpSubmit = .sendNow,
-        imagePath: String? = nil
+        imagePath: String? = nil,
+        imagePaths: [String] = []
     ) {
         guard let session = store.session(id: sessionID) else { return }
         let workspace = session.workspace
         guard !workspace.isEmpty else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Annotated screenshots can omit the prompt; text-only follow-ups cannot.
-        guard !trimmed.isEmpty || imagePath != nil else { return }
+        let paths: [String] = {
+            if !imagePaths.isEmpty { return imagePaths }
+            if let imagePath { return [imagePath] }
+            return []
+        }()
+        // Annotated screenshots / pasted media can omit the prompt; text-only cannot.
+        guard !trimmed.isEmpty || !paths.isEmpty else { return }
         let prompt = trimmed
 
         let runner = runners[sessionID] ?? AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
@@ -809,7 +858,7 @@ final class AgentSessionManager {
 
         let busy = session.status == .working && runner.isRunning
         // Queue is text-only — media follow-ups always send now.
-        if busy, submit == .queue, imagePath == nil {
+        if busy, submit == .queue, paths.isEmpty {
             session.queuedFollowUps.append(QueuedFollowUp(text: prompt))
             return
         }
@@ -823,7 +872,7 @@ final class AgentSessionManager {
         if needsStart {
             let preview = prompt.isEmpty ? "Annotation" : prompt
             let apply = {
-                session.messages.append(AgentMessage(kind: .user, text: prompt, imagePath: imagePath))
+                session.messages.append(AgentMessage(kind: .user, text: prompt, imagePaths: paths))
                 if session.title == "New session" {
                     session.title = String(preview.prefix(48))
                 }
@@ -832,11 +881,11 @@ final class AgentSessionManager {
                 session.status = .working
             }
             if Thread.isMainThread { apply() } else { DispatchQueue.main.sync(execute: apply) }
-            runner.start(session: session, workspace: workspace, prompt: prompt, imagePath: imagePath)
+            runner.start(session: session, workspace: workspace, prompt: prompt, imagePaths: paths)
             return
         }
 
-        runner.followUp(session: session, workspace: workspace, prompt: prompt, imagePath: imagePath)
+        runner.followUp(session: session, workspace: workspace, prompt: prompt, imagePaths: paths)
     }
 
     func removeQueuedFollowUp(sessionID: UUID, followUpID: UUID) {

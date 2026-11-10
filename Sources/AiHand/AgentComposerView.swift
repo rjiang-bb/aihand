@@ -1,6 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Shared prompt composer used by session chat and the annotate comment panel.
 struct AgentComposerView: View {
@@ -17,7 +18,11 @@ struct AgentComposerView: View {
     var requireNonEmpty: Bool = true
     var placeholder: String = "Follow up…"
     @Binding var text: String
+    /// Optional Cursor-style media strip (chat follow-ups). Nil hides paste/drop UI.
+    var attachments: Binding<[ComposerAttachment]>? = nil
     var workspace: String
+    /// SSH connection for the open session (skills + `@` file index). Falls back to prefs.
+    var connectionID: UUID? = nil
     var favorites: [AgentFavorite]
     var selectedFavoriteID: UUID?
     var favoriteMenuTitle: String? = nil
@@ -32,14 +37,28 @@ struct AgentComposerView: View {
     @FocusState.Binding var focused: Bool
 
     @StateObject private var skillAC = SkillAutocompleteController()
-    @State private var newlineMonitor: Any?
+    @StateObject private var fileAC = FileAutocompleteController()
+    @State private var keyMonitor: Any?
+    @State private var dropTargeted = false
+    @State private var shortcutButtonHovered = false
+    @State private var shortcutPopoverHovered = false
+    @State private var shortcutDismissWork: DispatchWorkItem?
+
+    private var resolvedConnectionID: UUID? {
+        connectionID ?? Preferences.agentWorkspaceConnectionID
+    }
 
     private var trimmed: String {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var hasAttachments: Bool {
+        !(attachments?.wrappedValue.isEmpty ?? true)
+    }
+
     private var canSend: Bool {
-        requireNonEmpty ? !trimmed.isEmpty : true
+        if hasAttachments { return true }
+        return requireNonEmpty ? !trimmed.isEmpty : true
     }
 
     private var selectedFavorite: AgentFavorite? {
@@ -58,7 +77,16 @@ struct AgentComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if skillAC.isActive {
+            if fileAC.isActive {
+                FileSuggestionList(
+                    controller: fileAC,
+                    query: WorkspaceFileCatalog.atQuery(in: text)?.query ?? ""
+                ) { entry in
+                    applyFile(entry)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity)
+            } else if skillAC.isActive {
                 SkillSuggestionList(
                     controller: skillAC,
                     query: SkillCatalog.slashQuery(in: text)?.query ?? ""
@@ -70,38 +98,9 @@ struct AgentComposerView: View {
             }
 
             HStack(alignment: .bottom, spacing: 8) {
-                TextField(placeholder, text: $text, axis: .vertical)
-                    // Match chat transcript body (14.5px) — system default is smaller.
-                    .font(.system(size: 14.5))
-                    .lineLimit(1...12)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(.primary)
-                    .focused($focused)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color(nsColor: .textBackgroundColor))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(
-                                        focused
-                                            ? Color(red: 0.2, green: 0.55, blue: 0.98)
-                                            : Color.primary.opacity(0.45),
-                                        lineWidth: focused ? 1.5 : 1
-                                    )
-                            )
-                    )
-                    .onSubmit {
-                        if skillAC.isActive {
-                            applySelectedSkill()
-                        } else if isWorking, let onQueue {
-                            onQueue()
-                        } else {
-                            guard canSend else { return }
-                            onSend()
-                        }
-                    }
-                    .help("Type / for skills · ⇧↩ for a new line")
+                promptField
+                    .onSubmit(handleSubmit)
+                    .help("Type @ for files · / for skills · ⇧↩ for a new line · ⌘V / drop to attach files")
 
                 if isWorking, let onStop {
                     Button(action: onStop) {
@@ -147,53 +146,153 @@ struct AgentComposerView: View {
                 .help(kind == .followUp ? "Send / Steer (⌘↩)" : "Send (⌘↩)")
             }
 
-            HStack(alignment: .center, spacing: 14) {
-                if kind == .followUp {
-                    if isWorking {
-                        hintPair(key: "Enter", label: "queue")
-                        hintPair(key: "⇧↩", label: "newline")
-                        hintPair(key: "⌘↩", label: "steer")
-                        hintPair(key: "⌃C", label: "stop")
-                    } else {
-                        hintPair(key: "/", label: "skills")
-                        hintPair(key: "⇧↩", label: "newline")
-                        hintPair(key: "Enter", label: "send")
-                    }
-                    Spacer(minLength: 8)
-                    hintPair(key: "⌘/", label: "model")
-                } else {
-                    hintPair(key: "Enter", label: "send to agent")
-                    hintPair(key: "Esc", label: "cancel")
-                    Spacer(minLength: 8)
-                }
+            HStack(alignment: .center, spacing: 10) {
+                shortcutsButton
+                Spacer(minLength: 8)
                 favoritePicker
             }
             .padding(.horizontal, 4)
         }
         .onAppear {
-            skillAC.configure(workspace: workspace, connectionID: Preferences.agentWorkspaceConnectionID)
-            skillAC.readText = { text }
-            skillAC.writeText = { text = $0 }
-            installNewlineMonitor()
+            configureAutocomplete()
+            installKeyMonitor()
         }
-        .onChange(of: workspace) { newValue in
-            skillAC.configure(workspace: newValue, connectionID: Preferences.agentWorkspaceConnectionID)
+        .onChange(of: workspace) { _ in
+            configureAutocomplete()
+        }
+        .onChange(of: connectionID) { _ in
+            configureAutocomplete()
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
             // No invalidate here: every prefs change (including a workspace click) used to wipe the
             // cache and force a fresh SSH skill scan. The 30s TTL + per-workspace key cover staleness.
-            skillAC.configure(workspace: workspace, connectionID: Preferences.agentWorkspaceConnectionID)
+            configureAutocomplete()
         }
         .onChange(of: text) { _ in
-            skillAC.update(text: text)
+            updateAutocomplete(for: text)
             onLayoutNeeded?()
         }
         .onChange(of: skillAC.isActive) { _ in
             onLayoutNeeded?()
         }
+        .onChange(of: fileAC.isActive) { _ in
+            onLayoutNeeded?()
+        }
+        .onChange(of: attachments?.wrappedValue.count ?? -1) { _ in
+            onLayoutNeeded?()
+        }
         .onDisappear {
-            removeNewlineMonitor()
+            removeKeyMonitor()
             skillAC.teardown()
+            fileAC.teardown()
+        }
+    }
+
+    private func configureAutocomplete() {
+        let conn = resolvedConnectionID
+        skillAC.configure(workspace: workspace, connectionID: conn)
+        skillAC.readText = { text }
+        skillAC.writeText = { text = $0 }
+        fileAC.configure(workspace: workspace, connectionID: conn)
+        fileAC.readText = { text }
+        fileAC.writeText = { text = $0 }
+        let attachBinding = attachments
+        let ws = workspace
+        fileAC.onPick = { entry in
+            Self.appendWorkspaceEntry(entry, workspace: ws, to: attachBinding)
+        }
+    }
+
+    private func updateAutocomplete(for text: String) {
+        if WorkspaceFileCatalog.atQuery(in: text) != nil {
+            skillAC.clear()
+            fileAC.update(text: text)
+        } else if SkillCatalog.slashQuery(in: text) != nil {
+            fileAC.clear()
+            skillAC.update(text: text)
+        } else {
+            fileAC.clear()
+            skillAC.clear()
+        }
+    }
+
+    /// Cursor-style field: attachments above the text, shared chrome.
+    private var promptField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let attachments, !attachments.wrappedValue.isEmpty {
+                attachmentArea(attachments)
+            }
+            TextField(placeholder, text: $text, axis: .vertical)
+                // Match chat transcript body (14.5px) — system default is smaller.
+                .font(.system(size: 14.5))
+                .lineLimit(1...12)
+                .textFieldStyle(.plain)
+                .foregroundStyle(.primary)
+                .focused($focused)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            dropTargeted
+                                ? Color(red: 0.2, green: 0.55, blue: 0.98)
+                                : (focused
+                                    ? Color(red: 0.2, green: 0.55, blue: 0.98)
+                                    : Color.primary.opacity(0.45)),
+                            lineWidth: (focused || dropTargeted) ? 1.5 : 1
+                        )
+                )
+        )
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(red: 0.2, green: 0.55, blue: 0.98).opacity(0.16))
+                    .overlay(
+                        Text("Drop files")
+                            .font(.system(size: 13.5, weight: .semibold))
+                            .foregroundStyle(Color(red: 0.2, green: 0.55, blue: 0.98))
+                    )
+                    .allowsHitTesting(false)
+            }
+        }
+        // Lifecycle hook: installs a window-wide drag monitor (overlay on the prompt
+        // alone can't see drags over the transcript / session list).
+        .background {
+            if attachments != nil {
+                ComposerMediaDragCatcher(
+                    isTargeted: $dropTargeted,
+                    onDrop: { handleFileDrop() }
+                )
+            }
+        }
+    }
+
+    private func attachmentArea(_ binding: Binding<[ComposerAttachment]>) -> some View {
+        let items = binding.wrappedValue
+        let files = items.filter { !$0.isMedia }
+        let media = items.filter(\.isMedia)
+        return VStack(alignment: .leading, spacing: 8) {
+            if !files.isEmpty {
+                // Cursor-style inline file chips (wrap).
+                FlowFileChips(items: files) { id in
+                    removeAttachment(id: id, from: binding)
+                }
+            }
+            if !media.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(media) { item in
+                            ComposerAttachmentThumb(attachment: item) {
+                                removeAttachment(id: item.id, from: binding)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -235,14 +334,132 @@ struct AgentComposerView: View {
         .fixedSize()
     }
 
-    private func hintPair(key: String, label: String) -> some View {
+    private var showShortcutPopover: Bool {
+        shortcutButtonHovered || shortcutPopoverHovered
+    }
+
+    private var shortcutHints: [(key: String, label: String)] {
+        if kind == .followUp {
+            if isWorking {
+                return [
+                    ("Enter", "queue"),
+                    ("⇧↩", "newline"),
+                    ("⌘↩", "steer"),
+                    ("⌃C", "stop"),
+                    ("⌘/", "model"),
+                ]
+            }
+            return [
+                ("@", "files"),
+                ("/", "skills"),
+                ("⇧↩", "newline"),
+                ("Enter", "send"),
+                ("⌘V", "paste file"),
+                ("⌘L", "add selection"),
+                ("⇧⌘L", "selection → new"),
+                ("⌘/", "model"),
+            ]
+        }
+        return [
+            ("Enter", "send to agent"),
+            ("Esc", "cancel"),
+        ]
+    }
+
+    private var shortcutsButton: some View {
         HStack(spacing: 4) {
-            Text(key)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(Color.primary.opacity(0.72))
-            Text(label)
-                .font(.system(size: 10.5))
-                .foregroundStyle(Color.primary.opacity(0.55))
+            Image(systemName: "keyboard")
+                .font(.system(size: 11, weight: .medium))
+            Text("Shortcuts")
+                .font(.system(size: 11, weight: .medium))
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+        }
+        .foregroundStyle(Color.primary.opacity(0.78))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            shortcutDismissWork?.cancel()
+            if hovering {
+                shortcutButtonHovered = true
+            } else {
+                scheduleShortcutDismissFromButton()
+            }
+        }
+        .popover(isPresented: shortcutPopoverBinding, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(shortcutHints.enumerated()), id: \.offset) { _, hint in
+                    HStack(spacing: 10) {
+                        Text(hint.key)
+                            .font(.system(size: 11, weight: .semibold).monospaced())
+                            .foregroundStyle(Color.primary.opacity(0.85))
+                            .frame(minWidth: 52, alignment: .leading)
+                        Text(hint.label)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.primary.opacity(0.6))
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(minWidth: 180)
+            .onHover { hovering in
+                shortcutDismissWork?.cancel()
+                shortcutPopoverHovered = hovering
+                if !hovering {
+                    scheduleShortcutDismissFromPopover()
+                }
+            }
+        }
+    }
+
+    private var shortcutPopoverBinding: Binding<Bool> {
+        Binding(
+            get: { showShortcutPopover },
+            set: { presented in
+                if !presented {
+                    shortcutButtonHovered = false
+                    shortcutPopoverHovered = false
+                }
+            }
+        )
+    }
+
+    private func scheduleShortcutDismissFromButton() {
+        let work = DispatchWorkItem {
+            shortcutButtonHovered = false
+        }
+        shortcutDismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func scheduleShortcutDismissFromPopover() {
+        let work = DispatchWorkItem {
+            shortcutPopoverHovered = false
+        }
+        shortcutDismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    private func handleSubmit() {
+        // Keep Enter inside the @ / skill pickers (don't send the draft).
+        if fileAC.isActive {
+            if !fileAC.matches.isEmpty {
+                applySelectedFile()
+            }
+            return
+        }
+        if skillAC.isActive {
+            applySelectedSkill()
+            return
+        }
+        if isWorking, let onQueue, !hasAttachments {
+            onQueue()
+        } else {
+            guard canSend else { return }
+            onSend()
         }
     }
 
@@ -258,16 +475,89 @@ struct AgentComposerView: View {
         text = next
     }
 
-    /// ⇧↩ inserts a newline into the focused field editor and SwiftUI binding.
-    private func installNewlineMonitor() {
-        guard newlineMonitor == nil else { return }
-        newlineMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+    private func applyFile(_ entry: WorkspaceFileEntry) {
+        var next = text
+        fileAC.apply(entry, to: &next)
+        text = next
+        Self.appendWorkspaceEntry(entry, workspace: workspace, to: attachments)
+        onLayoutNeeded?()
+    }
+
+    private func applySelectedFile() {
+        var next = text
+        if let entry = fileAC.applySelected(to: &next) {
+            text = next
+            Self.appendWorkspaceEntry(entry, workspace: workspace, to: attachments)
+            onLayoutNeeded?()
+        }
+    }
+
+    private static func appendWorkspaceEntry(
+        _ entry: WorkspaceFileEntry,
+        workspace: String,
+        to attachments: Binding<[ComposerAttachment]>?
+    ) {
+        guard let attachments else { return }
+        let path: String = {
+            if entry.path.hasPrefix("/") { return entry.path }
+            let ws = workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !ws.isEmpty else { return entry.path }
+            return (ws as NSString).appendingPathComponent(entry.path)
+        }()
+        if attachments.wrappedValue.contains(where: { $0.path == path }) { return }
+        attachments.wrappedValue.append(
+            ComposerAttachment(path: path, ownsFile: false, isDirectory: entry.isDirectory)
+        )
+    }
+
+    private func removeAttachment(id: UUID, from binding: Binding<[ComposerAttachment]>) {
+        guard let item = binding.wrappedValue.first(where: { $0.id == id }) else { return }
+        binding.wrappedValue.removeAll { $0.id == id }
+        ComposerMediaImport.discard([item])
+        onLayoutNeeded?()
+    }
+
+    private func appendAttachments(_ items: [ComposerAttachment]) {
+        guard let attachments, !items.isEmpty else { return }
+        attachments.wrappedValue.append(contentsOf: items)
+        focused = true
+        onLayoutNeeded?()
+    }
+
+    @discardableResult
+    private func handleFileDrop() -> Bool {
+        guard attachments != nil else { return false }
+        let imported = ComposerMediaImport.attachmentsFromDragPasteboard()
+        guard !imported.isEmpty else { return false }
+        appendAttachments(imported)
+        return true
+    }
+
+    /// ⇧↩ newline + ⌘V media paste into the focused field editor / composer.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             // Require FocusState so a hidden sessions chat composer doesn't steal
-            // ⇧↩ from the annotate panel (sessions is ordered out, not destroyed).
+            // keys from the annotate panel (sessions is ordered out, not destroyed).
             guard focused else { return event }
-            guard let textView = Self.editableTextView(), textView.isEditable else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let code = Int(event.keyCode)
+
+            if code == kVK_ANSI_V,
+               flags.contains(.command),
+               !flags.contains(.shift),
+               !flags.contains(.option),
+               !flags.contains(.control),
+               attachments != nil,
+               let imported = ComposerMediaImport.attachmentsFromPasteboard(),
+               !imported.isEmpty {
+                DispatchQueue.main.async {
+                    appendAttachments(imported)
+                }
+                return nil
+            }
+
+            guard let textView = ComposerFieldEditor.editableTextView(), textView.isEditable else { return event }
             guard code == kVK_Return || code == kVK_ANSI_KeypadEnter else { return event }
             guard flags.contains(.shift),
                   !flags.contains(.command),
@@ -292,15 +582,22 @@ struct AgentComposerView: View {
         }
     }
 
-    private func removeNewlineMonitor() {
-        if let newlineMonitor {
-            NSEvent.removeMonitor(newlineMonitor)
+    private func removeKeyMonitor() {
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
         }
-        newlineMonitor = nil
+        keyMonitor = nil
     }
 
-    private static func editableTextView() -> NSTextView? {
-        let responder = NSApp.keyWindow?.firstResponder
+    static func editableTextView() -> NSTextView? {
+        ComposerFieldEditor.editableTextView()
+    }
+}
+
+enum ComposerFieldEditor {
+    static func editableTextView() -> NSTextView? {
+        let window = NSApp.keyWindow
+        let responder = window?.firstResponder
         if let textView = responder as? NSTextView, textView.isEditable {
             return textView
         }
@@ -309,6 +606,446 @@ struct AgentComposerView: View {
            editor.isEditable {
             return editor
         }
+        // After ⌘L the web view may still be first responder — use the window field editor.
+        if let editor = window?.fieldEditor(false, for: nil) as? NSTextView, editor.isEditable {
+            return editor
+        }
+        if let root = window?.contentView, let found = findEditableTextView(in: root) {
+            return found
+        }
         return nil
+    }
+
+    /// Sync the live field editor to `string` and leave an empty caret at the end.
+    /// Retries because SwiftUI TextField often select-alls on focus / binding updates.
+    static func setStringPlacingCaretAtEnd(_ string: String) {
+        placeCaretAtEnd(of: string, attemptsRemaining: 10)
+    }
+
+    private static func placeCaretAtEnd(of string: String, attemptsRemaining: Int) {
+        let apply: () -> Bool = {
+            guard let textView = editableTextView() else { return false }
+            if textView.string != string {
+                textView.string = string
+            }
+            let end = (string as NSString).length
+            let caret = NSRange(location: end, length: 0)
+            textView.setSelectedRange(caret)
+            textView.scrollRangeToVisible(caret)
+            // If SwiftUI already selected everything, clear it again.
+            if textView.selectedRange().length != 0 {
+                textView.setSelectedRange(caret)
+            }
+            return textView.selectedRange().length == 0
+                && textView.selectedRange().location == end
+        }
+
+        DispatchQueue.main.async {
+            let ok = apply()
+            guard attemptsRemaining > 0 else { return }
+            if ok {
+                // One more pass after layout — focus select-all often lands a beat later.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                    _ = apply()
+                    if attemptsRemaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+                            _ = apply()
+                        }
+                    }
+                }
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                    placeCaretAtEnd(of: string, attemptsRemaining: attemptsRemaining - 1)
+                }
+            }
+        }
+    }
+
+    private static func findEditableTextView(in view: NSView?) -> NSTextView? {
+        guard let view else { return nil }
+        if let textView = view as? NSTextView, textView.isEditable, textView.isFieldEditor || textView.string.count >= 0 {
+            // Prefer field editors / single-line-ish composer views over transcript webviews.
+            if textView.isFieldEditor { return textView }
+        }
+        for sub in view.subviews {
+            if let found = findEditableTextView(in: sub) { return found }
+        }
+        if let textView = view as? NSTextView, textView.isEditable { return textView }
+        return nil
+    }
+}
+
+/// Lifecycle hook that installs a window-wide file-drag monitor so the prompt’s
+/// “Drop files” chrome lights up for drags anywhere over the window (transcript,
+/// session list, etc.), not only when the pointer is over the field.
+private struct ComposerMediaDragCatcher: NSViewRepresentable {
+    @Binding var isTargeted: Bool
+    var onDrop: () -> Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isTargeted: $isTargeted, onDrop: onDrop)
+    }
+
+    func makeNSView(context: Context) -> ComposerMediaDragCatcherAnchor {
+        let view = ComposerMediaDragCatcherAnchor()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: ComposerMediaDragCatcherAnchor, context: Context) {
+        context.coordinator.isTargeted = $isTargeted
+        context.coordinator.onDrop = onDrop
+        nsView.coordinator = context.coordinator
+        nsView.ensureWindowMonitor()
+    }
+
+    final class Coordinator {
+        var isTargeted: Binding<Bool>
+        var onDrop: () -> Bool
+
+        init(isTargeted: Binding<Bool>, onDrop: @escaping () -> Bool) {
+            self.isTargeted = isTargeted
+            self.onDrop = onDrop
+        }
+
+        var supportsDrag: Bool {
+            ComposerMediaImport.dragHasFiles()
+        }
+
+        func setTargeted(_ value: Bool) {
+            DispatchQueue.main.async {
+                if self.isTargeted.wrappedValue != value {
+                    self.isTargeted.wrappedValue = value
+                }
+            }
+        }
+    }
+}
+
+private enum ComposerDragTypes {
+    static let all: [NSPasteboard.PasteboardType] = [
+        .fileURL,
+        .png,
+        .tiff,
+        NSPasteboard.PasteboardType(UTType.image.identifier),
+        NSPasteboard.PasteboardType(UTType.movie.identifier),
+        NSPasteboard.PasteboardType(UTType.video.identifier),
+    ]
+}
+
+/// Zero-hit anchor hosted in the composer; owns the window-covering monitor.
+private final class ComposerMediaDragCatcherAnchor: NSView {
+    weak var coordinator: ComposerMediaDragCatcher.Coordinator?
+    private weak var monitor: ComposerWindowFileDragMonitor?
+
+    override var isOpaque: Bool { false }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        ensureWindowMonitor()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil {
+            tearDownMonitor()
+        }
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func removeFromSuperview() {
+        tearDownMonitor()
+        super.removeFromSuperview()
+    }
+
+    func ensureWindowMonitor() {
+        guard let content = window?.contentView else {
+            tearDownMonitor()
+            return
+        }
+        if let monitor, monitor.superview === content {
+            monitor.coordinator = coordinator
+            // Stay above SwiftUI hosts so live-drag hit-testing sees us first.
+            content.addSubview(monitor, positioned: .above, relativeTo: nil)
+            monitor.frame = content.bounds
+            return
+        }
+        tearDownMonitor()
+        let monitor = ComposerWindowFileDragMonitor(frame: content.bounds)
+        monitor.autoresizingMask = [.width, .height]
+        monitor.coordinator = coordinator
+        content.addSubview(monitor, positioned: .above, relativeTo: nil)
+        self.monitor = monitor
+    }
+
+    private func tearDownMonitor() {
+        monitor?.coordinator = nil
+        monitor?.removeFromSuperview()
+        monitor = nil
+        coordinator?.setTargeted(false)
+    }
+}
+
+/// Covers the window content view; claims hits only during a live file drag so
+/// normal clicks still reach SwiftUI / the TextField.
+private final class ComposerWindowFileDragMonitor: NSView {
+    weak var coordinator: ComposerMediaDragCatcher.Coordinator?
+
+    override var isOpaque: Bool { false }
+    override var acceptsFirstResponder: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        registerForDraggedTypes(ComposerDragTypes.all)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// `NSPasteboard(name: .drag)` keeps the last drop’s URLs after the drag ends,
+    /// so pasteboard-alone checks would leave this view eating every click.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point), isLiveFileDrag else { return nil }
+        return self
+    }
+
+    private var isLiveFileDrag: Bool {
+        guard NSEvent.pressedMouseButtons != 0 else { return false }
+        guard let type = NSApp.currentEvent?.type else { return false }
+        switch type {
+        case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
+            break
+        default:
+            return false
+        }
+        return coordinator?.supportsDrag == true
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard coordinator?.supportsDrag == true else {
+            coordinator?.setTargeted(false)
+            return []
+        }
+        coordinator?.setTargeted(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard coordinator?.supportsDrag == true else {
+            coordinator?.setTargeted(false)
+            return []
+        }
+        coordinator?.setTargeted(true)
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        coordinator?.setTargeted(false)
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        coordinator?.supportsDrag == true
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        coordinator?.setTargeted(false)
+        return coordinator?.onDrop() ?? false
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        coordinator?.setTargeted(false)
+    }
+
+    override func draggingEnded(_ sender: NSDraggingInfo) {
+        coordinator?.setTargeted(false)
+    }
+}
+
+// MARK: - Inline file chips
+
+private struct FlowFileChips: View {
+    let items: [ComposerAttachment]
+    var onRemove: (UUID) -> Void
+
+    var body: some View {
+        // Simple wrapping row — enough for a handful of chips without a layout engine.
+        FlexibleChipWrap(spacing: 6) {
+            ForEach(items) { item in
+                ComposerFileChip(attachment: item) {
+                    onRemove(item.id)
+                }
+            }
+        }
+    }
+}
+
+/// Left-to-right wrap layout for file chips.
+private struct FlexibleChipWrap: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var height: CGFloat = 0
+        for sub in subviews {
+            let size = sub.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+            height = max(height, y + rowHeight)
+        }
+        return CGSize(width: maxWidth.isFinite ? maxWidth : x, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+        for sub in subviews {
+            let size = sub.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            sub.place(
+                at: CGPoint(x: x, y: y),
+                proposal: ProposedViewSize(width: size.width, height: size.height)
+            )
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
+private struct ComposerFileChip: View {
+    let attachment: ComposerAttachment
+    var onRemove: () -> Void
+
+    @State private var hovering = false
+
+    private let chipBlue = Color(red: 0.45, green: 0.72, blue: 1.0)
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: attachment.isDirectory ? "folder" : "doc")
+                .font(.system(size: 11, weight: .medium))
+            Text(attachment.fileName)
+                .font(.system(size: 12.5, weight: .medium))
+                .lineLimit(1)
+            if hovering {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(chipBlue.opacity(0.9))
+                        .frame(width: 14, height: 14)
+                        .background(Circle().fill(Color.primary.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+                .help("Remove")
+            }
+        }
+        .foregroundStyle(chipBlue)
+        .padding(.leading, 8)
+        .padding(.trailing, hovering ? 5 : 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(chipBlue.opacity(0.22), lineWidth: 1)
+        )
+        .help(attachment.path)
+        .onHover { hovering = $0 }
+    }
+}
+
+// MARK: - Attachment thumb
+
+private struct ComposerAttachmentThumb: View {
+    let attachment: ComposerAttachment
+    var onRemove: () -> Void
+
+    @State private var hovering = false
+    @State private var image: NSImage?
+
+    private let size: CGFloat = 64
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                } else {
+                    Color.primary.opacity(0.08)
+                    Image(systemName: attachment.isVideo ? "video.fill" : "photo")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(Color.primary.opacity(0.45))
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+            )
+
+            if attachment.isVideo {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 18))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, Color.black.opacity(0.45))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
+
+            if hovering {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(Circle().fill(Color.black.opacity(0.72)))
+                        .overlay(Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .offset(x: 5, y: -5)
+                .help("Remove")
+            }
+        }
+        .frame(width: size, height: size)
+        .padding(.trailing, 4)
+        .padding(.top, 4)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onAppear { loadPreview() }
+    }
+
+    private func loadPreview() {
+        let path = attachment.path
+        DispatchQueue.global(qos: .userInitiated).async {
+            let preview: NSImage?
+            if attachment.isVideo {
+                preview = RegionRecorder.posterImage(for: URL(fileURLWithPath: path))
+            } else {
+                preview = NSImage(contentsOfFile: path)
+            }
+            DispatchQueue.main.async {
+                image = preview
+            }
+        }
     }
 }
