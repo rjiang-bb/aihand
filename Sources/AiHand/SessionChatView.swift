@@ -333,13 +333,16 @@ struct SessionChatView: View {
     }
 
     private func submit(_ mode: FollowUpSubmit) {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let mediaPaths = attachments.filter(\.isMedia).map(\.path)
-        let filePaths = attachments.filter { !$0.isMedia }.map(\.path)
-        guard !text.isEmpty || !mediaPaths.isEmpty || !filePaths.isEmpty else { return }
+        // Inline `⟦file:…⟧` / `⟦dir:…⟧` chips → readable names in the prompt + path list.
+        let expanded = ComposerFileChipToken.expandForSend(draft, workspace: workspace)
+        var prompt = expanded.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chipPaths = expanded.filePaths
+        // Legacy strip chips (if any) still append path refs.
+        let stripFiles = attachments.filter { !$0.isMedia }.map(\.path)
+        let filePaths = chipPaths + stripFiles.filter { path in !chipPaths.contains(path) }
+        guard !prompt.isEmpty || !mediaPaths.isEmpty || !filePaths.isEmpty else { return }
 
-        // Non-media files are referenced in the prompt so the agent can open them.
-        var prompt = text
         if !filePaths.isEmpty {
             let refs = filePaths.map { path -> String in
                 let rel = relativePathIfPossible(path, workspace: workspace)
@@ -352,7 +355,6 @@ struct SessionChatView: View {
         }
 
         draft = ""
-        // Keep files for the session message; only clear the strip.
         attachments = []
         // Idle turns treat both as send-now; queue only applies while working (text-only).
         let resolved: FollowUpSubmit = (isWorking && mode == .queue && mediaPaths.isEmpty && filePaths.isEmpty)

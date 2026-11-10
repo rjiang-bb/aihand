@@ -519,6 +519,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md code {
         font-family: var(--mono);
         font-size: 0.9em;
+        color: var(--text);
         background: var(--code-bg);
         padding: 0.12em 0.35em;
         border-radius: 4px;
@@ -530,12 +531,14 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 10px 12px;
         overflow-x: auto;
         margin: 0.7em 0;
+        color: var(--text);
       }
       .md pre code {
         background: none;
         padding: 0;
         font-size: 13px;
         line-height: 1.45;
+        color: var(--text);
       }
       .md blockquote {
         margin: 0.6em 0;

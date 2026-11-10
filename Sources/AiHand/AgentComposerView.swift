@@ -180,8 +180,15 @@ struct AgentComposerView: View {
         fileAC.writeText = { text = $0 }
         let attachBinding = attachments
         let ws = workspace
-        fileAC.onPick = { entry in
-            Self.appendWorkspaceEntry(entry, workspace: ws, to: attachBinding)
+        fileAC.onPick = { [self] entry in
+            // @ query already removed by FileAutocomplete; append an inline chip token.
+            appendInlineFileChipToken(
+                path: absolutePath(for: entry),
+                isDirectory: entry.isDirectory
+            )
+            onLayoutNeeded?()
+            _ = attachBinding
+            _ = ws
         }
     }
 
@@ -212,6 +219,7 @@ struct AgentComposerView: View {
                 ),
                 height: $promptEditorHeight,
                 placeholder: placeholder,
+                darkChrome: colorScheme == .dark,
                 onSubmit: handleSubmit,
                 onHeightChange: { onLayoutNeeded?() }
             )
@@ -455,16 +463,9 @@ struct AgentComposerView: View {
     }
 
     private func attachmentArea(_ binding: Binding<[ComposerAttachment]>) -> some View {
-        let items = binding.wrappedValue
-        let files = items.filter { !$0.isMedia }
-        let media = items.filter(\.isMedia)
-        return VStack(alignment: .leading, spacing: 8) {
-            if !files.isEmpty {
-                // Cursor-style inline file chips (wrap).
-                FlowFileChips(items: files) { id in
-                    removeAttachment(id: id, from: binding)
-                }
-            }
+        // Media only — non-media files / @ refs are inline chips in the prompt.
+        let media = binding.wrappedValue.filter(\.isMedia)
+        return Group {
             if !media.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -536,7 +537,7 @@ struct AgentComposerView: View {
                 ("@", "files"),
                 ("/", "skills"),
                 ("⇧↩", "newline"),
-                ("Enter", "send"),
+                ("Enter", "send / next list item"),
                 ("⌘V", "paste file"),
                 ("⌘L", "add selection"),
                 ("⇧⌘L", "selection → new"),
@@ -550,18 +551,17 @@ struct AgentComposerView: View {
     }
 
     private var shortcutsButton: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             Image(systemName: "keyboard")
-                .font(.system(size: 11, weight: .medium))
-            Text("Shortcuts")
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
             Image(systemName: "chevron.down")
                 .font(.system(size: 8, weight: .semibold))
         }
         .foregroundStyle(Color.primary.opacity(0.78))
-        .padding(.horizontal, 5)
+        .padding(.horizontal, 4)
         .padding(.vertical, 2)
         .contentShape(Rectangle())
+        .accessibilityLabel("Shortcuts")
         .onHover { hovering in
             shortcutDismissWork?.cancel()
             if hovering {
@@ -659,38 +659,63 @@ struct AgentComposerView: View {
     }
 
     private func applyFile(_ entry: WorkspaceFileEntry) {
-        var next = text
-        fileAC.apply(entry, to: &next)
-        text = next
-        Self.appendWorkspaceEntry(entry, workspace: workspace, to: attachments)
+        replaceAtQuery(withChipFor: entry)
         onLayoutNeeded?()
     }
 
     private func applySelectedFile() {
+        guard fileAC.matches.indices.contains(fileAC.selectedIndex) else { return }
+        replaceAtQuery(withChipFor: fileAC.matches[fileAC.selectedIndex])
+        onLayoutNeeded?()
+    }
+
+    private func absolutePath(for entry: WorkspaceFileEntry) -> String {
+        if entry.path.hasPrefix("/") { return entry.path }
+        let ws = workspace.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ws.isEmpty else { return entry.path }
+        return (ws as NSString).appendingPathComponent(entry.path)
+    }
+
+    /// Swap the active `@…` token for an inline chip in one draft update (avoids wipe races).
+    private func replaceAtQuery(withChipFor entry: WorkspaceFileEntry) {
         var next = text
-        if let entry = fileAC.applySelected(to: &next) {
-            text = next
-            Self.appendWorkspaceEntry(entry, workspace: workspace, to: attachments)
-            onLayoutNeeded?()
+        let token = ComposerFileChipToken.serialize(
+            path: absolutePath(for: entry),
+            isDirectory: entry.isDirectory
+        )
+        if let range = WorkspaceFileCatalog.atQuery(in: next)?.range {
+            next.replaceSubrange(range, with: token + " ")
+        } else {
+            appendChipToken(token, to: &next)
+        }
+        fileAC.clear()
+        text = next
+        focused = true
+    }
+
+    private func appendInlineFileChipToken(path: String, isDirectory: Bool) {
+        var next = text
+        let token = ComposerFileChipToken.serialize(path: path, isDirectory: isDirectory)
+        appendChipToken(token, to: &next)
+        text = next
+        focused = true
+    }
+
+    private func appendChipToken(_ token: String, to text: inout String) {
+        if text.isEmpty || text.hasSuffix(" ") || text.hasSuffix("\n") {
+            text += token + " "
+        } else {
+            text += " " + token + " "
         }
     }
 
-    private static func appendWorkspaceEntry(
-        _ entry: WorkspaceFileEntry,
-        workspace: String,
-        to attachments: Binding<[ComposerAttachment]>?
-    ) {
-        guard let attachments else { return }
-        let path: String = {
-            if entry.path.hasPrefix("/") { return entry.path }
-            let ws = workspace.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !ws.isEmpty else { return entry.path }
-            return (ws as NSString).appendingPathComponent(entry.path)
-        }()
-        if attachments.wrappedValue.contains(where: { $0.path == path }) { return }
-        attachments.wrappedValue.append(
-            ComposerAttachment(path: path, ownsFile: false, isDirectory: entry.isDirectory)
-        )
+    private func insertInlineFileChip(path: String, isDirectory: Bool) {
+        // Live caret insert (Attach / drop). Falls back to draft token append.
+        if ComposerFieldEditor.insertFileChip(path: path, isDirectory: isDirectory) {
+            focused = true
+            return
+        }
+        appendInlineFileChipToken(path: path, isDirectory: isDirectory)
     }
 
     private func removeAttachment(id: UUID, from binding: Binding<[ComposerAttachment]>) {
@@ -702,7 +727,14 @@ struct AgentComposerView: View {
 
     private func appendAttachments(_ items: [ComposerAttachment]) {
         guard let attachments, !items.isEmpty else { return }
-        attachments.wrappedValue.append(contentsOf: items)
+        let media = items.filter(\.isMedia)
+        let files = items.filter { !$0.isMedia }
+        if !media.isEmpty {
+            attachments.wrappedValue.append(contentsOf: media)
+        }
+        for file in files {
+            insertInlineFileChip(path: file.path, isDirectory: file.isDirectory)
+        }
         focused = true
         onLayoutNeeded?()
     }
@@ -767,7 +799,10 @@ struct AgentComposerView: View {
             if let prompt = textView as? ComposerPromptTextView {
                 prompt.restyleAfterExternalEdit()
             } else if let storage = textView.textStorage {
-                ComposerMarkdownStyler.apply(to: storage)
+                ComposerMarkdownStyler.apply(
+                    to: storage,
+                    darkChrome: colorScheme == .dark
+                )
             }
 
             DispatchQueue.main.async {
@@ -826,6 +861,15 @@ enum ComposerFieldEditor {
         if registeredPrompt === textView {
             registeredPrompt = nil
         }
+    }
+
+    /// Insert a Cursor-style inline file/folder chip at the caret.
+    @discardableResult
+    static func insertFileChip(path: String, isDirectory: Bool) -> Bool {
+        guard let textView = registeredPrompt,
+              let parent = textView.parent else { return false }
+        parent.insertFileChip(path: path, isDirectory: isDirectory)
+        return true
     }
 
     static func editableTextView() -> NSTextView? {

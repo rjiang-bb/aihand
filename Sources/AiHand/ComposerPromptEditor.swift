@@ -7,6 +7,8 @@ struct ComposerPromptEditor: NSViewRepresentable {
     @Binding var focused: Bool
     @Binding var height: CGFloat
     var placeholder: String
+    /// SoftChrome card is dark — drives attributed text colors (not `NSApp` appearance).
+    var darkChrome: Bool = true
     var onSubmit: () -> Void
     var onHeightChange: (() -> Void)?
 
@@ -96,13 +98,20 @@ struct ComposerPromptEditor: NSViewRepresentable {
         }
 
         func applyText(_ string: String, force: Bool) {
-            guard let textView else { return }
-            if !force, textView.string == string { return }
+            guard let textView, let storage = textView.textStorage else { return }
+            let current = ComposerFileChipCodec.serialize(storage)
+            if !force, current == string { return }
             applying = true
             defer { applying = false }
 
             let selected = textView.selectedRange()
-            textView.string = string
+            let typing = ComposerMarkdownStyler.typingAttributes(darkChrome: parent.darkChrome)
+            let attributed = ComposerFileChipCodec.attributedString(
+                from: string,
+                darkChrome: parent.darkChrome,
+                base: typing
+            )
+            storage.setAttributedString(attributed)
             restyleKeepingSelection(selected: selected)
             recalculateHeight(force: true)
         }
@@ -112,21 +121,42 @@ struct ComposerPromptEditor: NSViewRepresentable {
             let sel = selected ?? textView.selectedRange()
             applying = true
             ComposerMarkdownStyler.normalizeListMarkers(in: storage)
-            ComposerMarkdownStyler.apply(to: storage)
-            let next = storage.string
+            ComposerMarkdownStyler.apply(to: storage, darkChrome: parent.darkChrome)
+            let next = ComposerFileChipCodec.serialize(storage)
             if parent.text != next {
                 parent.text = next
             }
             applying = false
-            // Don't inherit clear/tiny marker attrs into the next keystroke.
-            textView.typingAttributes = ComposerMarkdownStyler.typingAttributes()
             let end = storage.length
             let clamped = NSRange(
                 location: min(sel.location, end),
                 length: min(sel.length, max(0, end - min(sel.location, end)))
             )
             textView.setSelectedRange(clamped)
+            let typing = ComposerMarkdownStyler.typingAttributes(
+                for: textView,
+                darkChrome: parent.darkChrome
+            )
+            textView.typingAttributes = typing
+            textView.textColor = typing[.foregroundColor] as? NSColor
+            textView.insertionPointColor = typing[.foregroundColor] as? NSColor
+                ?? textView.insertionPointColor
             textView.needsDisplay = true
+            recalculateHeight(force: true)
+        }
+
+        /// Insert an inline file/folder chip at the caret (serialized as `⟦file:…⟧`).
+        func insertFileChip(path: String, isDirectory: Bool) {
+            guard let textView else { return }
+            applying = true
+            ComposerFileChipCodec.insertChip(
+                path: path,
+                isDirectory: isDirectory,
+                darkChrome: parent.darkChrome,
+                into: textView
+            )
+            applying = false
+            restyleKeepingSelection()
         }
 
         func syncFocus(_ shouldFocus: Bool) {
@@ -200,6 +230,11 @@ struct ComposerPromptEditor: NSViewRepresentable {
                 let flags = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
                 if flags.contains(.shift) {
                     textView.insertNewlineIgnoringFieldEditor(nil)
+                    return true
+                }
+                // Cursor-style: Enter continues/exits a markdown list before submit.
+                if ComposerMarkdownStyler.handleListEnter(in: textView) {
+                    restyleKeepingSelection()
                     return true
                 }
                 parent.onSubmit()
@@ -282,8 +317,10 @@ final class ComposerPromptTextView: NSTextView {
         isAutomaticTextReplacementEnabled = false
         isAutomaticSpellingCorrectionEnabled = false
         enabledTextCheckingTypes = 0
+        // SoftChrome isn’t system textBackgroundColor — adaptive remapping made
+        // attributed code runs (fg + chip bg) unreadable.
         if #available(macOS 15.0, *) {
-            usesAdaptiveColorMappingForDarkAppearance = true
+            usesAdaptiveColorMappingForDarkAppearance = false
         }
     }
 
@@ -325,7 +362,7 @@ final class ComposerPromptTextView: NSTextView {
     }
 
     private func drawQuoteBars(in dirtyRect: NSRect) {
-        guard let layoutManager, let textContainer else { return }
+        guard let layoutManager, textContainer != nil else { return }
         let ns = string as NSString
         let quotes = ComposerMarkdownStyler.quoteLineRanges(in: ns)
         guard !quotes.isEmpty else { return }
@@ -334,17 +371,23 @@ final class ComposerPromptTextView: NSTextView {
         let barColor = NSColor.labelColor.withAlphaComponent(0.38)
         let width = ComposerMarkdownStyler.quoteBarWidth
         let inset = ComposerMarkdownStyler.quoteBarInset
+        // Sit in the quote gutter, not at the (collapsed) marker glyph.
+        let barX = origin.x + textContainerInset.width + inset
         barColor.setFill()
 
         for range in quotes {
             let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             guard glyphRange.length > 0 else { continue }
-            var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            let frag = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location,
+                effectiveRange: nil
+            )
+            var rect = frag
             rect.origin.x += origin.x
             rect.origin.y += origin.y
             guard rect.intersects(dirtyRect) else { continue }
             let bar = NSRect(
-                x: rect.minX + inset,
+                x: barX,
                 y: rect.minY + 1,
                 width: width,
                 height: max(rect.height - 2, 8)
