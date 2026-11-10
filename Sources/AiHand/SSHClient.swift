@@ -45,14 +45,10 @@ enum SSHClient {
         let already = mastersStarted.contains(connection.id)
         lock.unlock()
         if already {
-            // Probe existing master.
-            let probe = runSSH(
-                connection: connection,
-                extraOptions: multiplexOptions(for: connection, master: false) + ["-O", "check"],
-                remoteCommand: nil,
-                timeoutHint: false
-            )
-            if probe.ok { return probe }
+            // Every real command already carries `ControlMaster=auto`, so ssh reconnects on its
+            // own if the master expired. Spawning `ssh -O check` first doubled the process cost
+            // of each call (and a workspace switch fires many of them).
+            return SSHRunResult(ok: true, status: 0, stdout: "", stderr: "")
         }
         let result = runSSH(
             connection: connection,
@@ -127,13 +123,21 @@ enum SSHClient {
         )
     }
 
-    /// Convenience: run a remote shell string with `bash -lc`.
+    /// Convenience: run a remote shell string with `bash -lc` (login shell — loads the user's PATH
+    /// setup, but sources profile/rc files, which can cost a second or more on some hosts).
     static func runShell(_ connection: SSHConnection, _ script: String) -> SSHRunResult {
         run(connection, remoteCommand: ["bash", "-lc", script])
     }
 
+    /// Fast path for cheap probes (git metadata, skill scans): `bash -c`, no profile/rc files.
+    /// PATH is padded with the usual tool dirs since a login shell isn't providing it.
+    static func runShellFast(_ connection: SSHConnection, _ script: String) -> SSHRunResult {
+        let padded = "PATH=\"$PATH:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin\"; export PATH\n" + script
+        return run(connection, remoteCommand: ["bash", "-c", padded])
+    }
+
     static func remoteHome(_ connection: SSHConnection) -> String? {
-        let result = run(connection, remoteCommand: ["bash", "-lc", "printf %s \"$HOME\""])
+        let result = run(connection, remoteCommand: ["bash", "-c", "printf %s \"$HOME\""])
         let home = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         return result.ok && !home.isEmpty ? home : nil
     }
@@ -283,9 +287,10 @@ enum SSHClient {
             captured.stderr = err.fileHandleForReading.readDataToEndOfFile()
             group.leave()
         }
+        let timedOut: Bool
         do {
             try process.run()
-            wait(for: process, timeout: commandTimeoutSeconds)
+            timedOut = wait(for: process, timeout: commandTimeoutSeconds)
         } catch {
             try? out.fileHandleForWriting.close()
             try? err.fileHandleForWriting.close()
@@ -298,7 +303,11 @@ enum SSHClient {
         var errText = String(data: captured.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if process.terminationStatus != 0, errText.isEmpty {
-            errText = "SSH command timed out."
+            // Empty stderr is common (remote scripts redirect noise). Don't call a fast
+            // exit 1 a "timeout" — that only applies when we killed the child ourselves.
+            errText = timedOut
+                ? "SSH command timed out."
+                : "SSH exited \(process.terminationStatus)."
         }
         return SSHRunResult(
             ok: process.terminationStatus == 0,
@@ -323,12 +332,16 @@ enum SSHClient {
         }
     }
 
-    private static func wait(for process: Process, timeout: TimeInterval) {
+    /// Waits up to `timeout`. Returns `true` if the process was killed for exceeding it.
+    @discardableResult
+    private static func wait(for process: Process, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning, Date() < deadline {
             Thread.sleep(forTimeInterval: 0.05)
         }
+        var timedOut = false
         if process.isRunning {
+            timedOut = true
             process.terminate()
             let killDeadline = Date().addingTimeInterval(2)
             while process.isRunning, Date() < killDeadline {
@@ -339,6 +352,7 @@ enum SSHClient {
             }
         }
         process.waitUntilExit()
+        return timedOut
     }
 
     /// Map ssh argv (with -p) onto scp argv (with -P).

@@ -359,7 +359,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         selection.revealSessionInList(id, sessions: store.sessions)
         if isVisible {
             if needsExpand {
-                layout()
+                // AppKit `setFrame(animate: true)` blocks the main thread for the whole
+                // animation (~0.8–1s here). Expand instantly; SwiftUI handles the chat fade-in.
+                layout(animateFrame: false)
             }
         } else {
             show()
@@ -1797,7 +1799,7 @@ private struct WorkspacePicker: View {
     }
 
     private var title: String {
-        guard let currentRef else { return currentPath.isEmpty ? "No folder" : URL(fileURLWithPath: currentPath).lastPathComponent }
+        guard let currentRef else { return currentPath.isEmpty ? "No folder" : (currentPath as NSString).lastPathComponent }
         return currentRef.displayName
     }
 
@@ -2257,7 +2259,7 @@ private struct WorkspacePickerRow: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var name: String {
-        URL(fileURLWithPath: path).lastPathComponent
+        (path as NSString).lastPathComponent
     }
 
     var body: some View {
@@ -2636,14 +2638,6 @@ private struct SessionCardView: View {
                                 .font(.system(size: 14, weight: isSelected ? .bold : .semibold))
                                 .foregroundStyle(fg)
                                 .lineLimit(1)
-                            if let label = session.connectionLabel, !label.isEmpty {
-                                Text(label)
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(Color(red: 0.35, green: 0.72, blue: 0.78))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(Color(red: 0.35, green: 0.72, blue: 0.78).opacity(0.18)))
-                            }
                             Spacer(minLength: 4)
                             Text(relativeTime(session.createdAt))
                                 .font(.system(size: 12, weight: .medium))

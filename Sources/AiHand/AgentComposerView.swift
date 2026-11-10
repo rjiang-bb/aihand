@@ -180,7 +180,8 @@ struct AgentComposerView: View {
             skillAC.configure(workspace: newValue, connectionID: Preferences.agentWorkspaceConnectionID)
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
-            SkillCatalog.invalidate()
+            // No invalidate here: every prefs change (including a workspace click) used to wipe the
+            // cache and force a fresh SSH skill scan. The 30s TTL + per-workspace key cover staleness.
             skillAC.configure(workspace: workspace, connectionID: Preferences.agentWorkspaceConnectionID)
         }
         .onChange(of: text) { _ in
