@@ -597,7 +597,12 @@ enum AgentModelCatalog {
         var remote = [exe]
         remote.append(contentsOf: args)
         let result = SSHClient.run(connection, remoteCommand: remote)
-        guard result.ok else { return nil }
-        return result.stdout.isEmpty ? nil : result.stdout
+        let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        // Prefer success, but accept JSON/catalog text when Codex exits non-zero after printing.
+        if result.ok || text.contains("{") || text.contains(" - ") {
+            return text
+        }
+        return nil
     }
 }

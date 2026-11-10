@@ -268,14 +268,34 @@ enum SSHClient {
         let err = Pipe()
         process.standardOutput = out
         process.standardError = err
+        // Drain both pipes while the process runs. Waiting first lets large stdout
+        // (e.g. remote `codex debug models` ~300KB) fill the pipe and deadlock until timeout —
+        // Settings then never sees live Codex models/effort over SSH.
+        let captured = PipeCapture()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            captured.stdout = out.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            captured.stderr = err.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
         do {
             try process.run()
             wait(for: process, timeout: commandTimeoutSeconds)
         } catch {
+            try? out.fileHandleForWriting.close()
+            try? err.fileHandleForWriting.close()
+            _ = group.wait(timeout: .now() + 2)
             return SSHRunResult(ok: false, status: -1, stdout: "", stderr: error.localizedDescription)
         }
-        let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        var errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        // Process exit closes the remote side of the pipes → readers hit EOF.
+        _ = group.wait(timeout: .now() + 5)
+        let stdout = String(data: captured.stdout, encoding: .utf8) ?? ""
+        var errText = String(data: captured.stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if process.terminationStatus != 0, errText.isEmpty {
             errText = "SSH command timed out."
@@ -286,6 +306,21 @@ enum SSHClient {
             stdout: stdout.trimmingCharacters(in: .whitespacesAndNewlines),
             stderr: errText
         )
+    }
+
+    /// Thread-safe bag for concurrent stdout/stderr drains.
+    private final class PipeCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _stdout = Data()
+        private var _stderr = Data()
+        var stdout: Data {
+            get { lock.lock(); defer { lock.unlock() }; return _stdout }
+            set { lock.lock(); _stdout = newValue; lock.unlock() }
+        }
+        var stderr: Data {
+            get { lock.lock(); defer { lock.unlock() }; return _stderr }
+            set { lock.lock(); _stderr = newValue; lock.unlock() }
+        }
     }
 
     private static func wait(for process: Process, timeout: TimeInterval) {
