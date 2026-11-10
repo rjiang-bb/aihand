@@ -23,6 +23,8 @@ struct AgentMessage: Identifiable, Equatable, Codable {
     var text: String
     /// Attached media paths (screenshots / pasted images / videos).
     var imagePaths: [String]
+    /// True when this user turn interrupted an in-flight run (⌘↩ / steer).
+    var steered: Bool
     var createdAt: Date
 
     /// First attachment — kept for call sites that only need one path.
@@ -47,6 +49,7 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         text: String,
         imagePath: String? = nil,
         imagePaths: [String] = [],
+        steered: Bool = false,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -59,11 +62,12 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         } else {
             self.imagePaths = []
         }
+        self.steered = steered
         self.createdAt = createdAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, text, imagePath, imagePaths, createdAt
+        case id, kind, text, imagePath, imagePaths, steered, createdAt
     }
 
     init(from decoder: Decoder) throws {
@@ -72,6 +76,7 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         kind = try c.decode(AgentMessageKind.self, forKey: .kind)
         text = try c.decode(String.self, forKey: .text)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
+        steered = try c.decodeIfPresent(Bool.self, forKey: .steered) ?? false
         if let paths = try c.decodeIfPresent([String].self, forKey: .imagePaths), !paths.isEmpty {
             imagePaths = paths
         } else if let one = try c.decodeIfPresent(String.self, forKey: .imagePath) {
@@ -87,6 +92,9 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         try c.encode(kind, forKey: .kind)
         try c.encode(text, forKey: .text)
         try c.encode(createdAt, forKey: .createdAt)
+        if steered {
+            try c.encode(true, forKey: .steered)
+        }
         if imagePaths.count == 1 {
             try c.encode(imagePaths[0], forKey: .imagePath)
         } else if imagePaths.count > 1 {

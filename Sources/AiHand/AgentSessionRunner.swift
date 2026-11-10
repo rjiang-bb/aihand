@@ -45,7 +45,13 @@ final class AgentSessionRunner {
         followUp(session: session, workspace: workspace, prompt: prompt, imagePaths: imagePath.map { [$0] } ?? [])
     }
 
-    func followUp(session: AgentSession, workspace: String, prompt: String, imagePaths: [String]) {
+    func followUp(
+        session: AgentSession,
+        workspace: String,
+        prompt: String,
+        imagePaths: [String],
+        steered: Bool = false
+    ) {
         self.session = session
         guard let chatId = session.chatId, !chatId.isEmpty else {
             DispatchQueue.main.async {
@@ -57,7 +63,9 @@ final class AgentSessionRunner {
         }
         let paths = imagePaths.filter { FileManager.default.fileExists(atPath: $0) }
         let appendUser = {
-            session.messages.append(AgentMessage(kind: .user, text: prompt, imagePaths: paths))
+            session.messages.append(
+                AgentMessage(kind: .user, text: prompt, imagePaths: paths, steered: steered)
+            )
             session.status = .working
             let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             session.preview = trimmedPrompt.isEmpty && !paths.isEmpty ? "Annotation" : prompt
@@ -863,6 +871,7 @@ final class AgentSessionManager {
             return
         }
 
+        let steered = busy
         if busy {
             runner.interruptQuietly()
         }
@@ -885,7 +894,13 @@ final class AgentSessionManager {
             return
         }
 
-        runner.followUp(session: session, workspace: workspace, prompt: prompt, imagePaths: paths)
+        runner.followUp(
+            session: session,
+            workspace: workspace,
+            prompt: prompt,
+            imagePaths: paths,
+            steered: steered
+        )
     }
 
     func removeQueuedFollowUp(sessionID: UUID, followUpID: UUID) {

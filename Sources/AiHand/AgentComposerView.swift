@@ -44,6 +44,7 @@ struct AgentComposerView: View {
     @State private var dropTargeted = false
     @State private var plusMenuOpen = false
     @State private var ignoreNextPlusMenuDismiss = false
+    @State private var promptEditorHeight: CGFloat = 22
     @State private var shortcutButtonHovered = false
     @State private var shortcutPopoverHovered = false
     @State private var shortcutDismissWork: DispatchWorkItem?
@@ -80,7 +81,7 @@ struct AgentComposerView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 2) {
             if fileAC.isActive {
                 FileSuggestionList(
                     controller: fileAC,
@@ -106,62 +107,20 @@ struct AgentComposerView: View {
                     .transition(.opacity)
             }
 
-            HStack(alignment: .bottom, spacing: 8) {
-                promptField
-                    .onSubmit(handleSubmit)
-                    .help("Type @ for files · / for skills · ⇧↩ for a new line · ⌘V / drop to attach files")
+            promptField
+                .help("Type @ for files · / for skills · ⇧↩ for a new line · ⌘V / drop to attach files")
 
-                if isWorking, let onStop {
-                    Button(action: onStop) {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 28))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundColor(.secondary)
-                            .softHoverInnerBorder(Circle(), inset: 2.5)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop (⌃C)")
-                }
-
-                if kind == .followUp, let onDraw {
-                    Button(action: onDraw) {
-                        Image(systemName: "pencil.tip.crop.circle.fill")
-                            .font(.system(size: 28))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(Color.primary.opacity(0.85))
-                            .softHoverInnerBorder(Circle(), inset: 2.5)
-                    }
-                    .buttonStyle(.plain)
-                    .keyboardShortcut("d", modifiers: .command)
-                    .help("Draw (⌘D)")
-                }
-
-                Button(action: {
-                    guard canSend else { return }
-                    onSend()
-                }) {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(
-                            canSend ? Color.white : Color.secondary.opacity(0.55),
-                            canSend ? Color.accentColor : Color.secondary.opacity(0.25)
-                        )
-                        .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
-                }
-                .buttonStyle(.plain)
-                .disabled(!canSend)
-                .keyboardShortcut(.return, modifiers: .command)
-                .help(kind == .followUp ? "Send / Steer (⌘↩)" : "Send (⌘↩)")
-            }
-
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 6) {
+                composerPlusButton
                 shortcutsButton
                 Spacer(minLength: 8)
                 favoritePicker
+                composerActionButtons
             }
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 2)
+            .padding(.bottom, 2)
         }
+        .background(SoftChrome.cardFill(dark: colorScheme == .dark))
         .onAppear {
             configureAutocomplete()
             installKeyMonitor()
@@ -241,46 +200,41 @@ struct AgentComposerView: View {
 
     /// Cursor-style field: attachments above the text, shared chrome.
     private var promptField: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             if let attachments, !attachments.wrappedValue.isEmpty {
                 attachmentArea(attachments)
             }
-            HStack(alignment: .center, spacing: 6) {
-                composerPlusButton
-                TextField(placeholder, text: $text, axis: .vertical)
-                    // Match chat transcript body (14.5px) — system default is smaller.
-                    .font(.system(size: 14.5))
-                    .lineLimit(1...12)
-                    .textFieldStyle(.plain)
-                    .foregroundStyle(.primary)
-                    .focused($focused)
-                    // Optical: plain TextField glyphs sit ~1pt high vs the plus circle.
-                    .offset(y: 1)
-            }
+            ComposerPromptEditor(
+                text: $text,
+                focused: Binding(
+                    get: { focused },
+                    set: { focused = $0 }
+                ),
+                height: $promptEditorHeight,
+                placeholder: placeholder,
+                onSubmit: handleSubmit,
+                onHeightChange: { onLayoutNeeded?() }
+            )
+            .frame(maxWidth: .infinity, minHeight: promptEditorHeight, maxHeight: promptEditorHeight, alignment: .leading)
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 10)
-        .padding(.vertical, 7)
+        // Match toolbar inset (SessionChatView 12 + row 2 → 14pt).
+        .padding(.horizontal, 2)
+        .padding(.top, 6)
+        .padding(.bottom, 0)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // No inset field chrome — share the panel’s SoftChrome card fill.
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(
-                            dropTargeted
-                                ? Color(red: 0.2, green: 0.55, blue: 0.98)
-                                : (focused
-                                    ? Color(red: 0.2, green: 0.55, blue: 0.98)
-                                    : Color.primary.opacity(0.45)),
-                            lineWidth: (focused || dropTargeted) ? 1.5 : 1
-                        )
-                )
+                .fill(SoftChrome.cardFill(dark: colorScheme == .dark))
         )
         .overlay {
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(Color(red: 0.2, green: 0.55, blue: 0.98).opacity(0.16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color(red: 0.2, green: 0.55, blue: 0.98), lineWidth: 1.5)
+                    )
                     .overlay(
                         Text("Drop files")
                             .font(.system(size: 13.5, weight: .semibold))
@@ -306,14 +260,77 @@ struct AgentComposerView: View {
             plusMenuOpen.toggle()
         } label: {
             Image(systemName: "plus.circle.fill")
-                .font(.system(size: 20, weight: .regular))
+                .font(.system(size: 22, weight: .regular))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(Color.primary.opacity(0.72))
-                .frame(width: 22, height: 22)
+                .frame(width: 24, height: 24)
                 .softHoverInnerBorder(Circle(), inset: 1.25)
         }
         .buttonStyle(.plain)
         .help("Plan or attach files")
+    }
+
+    @ViewBuilder
+    private var composerActionButtons: some View {
+        if kind == .followUp, let onDraw {
+            Button(action: onDraw) {
+                Image(systemName: "pencil.tip.crop.circle.fill")
+                    .font(.system(size: 26))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Color.primary.opacity(0.85))
+                    .softHoverInnerBorder(Circle(), inset: 2.5)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("d", modifiers: .command)
+            .help("Draw (⌘D)")
+        }
+
+        if isWorking, let onStop {
+            // Gray stop replaces Send while a turn runs; Enter still queues, ⌘↩ steers.
+            Button(action: onStop) {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 26))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Color.secondary.opacity(0.9))
+                    .softHoverInnerBorder(Circle(), inset: 2.5)
+            }
+            .buttonStyle(.plain)
+            .help("Stop (⌃C)")
+            .background(steerKeyboardShortcut)
+        } else {
+            Button(action: {
+                guard canSend else { return }
+                onSend()
+            }) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 26))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(
+                        canSend ? Color.white : Color.secondary.opacity(0.55),
+                        canSend ? Color.accentColor : Color.secondary.opacity(0.25)
+                    )
+                    .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSend)
+            .keyboardShortcut(.return, modifiers: .command)
+            .help(kind == .followUp ? "Send / Steer (⌘↩)" : "Send (⌘↩)")
+        }
+    }
+
+    /// Hidden ⌘↩ while Stop is showing so steer still works from the keyboard.
+    private var steerKeyboardShortcut: some View {
+        Button {
+            guard canSend else { return }
+            onSend()
+        } label: {
+            EmptyView()
+        }
+        .keyboardShortcut(.return, modifiers: .command)
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var composerPlusMenu: some View {
@@ -542,8 +559,8 @@ struct AgentComposerView: View {
                 .font(.system(size: 8, weight: .semibold))
         }
         .foregroundStyle(Color.primary.opacity(0.78))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
         .contentShape(Rectangle())
         .onHover { hovering in
             shortcutDismissWork?.cancel()
@@ -747,6 +764,11 @@ struct AgentComposerView: View {
             text = updated
             let insertedAt = min(range.location + 1, (updated as NSString).length)
             textView.setSelectedRange(NSRange(location: insertedAt, length: 0))
+            if let prompt = textView as? ComposerPromptTextView {
+                prompt.restyleAfterExternalEdit()
+            } else if let storage = textView.textStorage {
+                ComposerMarkdownStyler.apply(to: storage)
+            }
 
             DispatchQueue.main.async {
                 onLayoutNeeded?()
@@ -794,10 +816,28 @@ struct AgentComposerView: View {
 }
 
 enum ComposerFieldEditor {
+    private static weak var registeredPrompt: ComposerPromptTextView?
+
+    static func register(_ textView: ComposerPromptTextView?) {
+        registeredPrompt = textView
+    }
+
+    static func unregister(_ textView: ComposerPromptTextView) {
+        if registeredPrompt === textView {
+            registeredPrompt = nil
+        }
+    }
+
     static func editableTextView() -> NSTextView? {
+        if let registeredPrompt, registeredPrompt.window != nil {
+            return registeredPrompt
+        }
         let window = NSApp.keyWindow
         let responder = window?.firstResponder
-        if let textView = responder as? NSTextView, textView.isEditable {
+        if let textView = responder as? ComposerPromptTextView {
+            return textView
+        }
+        if let textView = responder as? NSTextView, textView.isEditable, textView.isFieldEditor {
             return textView
         }
         if let field = responder as? NSTextField,
@@ -805,7 +845,6 @@ enum ComposerFieldEditor {
            editor.isEditable {
             return editor
         }
-        // After ⌘L the web view may still be first responder — use the window field editor.
         if let editor = window?.fieldEditor(false, for: nil) as? NSTextView, editor.isEditable {
             return editor
         }
@@ -815,8 +854,36 @@ enum ComposerFieldEditor {
         return nil
     }
 
-    /// Sync the live field editor to `string` and leave an empty caret at the end.
-    /// Retries because SwiftUI TextField often select-alls on focus / binding updates.
+    /// Put the caret in the registered prompt (retries past list-click first-responder races).
+    static func focus(attemptsRemaining: Int = 8) {
+        DispatchQueue.main.async {
+            let ok = makePromptFirstResponder()
+            guard attemptsRemaining > 0 else { return }
+            if !ok {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                    focus(attemptsRemaining: attemptsRemaining - 1)
+                }
+            } else if attemptsRemaining > 4 {
+                // Re-assert after mouse-up / SwiftUI button focus settles.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                    _ = makePromptFirstResponder()
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    static func makePromptFirstResponder() -> Bool {
+        guard let textView = editableTextView() as? ComposerPromptTextView
+                ?? registeredPrompt,
+              let window = textView.window ?? NSApp.keyWindow else {
+            return false
+        }
+        if window.firstResponder === textView { return true }
+        return window.makeFirstResponder(textView)
+    }
+
+    /// Sync the live prompt editor to `string` and leave an empty caret at the end.
     static func setStringPlacingCaretAtEnd(_ string: String) {
         placeCaretAtEnd(of: string, attemptsRemaining: 10)
     }
@@ -827,11 +894,15 @@ enum ComposerFieldEditor {
             if textView.string != string {
                 textView.string = string
             }
+            if let prompt = textView as? ComposerPromptTextView {
+                prompt.restyleAfterExternalEdit()
+            } else if let storage = textView.textStorage {
+                ComposerMarkdownStyler.apply(to: storage)
+            }
             let end = (string as NSString).length
             let caret = NSRange(location: end, length: 0)
             textView.setSelectedRange(caret)
             textView.scrollRangeToVisible(caret)
-            // If SwiftUI already selected everything, clear it again.
             if textView.selectedRange().length != 0 {
                 textView.setSelectedRange(caret)
             }
@@ -843,7 +914,6 @@ enum ComposerFieldEditor {
             let ok = apply()
             guard attemptsRemaining > 0 else { return }
             if ok {
-                // One more pass after layout — focus select-all often lands a beat later.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
                     _ = apply()
                     if attemptsRemaining > 1 {
@@ -862,14 +932,13 @@ enum ComposerFieldEditor {
 
     private static func findEditableTextView(in view: NSView?) -> NSTextView? {
         guard let view else { return nil }
-        if let textView = view as? NSTextView, textView.isEditable, textView.isFieldEditor || textView.string.count >= 0 {
-            // Prefer field editors / single-line-ish composer views over transcript webviews.
-            if textView.isFieldEditor { return textView }
+        if let textView = view as? ComposerPromptTextView { return textView }
+        if let textView = view as? NSTextView, textView.isEditable, textView.isFieldEditor {
+            return textView
         }
         for sub in view.subviews {
             if let found = findEditableTextView(in: sub) { return found }
         }
-        if let textView = view as? NSTextView, textView.isEditable { return textView }
         return nil
     }
 }

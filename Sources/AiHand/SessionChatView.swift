@@ -74,8 +74,8 @@ struct SessionChatView: View {
                 focused: $composerFocused
             )
             .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 12)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
@@ -132,8 +132,11 @@ struct SessionChatView: View {
 
     private func focusComposer(placeCaretAtEnd: Bool = false) {
         let value = draft
+        // Drop FocusState first so a still-true value re-triggers the NSTextView sync.
+        composerFocused = false
         DispatchQueue.main.async {
             composerFocused = true
+            ComposerFieldEditor.focus()
             if placeCaretAtEnd {
                 ComposerFieldEditor.setStringPlacingCaretAtEnd(value)
             }

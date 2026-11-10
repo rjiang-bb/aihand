@@ -2688,6 +2688,7 @@ private struct SessionCardView: View {
                 .background(cardBackground)
             }
             .buttonStyle(.plain)
+            .focusable(false)
 
             // Float over the card — do not pad/reflow text when it appears.
             if hovering {
