@@ -11,12 +11,15 @@ final class SkillAutocompleteController: ObservableObject {
     private var queryRange: Range<String.Index>?
     private var keyMonitor: Any?
     private var workspace: String = ""
+    private var connectionID: UUID?
     var readText: () -> String = { "" }
     var writeText: (String) -> Void = { _ in }
 
-    func configure(workspace: String) {
-        if self.workspace != workspace {
+    func configure(workspace: String, connectionID: UUID? = Preferences.agentWorkspaceConnectionID) {
+        if self.workspace != workspace || self.connectionID != connectionID {
             self.workspace = workspace
+            self.connectionID = connectionID
+            skills = []
             refreshSkills()
         } else if skills.isEmpty {
             refreshSkills()
@@ -24,7 +27,26 @@ final class SkillAutocompleteController: ObservableObject {
     }
 
     func refreshSkills() {
-        skills = SkillCatalog.skills(workspace: workspace.isEmpty ? nil : workspace)
+        let ws = workspace
+        let conn = connectionID
+        // Remote skill scans are SSH — never block the composer/main thread.
+        if conn != nil {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let list = SkillCatalog.skills(
+                    workspace: ws.isEmpty ? nil : ws,
+                    connectionID: conn
+                )
+                DispatchQueue.main.async {
+                    guard let self, self.workspace == ws, self.connectionID == conn else { return }
+                    self.skills = list
+                }
+            }
+            return
+        }
+        skills = SkillCatalog.skills(
+            workspace: ws.isEmpty ? nil : ws,
+            connectionID: nil
+        )
     }
 
     func update(text: String) {

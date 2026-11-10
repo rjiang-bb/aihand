@@ -62,29 +62,58 @@ struct GitDiffLinesView: View {
 }
 
 enum GitWorkspace {
-    /// Probe worktrees + branch/working diff stats for a folder. Returns nil when not a git repo.
-    static func inspect(path: String) -> GitRepoInfo? {
+    /// How much git metadata to gather. Diffs are local-only by default — over SSH they
+    /// walk the whole tree (`diff --numstat`, untracked) and stall startup / folder switches.
+    enum InspectDetail {
+        /// Worktree paths + branch names (and local commit order when cheap).
+        case metadata
+        /// Also branch-vs-base and working-tree line stats.
+        case full
+    }
+
+    /// Cheap check — one `rev-parse`, no worktree/diff walks.
+    static func isRepository(path: String, connection: SSHConnection? = nil) -> Bool {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return runGit(["rev-parse", "--is-inside-work-tree"], in: trimmed, connection: connection)?.stdout == "true"
+    }
+
+    /// Probe worktrees (+ optional diff stats). SSH defaults to `.metadata` (diffs hang on large trees).
+    static func inspect(
+        path: String,
+        connection: SSHConnection? = nil,
+        detail: InspectDetail? = nil
+    ) -> GitRepoInfo? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        guard let toplevel = runGit(["rev-parse", "--show-toplevel"], in: trimmed)?.stdout else { return nil }
+        let resolvedDetail = detail ?? (connection == nil ? .full : .metadata)
+
+        // One remote shell for metadata — avoids N SSH round-trips on large hosts.
+        if let connection, resolvedDetail == .metadata {
+            return inspectRemoteMetadata(path: trimmed, connection: connection)
+        }
+
+        guard let toplevel = runGit(["rev-parse", "--show-toplevel"], in: trimmed, connection: connection)?.stdout else {
+            return nil
+        }
         let probe = SessionStore.normalizedWorkspace(toplevel)
         guard !probe.isEmpty else { return nil }
 
-        let porcelain = runGit(["worktree", "list", "--porcelain"], in: probe)?.stdout ?? ""
+        let porcelain = runGit(["worktree", "list", "--porcelain"], in: probe, connection: connection)?.stdout ?? ""
         var entries = parseWorktrees(porcelain)
-        // First porcelain entry is always the main checkout (not whichever worktree we probed).
         let root = entries.first?.path ?? probe
-        let base = defaultBaseRef(in: root)
+        let includeDiffs = resolvedDetail == .full
+        let base = includeDiffs ? defaultBaseRef(in: root, connection: connection) : nil
         if entries.isEmpty {
-            let branch = currentBranch(in: root) ?? "HEAD"
+            let branch = currentBranch(in: root, connection: connection) ?? "HEAD"
             entries = [
                 GitWorktreeEntry(
                     path: root,
                     branch: branch,
-                    diff: branchDiffStat(base: base, in: root),
-                    workingDiff: workingDiffStat(in: root),
+                    diff: includeDiffs ? branchDiffStat(base: base, in: root, connection: connection) : GitDiffStat(),
+                    workingDiff: includeDiffs ? workingDiffStat(in: root, connection: connection) : GitDiffStat(),
                     isPrimary: true,
-                    commitTimestamp: commitTimestamp(in: root)
+                    commitTimestamp: includeDiffs ? commitTimestamp(in: root, connection: connection) : 0
                 )
             ]
         } else {
@@ -92,15 +121,16 @@ enum GitWorkspace {
             entries = entries.map { entry in
                 var next = entry
                 if next.branch.isEmpty {
-                    next.branch = currentBranch(in: entry.path) ?? "HEAD"
+                    next.branch = currentBranch(in: entry.path, connection: connection) ?? "HEAD"
                 }
-                next.diff = branchDiffStat(base: base, in: entry.path)
-                next.workingDiff = workingDiffStat(in: entry.path)
+                if includeDiffs {
+                    next.diff = branchDiffStat(base: base, in: entry.path, connection: connection)
+                    next.workingDiff = workingDiffStat(in: entry.path, connection: connection)
+                    next.commitTimestamp = commitTimestamp(in: entry.path, connection: connection)
+                }
                 next.isPrimary = SessionStore.sameWorkspace(next.path, mainPath)
-                next.commitTimestamp = commitTimestamp(in: entry.path)
                 return next
             }
-            // Recent HEAD first (⌃1 = newest).
             entries.sort {
                 if $0.commitTimestamp != $1.commitTimestamp {
                     return $0.commitTimestamp > $1.commitTimestamp
@@ -111,31 +141,78 @@ enum GitWorkspace {
         return GitRepoInfo(repoRoot: root, baseRef: base, worktrees: entries)
     }
 
-    static func commitTimestamp(in path: String) -> TimeInterval {
-        guard let raw = runGit(["log", "-1", "--format=%ct"], in: path)?.stdout,
+    /// Single SSH: toplevel + `worktree list --porcelain` (branches included). No diffs.
+    private static func inspectRemoteMetadata(path: String, connection: SSHConnection) -> GitRepoInfo? {
+        let escaped = SSHClient.shellEscape(path)
+        let script = """
+        cd \(escaped) || exit 1
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+        printf '%s\\n' "$root"
+        printf '---WORKTREES---\\n'
+        git worktree list --porcelain 2>/dev/null || true
+        """
+        let result = SSHClient.runShell(connection, script)
+        guard result.ok else { return nil }
+        let parts = result.stdout.components(separatedBy: "---WORKTREES---\n")
+        guard let rawRoot = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines), !rawRoot.isEmpty else {
+            return nil
+        }
+        let probe = SessionStore.normalizedWorkspace(rawRoot)
+        guard !probe.isEmpty else { return nil }
+        let porcelain = parts.count > 1 ? parts[1] : ""
+        var entries = parseWorktrees(porcelain)
+        let root = entries.first?.path ?? probe
+        if entries.isEmpty {
+            let branch = currentBranch(in: root, connection: connection) ?? "HEAD"
+            entries = [
+                GitWorktreeEntry(path: root, branch: branch, diff: GitDiffStat(), isPrimary: true)
+            ]
+        } else {
+            let mainPath = root
+            entries = entries.map { entry in
+                var next = entry
+                if next.branch.isEmpty {
+                    next.branch = "HEAD"
+                }
+                next.isPrimary = SessionStore.sameWorkspace(next.path, mainPath)
+                return next
+            }
+            entries.sort {
+                $0.branch.localizedCaseInsensitiveCompare($1.branch) == .orderedAscending
+            }
+        }
+        return GitRepoInfo(repoRoot: root, baseRef: nil, worktrees: entries)
+    }
+
+    static func commitTimestamp(in path: String, connection: SSHConnection? = nil) -> TimeInterval {
+        guard let raw = runGit(["log", "-1", "--format=%ct"], in: path, connection: connection)?.stdout,
               let value = TimeInterval(raw) else {
             return 0
         }
         return value
     }
 
-    static func currentBranch(in path: String) -> String? {
-        if let name = runGit(["branch", "--show-current"], in: path)?.stdout, !name.isEmpty {
+    static func currentBranch(in path: String, connection: SSHConnection? = nil) -> String? {
+        if let name = runGit(["branch", "--show-current"], in: path, connection: connection)?.stdout, !name.isEmpty {
             return name
         }
-        if let short = runGit(["rev-parse", "--short", "HEAD"], in: path)?.stdout, !short.isEmpty {
+        if let short = runGit(["rev-parse", "--short", "HEAD"], in: path, connection: connection)?.stdout, !short.isEmpty {
             return "detached \(short)"
         }
         return nil
     }
 
-    /// Staged + unstaged vs HEAD (dirty working tree), including untracked files as insertions.
-    /// Matches typical editor “Changes” counts more closely than `git diff` alone.
-    static func workingDiffStat(in path: String) -> GitDiffStat {
-        var stat = parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path)?.stdout)
+    static func workingDiffStat(in path: String, connection: SSHConnection? = nil) -> GitDiffStat {
+        var stat = parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path, connection: connection)?.stdout)
+        if let connection {
+            // Count untracked files only — never open/wc each file over SSH (hangs on huge trees).
+            stat.insertions += remoteUntrackedFileCount(connection: connection, repoPath: path)
+            return stat
+        }
         guard let listed = runGit(
             ["ls-files", "--others", "--exclude-standard", "-z"],
-            in: path
+            in: path,
+            connection: nil
         )?.stdout, !listed.isEmpty else {
             return stat
         }
@@ -147,8 +224,19 @@ enum GitWorkspace {
         return stat
     }
 
+    /// Untracked file count in one cheap remote git call (not per-file line reads).
+    private static func remoteUntrackedFileCount(connection: SSHConnection, repoPath: String) -> Int {
+        let escaped = SSHClient.shellEscape(repoPath)
+        let script = """
+        cd \(escaped) || exit 0
+        git ls-files --others --exclude-standard -z 2>/dev/null | tr -cd '\\0' | wc -c | tr -d '[:space:]'
+        """
+        let result = SSHClient.runShell(connection, script)
+        let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Int(trimmed) ?? 0
+    }
+
     private static func untrackedInsertionCount(at fileURL: URL) -> Int {
-        // Stream in chunks: polling re-counts untracked files, and media files can be large.
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return 1 }
         defer { try? handle.close() }
         let chunkSize = 64 * 1024
@@ -156,7 +244,6 @@ enum GitWorkspace {
         var sawBytes = false
         var endsWithNewline = false
         while let chunk = try? handle.read(upToCount: chunkSize), !chunk.isEmpty {
-            // Treat binary as a single added path, like `git diff --numstat` does with `-`.
             if chunk.contains(0) { return 1 }
             sawBytes = true
             newlines += chunk.reduce(into: 0) { count, byte in
@@ -164,41 +251,35 @@ enum GitWorkspace {
             }
             endsWithNewline = chunk.last == 0x0A
         }
-        // Zero-byte files still count as one added path so they register as a change.
         guard sawBytes else { return 1 }
-        // Match `wc -l`: count newlines, plus one when the file doesn’t end in a newline.
         return endsWithNewline ? newlines : newlines + 1
     }
 
-    /// Line changes on this checkout since diverging from `base` (`git diff base...HEAD`).
-    static func branchDiffStat(base: String?, in path: String) -> GitDiffStat {
+    static func branchDiffStat(base: String?, in path: String, connection: SSHConnection? = nil) -> GitDiffStat {
         guard let base, !base.isEmpty else { return GitDiffStat() }
-        return parseNumstat(runGit(["diff", "--numstat", "\(base)...HEAD"], in: path)?.stdout)
+        return parseNumstat(runGit(["diff", "--numstat", "\(base)...HEAD"], in: path, connection: connection)?.stdout)
     }
 
-    /// Preferred comparison base for branch diffs.
-    static func defaultBaseRef(in root: String) -> String? {
-        if let remote = runGit(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], in: root)?.stdout,
+    static func defaultBaseRef(in root: String, connection: SSHConnection? = nil) -> String? {
+        if let remote = runGit(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], in: root, connection: connection)?.stdout,
            !remote.isEmpty {
             return remote
         }
         for candidate in ["origin/main", "origin/master", "main", "master"] {
-            if revExists(candidate, in: root) {
+            if revExists(candidate, in: root, connection: connection) {
                 return candidate
             }
         }
         return nil
     }
 
-    /// Add a linked worktree for `branch` under `root`. Creates the branch from HEAD when missing.
-    /// Returns the new worktree path, or an error message.
-    static func addWorktree(branch: String, inRepo root: String) -> (path: String?, error: String?) {
+    static func addWorktree(branch: String, inRepo root: String, connection: SSHConnection? = nil) -> (path: String?, error: String?) {
         let name = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return (nil, "Enter a branch name.") }
         guard isSafeBranchName(name) else {
             return (nil, "Use letters, numbers, dashes, slashes, or dots in the branch name.")
         }
-        guard let info = inspect(path: root) else {
+        guard let info = inspect(path: root, connection: connection, detail: .metadata) else {
             return (nil, "That folder isn’t a git repository.")
         }
         if info.worktrees.contains(where: { $0.branch == name }) {
@@ -206,26 +287,31 @@ enum GitWorkspace {
         }
 
         let path = suggestedWorktreePath(repoRoot: info.repoRoot, branch: name)
-        if FileManager.default.fileExists(atPath: path) {
+        if let connection {
+            if SSHClient.directoryExists(connection, path: path)
+                || SSHClient.runShell(connection, "test -e \(SSHClient.shellEscape(path))").ok {
+                return (nil, "Path already exists:\n\(path)")
+            }
+        } else if FileManager.default.fileExists(atPath: path) {
             return (nil, "Path already exists:\n\(path)")
         }
 
-        let exists = branchExists(name, in: info.repoRoot)
+        let exists = branchExists(name, in: info.repoRoot, connection: connection)
         let args: [String]
         if exists {
             args = ["worktree", "add", path, name]
         } else {
             args = ["worktree", "add", "-b", name, path]
         }
-        if let error = runGit(args, in: info.repoRoot)?.error {
+        if let error = runGit(args, in: info.repoRoot, connection: connection)?.error {
             return (nil, error)
         }
         return (SessionStore.normalizedWorkspace(path), nil)
     }
 
-    /// Remove a linked worktree. Fails when dirty or when targeting the primary checkout.
-    static func removeWorktree(path: String, inRepo root: String) -> String? {
-        guard let info = inspect(path: root) else {
+    static func removeWorktree(path: String, inRepo root: String, connection: SSHConnection? = nil) -> String? {
+        // Metadata only — full diffs are too expensive over SSH and unnecessary here.
+        guard let info = inspect(path: root, connection: connection, detail: .metadata) else {
             return "That folder isn’t a git repository."
         }
         guard let entry = info.entry(forPath: path) else {
@@ -234,10 +320,16 @@ enum GitWorkspace {
         if entry.isPrimary {
             return "The main checkout can’t be removed as a worktree."
         }
-        if !entry.workingDiff.isEmpty {
+        if isWorkingTreeDirty(in: entry.path, connection: connection) {
             return "Commit or stash changes before removing this worktree."
         }
-        return runGit(["worktree", "remove", entry.path], in: info.repoRoot)?.error
+        return runGit(["worktree", "remove", entry.path], in: info.repoRoot, connection: connection)?.error
+    }
+
+    /// Tracked dirty check only (`-uno`) so huge untracked trees don’t stall SSH.
+    static func isWorkingTreeDirty(in path: String, connection: SSHConnection? = nil) -> Bool {
+        let status = runGit(["status", "--porcelain", "-uno"], in: path, connection: connection)?.stdout ?? ""
+        return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     static func suggestedWorktreePath(repoRoot: String, branch: String) -> String {
@@ -262,12 +354,12 @@ enum GitWorkspace {
         return GitDiffStat(insertions: insertions, deletions: deletions)
     }
 
-    private static func revExists(_ rev: String, in root: String) -> Bool {
-        runGit(["rev-parse", "--verify", "--quiet", rev], in: root)?.ok == true
+    private static func revExists(_ rev: String, in root: String, connection: SSHConnection?) -> Bool {
+        runGit(["rev-parse", "--verify", "--quiet", rev], in: root, connection: connection)?.ok == true
     }
 
-    private static func branchExists(_ name: String, in root: String) -> Bool {
-        runGit(["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], in: root)?.ok == true
+    private static func branchExists(_ name: String, in root: String, connection: SSHConnection?) -> Bool {
+        runGit(["show-ref", "--verify", "--quiet", "refs/heads/\(name)"], in: root, connection: connection)?.ok == true
     }
 
     private static func isSafeBranchName(_ name: String) -> Bool {
@@ -325,7 +417,17 @@ enum GitWorkspace {
     }
 
     @discardableResult
-    private static func runGit(_ args: [String], in directory: String) -> GitRun? {
+    private static func runGit(_ args: [String], in directory: String, connection: SSHConnection? = nil) -> GitRun? {
+        if let connection {
+            var remoteArgs = ["git", "-C", directory]
+            remoteArgs.append(contentsOf: args)
+            let result = SSHClient.run(connection, remoteCommand: remoteArgs)
+            if result.ok {
+                return GitRun(ok: true, stdout: result.stdout, error: nil)
+            }
+            let message = result.stderr.isEmpty ? "git \(args.first ?? "") failed." : result.stderr
+            return GitRun(ok: false, stdout: result.stdout, error: message)
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = ["-C", directory] + args

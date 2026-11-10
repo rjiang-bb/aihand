@@ -124,27 +124,41 @@ struct AgentFavorite: Identifiable, Equatable, Codable {
 
 /// Discovers model ids the installed CLI can accept, grouped into model + effort.
 enum AgentModelCatalog {
-    private static var cache: [AgentCLIKind: (at: Date, families: [AgentModelFamily])] = [:]
+    private struct CacheKey: Hashable {
+        var kind: AgentCLIKind
+        var targetKey: String
+    }
+
+    private static var cache: [CacheKey: (at: Date, families: [AgentModelFamily])] = [:]
     private static let cacheTTL: TimeInterval = 60
 
     private static let effortTokens: Set<String> = [
         "none", "minimal", "low", "medium", "high", "xhigh", "max"
     ]
 
-    static func families(for kind: AgentCLIKind, forceRefresh: Bool = false) -> [AgentModelFamily] {
+    static func families(
+        for kind: AgentCLIKind,
+        forceRefresh: Bool = false,
+        target: AgentExecutionTarget = Preferences.agentSettingsTarget
+    ) -> [AgentModelFamily] {
+        let key = CacheKey(kind: kind, targetKey: target.storageKey)
         if !forceRefresh,
-           let hit = cache[kind],
+           let hit = cache[key],
            Date().timeIntervalSince(hit.at) < cacheTTL {
             return hit.families
         }
-        let list = discoverFamilies(kind)
-        cache[kind] = (Date(), list)
+        let list = discoverFamilies(kind, target: target)
+        cache[key] = (Date(), list)
         return list
     }
 
     /// Flat list kept for callers that only need ids.
-    static func models(for kind: AgentCLIKind, forceRefresh: Bool = false) -> [AgentModelOption] {
-        families(for: kind, forceRefresh: forceRefresh).flatMap { family in
+    static func models(
+        for kind: AgentCLIKind,
+        forceRefresh: Bool = false,
+        target: AgentExecutionTarget = Preferences.agentSettingsTarget
+    ) -> [AgentModelOption] {
+        families(for: kind, forceRefresh: forceRefresh, target: target).flatMap { family in
             family.variants.map {
                 AgentModelOption(modelId: $0.modelId, title: "\(family.title) · \($0.title)")
             }
@@ -153,7 +167,9 @@ enum AgentModelCatalog {
 
     static func invalidate(_ kind: AgentCLIKind? = nil) {
         if let kind {
-            cache[kind] = nil
+            for key in cache.keys where key.kind == kind {
+                cache[key] = nil
+            }
         } else {
             cache.removeAll()
         }
@@ -167,21 +183,33 @@ enum AgentModelCatalog {
         }
     }
 
-    private static func discoverFamilies(_ kind: AgentCLIKind) -> [AgentModelFamily] {
+    private static func discoverFamilies(_ kind: AgentCLIKind, target: AgentExecutionTarget) -> [AgentModelFamily] {
         switch kind {
-        case .cursor: return groupCursor(discoverCursorFlat())
+        case .cursor: return groupCursor(discoverCursorFlat(target: target))
         case .claude: return familiesWithEffortFlag(discoverClaudeFlat())
-        case .codex: return discoverCodexFamilies()
+        case .codex: return discoverCodexFamilies(target: target)
         }
     }
 
     // MARK: - Cursor (effort baked into model id)
 
-    private static func discoverCursorFlat() -> [AgentModelOption] {
-        let exe = AgentPathLookup.resolve("agent") ?? "agent"
-        let output = run(exe, ["--list-models"])
-            ?? run(exe, ["models"])
-            ?? ""
+    private static func discoverCursorFlat(target: AgentExecutionTarget) -> [AgentModelOption] {
+        let output: String
+        switch target {
+        case .local:
+            let exe = AgentPathLookup.resolve("agent") ?? "agent"
+            output = runLocal(exe, ["--list-models"])
+                ?? runLocal(exe, ["models"])
+                ?? ""
+        case .ssh(let id):
+            guard let conn = Preferences.sshConnection(id: id),
+                  let exe = SSHClient.which(conn, "agent") else {
+                return cursorFallback
+            }
+            output = runRemote(conn, exe, ["--list-models"])
+                ?? runRemote(conn, exe, ["models"])
+                ?? ""
+        }
         let parsed = parseIdTitleList(output)
         return parsed.isEmpty ? cursorFallback : parsed
     }
@@ -412,16 +440,27 @@ enum AgentModelCatalog {
     }
 
     /// Live catalog from `codex debug models` (JSON). Falls back to legacy text list, then static ids.
-    private static func discoverCodexFamilies() -> [AgentModelFamily] {
-        let exe = AgentPathLookup.resolve("codex")
+    private static func discoverCodexFamilies(target: AgentExecutionTarget) -> [AgentModelFamily] {
+        let exe: String?
+        let runCmd: (String, [String]) -> String?
+        switch target {
+        case .local:
+            exe = AgentPathLookup.resolve("codex")
+            runCmd = { runLocal($0, $1) }
+        case .ssh(let id):
+            guard let conn = Preferences.sshConnection(id: id) else {
+                return familiesWithEffortFlag(codexFallbackModels)
+            }
+            exe = SSHClient.which(conn, "codex")
+            runCmd = { runRemote(conn, $0, $1) }
+        }
         if let exe {
-            if let json = run(exe, ["debug", "models"]),
+            if let json = runCmd(exe, ["debug", "models"]),
                let families = parseCodexDebugModels(json),
                !families.isEmpty {
                 return sortFamiliesByRecency(families)
             }
-            // Older CLIs / alternate list formats.
-            let output = run(exe, ["models"]) ?? run(exe, ["--list-models"]) ?? ""
+            let output = runCmd(exe, ["models"]) ?? runCmd(exe, ["--list-models"]) ?? ""
             let parsed = parseIdTitleList(output)
             if !parsed.isEmpty {
                 return familiesWithEffortFlag(parsed)
@@ -527,7 +566,7 @@ enum AgentModelCatalog {
         return out
     }
 
-    private static func run(_ exe: String, _ args: [String]) -> String? {
+    private static func runLocal(_ exe: String, _ args: [String]) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: exe)
         process.arguments = args
@@ -552,5 +591,18 @@ enum AgentModelCatalog {
         process.waitUntilExit()
         let text = String(data: data, encoding: .utf8) ?? ""
         return text.isEmpty ? nil : text
+    }
+
+    private static func runRemote(_ connection: SSHConnection, _ exe: String, _ args: [String]) -> String? {
+        var remote = [exe]
+        remote.append(contentsOf: args)
+        let result = SSHClient.run(connection, remoteCommand: remote)
+        let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        // Prefer success, but accept JSON/catalog text when Codex exits non-zero after printing.
+        if result.ok || text.contains("{") || text.contains(" - ") {
+            return text
+        }
+        return nil
     }
 }

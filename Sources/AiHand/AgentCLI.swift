@@ -159,7 +159,7 @@ struct CursorAgentCLI: AgentCLI {
     private func appendPermissionFlags(_ args: inout [String]) {
         // Workspace is chosen in Settings; always trust it for unattended annotate runs.
         args.append("--trust")
-        switch Preferences.cursorPermissionMode {
+        switch Preferences.cursorPermissionMode(for: AgentCLIRuntime.permissionTarget) {
         case .force:
             args.append("--force")
         case .sandboxed:
@@ -246,7 +246,7 @@ struct ClaudeAgentCLI: AgentCLI {
     }
 
     private func appendPermissionFlags(_ args: inout [String]) {
-        switch Preferences.claudePermissionMode {
+        switch Preferences.claudePermissionMode(for: AgentCLIRuntime.permissionTarget) {
         case .bypass:
             args.append("--dangerously-skip-permissions")
         case .acceptEdits:
@@ -335,7 +335,7 @@ struct CodexAgentCLI: AgentCLI {
 
     private func appendPermissionFlags(_ args: inout [String]) {
         // `codex exec` no longer takes `-a` / `--ask-for-approval` (clap rejects it → exit 2).
-        switch Preferences.codexPermissionMode {
+        switch Preferences.codexPermissionMode(for: AgentCLIRuntime.permissionTarget) {
         case .workspaceWrite:
             // Matches Cursor's auto-approve editing intent without full --yolo.
             args += ["--sandbox", "workspace-write"]
@@ -345,6 +345,31 @@ struct CodexAgentCLI: AgentCLI {
             // Unattended: skip approvals + sandbox (AiHand has no TTY for prompts).
             args.append("--dangerously-bypass-approvals-and-sandbox")
         }
+    }
+}
+
+/// Target whose permission prefs apply while building CLI argv (set per launch).
+enum AgentCLIRuntime {
+    // Recursive: `withPermissionTarget` holds the lock while `body` reads `permissionTarget`.
+    private static let lock = NSRecursiveLock()
+    private static var _permissionTarget: AgentExecutionTarget = .local
+
+    static var permissionTarget: AgentExecutionTarget {
+        lock.lock()
+        defer { lock.unlock() }
+        return _permissionTarget
+    }
+
+    /// Hold the lock while `body` reads permission prefs so concurrent launches don't cross wires.
+    static func withPermissionTarget<T>(_ target: AgentExecutionTarget, _ body: () -> T) -> T {
+        lock.lock()
+        let previous = _permissionTarget
+        _permissionTarget = target
+        defer {
+            _permissionTarget = previous
+            lock.unlock()
+        }
+        return body()
     }
 }
 

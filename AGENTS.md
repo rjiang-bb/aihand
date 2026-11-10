@@ -41,3 +41,11 @@ Holding **⌘** shows shortcut badges and a hints footer (`⌘1–9` / `⌘↑�
 **⌘,** opens AiHand Settings whenever the app has focus (sessions panel, annotate prompt, etc.).
 
 - Put “Settings…” with key equivalent `,` on the **main** app menu (`editingMenu` in `AppDelegate`), not only the status-item menu — status-item key equivalents do not fire unless that menu is open.
+
+## Focus newly shown text fields
+
+When an action **reveals** a text field (inline path box, composer, rename field, etc.), put the caret in it immediately — do not leave focus on the button/menu that opened it.
+
+- Same rule for any new UI that is primarily for typing.
+- After an **NSMenu** (or sheet) opens the field, SwiftUI `FocusState` is unreliable — use AppKit `window.makeFirstResponder(field)` (see `AutofocusPlainField` / annotate prompt), deferred until the menu tears down.
+- If the menu item was chosen with **↩**, swallow that leftover Return (and ignore the field’s submit action briefly) so focusing the field does not immediately confirm.

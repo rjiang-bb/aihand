@@ -24,7 +24,7 @@ struct SessionChatView: View {
 
     private var favorites: [AgentFavorite] {
         _ = prefsTick
-        return Preferences.favorites(for: session.cliKind)
+        return Preferences.favorites(for: session.cliKind, target: session.executionTarget)
     }
 
     private var currentFavorite: AgentFavorite? {

@@ -71,6 +71,8 @@ struct AgentComposerView: View {
 
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(placeholder, text: $text, axis: .vertical)
+                    // Match chat transcript body (14.5px) — system default is smaller.
+                    .font(.system(size: 14.5))
                     .lineLimit(1...12)
                     .textFieldStyle(.plain)
                     .foregroundStyle(.primary)
@@ -169,13 +171,17 @@ struct AgentComposerView: View {
             .padding(.horizontal, 4)
         }
         .onAppear {
-            skillAC.configure(workspace: workspace)
+            skillAC.configure(workspace: workspace, connectionID: Preferences.agentWorkspaceConnectionID)
             skillAC.readText = { text }
             skillAC.writeText = { text = $0 }
             installNewlineMonitor()
         }
         .onChange(of: workspace) { newValue in
-            skillAC.configure(workspace: newValue)
+            skillAC.configure(workspace: newValue, connectionID: Preferences.agentWorkspaceConnectionID)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            SkillCatalog.invalidate()
+            skillAC.configure(workspace: workspace, connectionID: Preferences.agentWorkspaceConnectionID)
         }
         .onChange(of: text) { _ in
             skillAC.update(text: text)
