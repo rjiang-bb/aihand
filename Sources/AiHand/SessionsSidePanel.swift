@@ -4,9 +4,11 @@ import Combine
 import SwiftUI
 
 final class SessionsSidePanel: NSObject, NSWindowDelegate {
-    var onFollowUp: ((UUID, String, FollowUpSubmit) -> Void)?
+    var onFollowUp: ((UUID, String, FollowUpSubmit, [String]) -> Void)?
     var onStop: ((UUID) -> Void)?
     var onNew: (() -> Void)?
+    /// New blank session with the composer prefilled (selection → new session).
+    var onNewWithDraft: ((String) -> Void)?
     var onStartDrawing: (() -> Void)?
     /// Draw from the open chat — annotate send follows up on this session.
     var onDrawForSession: ((UUID) -> Void)?
@@ -37,7 +39,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     /// Workspace key last applied to selection memory (normalized path).
     private var trackedWorkspaceKey: String = ""
 
-    private let listWidth: CGFloat = 360
+    /// Must equal the SwiftUI content width (`listColumnWidth` + 14pt padding each side).
+    /// At 360 the hosting view silently widened the window to 372, so the layout math
+    /// (close → list's right edge == chat's right edge) was off by 12pt.
+    private let listWidth: CGFloat = SessionsSidePanelView.listColumnWidth + 28
     /// Grows with session count up to 10 rows + pagination (+ ⌘ hints / open workspace picker).
     private var listHeight: CGFloat {
         SessionsListMetrics.panelHeight(
@@ -79,6 +84,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard isVisible else { return }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// Prefill the next opened chat composer (consumed once by `SessionChatView`).
+    func setComposerSeed(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        selection.pendingComposerSeed = trimmed.isEmpty ? nil : trimmed
     }
 
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
@@ -200,6 +211,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onNew: { [weak self] in
                 self?.onNew?()
             },
+            onNewWithDraft: { [weak self] text in
+                self?.onNewWithDraft?(text)
+            },
             onStartDrawing: { [weak self] in
                 self?.onStartDrawing?()
             },
@@ -221,8 +235,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onArchiveAll: { [weak self] in
                 self?.archiveAll()
             },
-            onSend: { [weak self] id, text, submit in
-                self?.onFollowUp?(id, text, submit)
+            onSend: { [weak self] id, text, submit, imagePaths in
+                self?.onFollowUp?(id, text, submit, imagePaths)
             },
             onStop: { [weak self] id in
                 self?.onStop?(id)
@@ -980,6 +994,18 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        // ⌘L / ⇧⌘L → add chat selection to composer / new session.
+        if panel.isKeyWindow,
+           selection.selectedID != nil,
+           Int(event.keyCode) == kVK_ANSI_L,
+           flags.contains(.command),
+           !flags.contains(.option),
+           !flags.contains(.control) {
+            if ChatSelectionHotkeys.perform(addToNewSession: flags.contains(.shift)) {
+                return nil
+            }
+        }
+
         // ⌃C stops the open chat (same as the Stop button).
         if panel.isKeyWindow,
            Int(event.keyCode) == kVK_ANSI_C,
@@ -1109,7 +1135,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 }
 
-private enum SessionsListPaging {
+enum SessionsListPaging {
     static let pageSize = 10
     /// Show the pager once the list grows past the old hard cap of 9.
     static let threshold = 9
@@ -1136,7 +1162,7 @@ private enum SessionsListPaging {
 }
 
 /// List panel height grows with session count up to one full page + pagination.
-private enum SessionsListMetrics {
+enum SessionsListMetrics {
     static let chromeVertical: CGFloat = 68 + 14
     /// Workspace picker closed: 13+13 pad + ~34pt title/path stack.
     static let picker: CGFloat = 60
@@ -1247,6 +1273,8 @@ private final class SessionsPanelSelection: ObservableObject {
     /// Esc while ⌃ is held — stay closed until ⌃ is released.
     @Published var suppressGitPicker = false
     @Published var listPage = 0
+    /// One-shot composer prefill for the next chat open (selection → new session).
+    @Published var pendingComposerSeed: String?
 
     var workspacePickerExpanded: Bool {
         !suppressWorkspacePicker && (showWorkspacePicker || pinnedWorkspacePicker)
@@ -1305,6 +1333,7 @@ private struct SessionsSidePanelView: View {
     var onCloseChat: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
+    var onNewWithDraft: (String) -> Void
     var onStartDrawing: () -> Void
     var onDrawForSession: (UUID) -> Void
     var onOpenSettings: () -> Void
@@ -1312,14 +1341,15 @@ private struct SessionsSidePanelView: View {
     var onArchive: (UUID) -> Void
     var onArchiveAllBelow: (UUID) -> Void
     var onArchiveAll: () -> Void
-    var onSend: (UUID, String, FollowUpSubmit) -> Void
+    var onSend: (UUID, String, FollowUpSubmit, [String]) -> Void
     var onStop: (UUID) -> Void
     var onChatResizeBegan: () -> Void
     var onChatResizeChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
     var onChatResizeEnded: () -> Void
     var onPanelDragEnded: () -> Void
 
-    private let listColumnWidth: CGFloat = 344
+    static let listColumnWidth: CGFloat = 344
+    private var listColumnWidth: CGFloat { Self.listColumnWidth }
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -1366,12 +1396,17 @@ private struct SessionsSidePanelView: View {
             if let id = selection.selectedID, let session = store.session(id: id) {
                 SessionChatView(
                     session: session,
-                    onSend: { text, submit in onSend(id, text, submit) },
+                    onSend: { text, submit, imagePaths in onSend(id, text, submit, imagePaths) },
                     onStop: { onStop(id) },
                     onDraw: { onDrawForSession(id) },
                     onClose: onCloseChat,
                     compact: true,
-                    onPanelDragEnded: onPanelDragEnded
+                    onPanelDragEnded: onPanelDragEnded,
+                    composerSeed: $selection.pendingComposerSeed,
+                    onAddSelectionToNewSession: { text in
+                        let quote = ChatSelectionQuote.blockquoted(text)
+                        onNewWithDraft(quote.isEmpty ? text : quote + "\n")
+                    }
                 )
                 .id(id)
                 .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
@@ -1512,6 +1547,7 @@ private struct SessionsSidePanelView: View {
                 )
                 if let git = store.gitRepo, !git.worktrees.isEmpty {
                     GitWorktreePicker(
+                        store: store,
                         repo: git,
                         currentPath: store.currentWorkspace,
                         workspaceRoot: {
@@ -1939,6 +1975,7 @@ private struct WorkspacePickerActionRow: View {
 }
 
 private struct GitWorktreePicker: View {
+    @ObservedObject var store: SessionStore
     let repo: GitRepoInfo
     let currentPath: String
     let workspaceRoot: String
@@ -1975,6 +2012,10 @@ private struct GitWorktreePicker: View {
     private var connection: SSHConnection? {
         guard let id = Preferences.agentWorkspaceConnectionID else { return nil }
         return Preferences.sshConnection(id: id)
+    }
+
+    private var connectionID: UUID? {
+        Preferences.agentWorkspaceConnectionID
     }
 
     var body: some View {
@@ -2025,6 +2066,11 @@ private struct GitWorktreePicker: View {
                         entry: entry,
                         shortcutIndex: index + 1,
                         isCurrent: SessionStore.sameWorkspace(entry.path, currentPath),
+                        hasWorkingSession: store.hasWorkingSession(
+                            for: entry.path,
+                            branch: entry.branch,
+                            connectionID: connectionID
+                        ),
                         fg: fg,
                         onSelect: { onSelect(entry) },
                         onRemove: { removeWorktree(entry) }
@@ -2167,6 +2213,7 @@ private struct GitWorktreeRow: View {
     let entry: GitWorktreeEntry
     let shortcutIndex: Int
     let isCurrent: Bool
+    let hasWorkingSession: Bool
     let fg: Color
     var onSelect: () -> Void
     var onRemove: () -> Void
@@ -2181,10 +2228,17 @@ private struct GitWorktreeRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "rectangle.split.2x1")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(entry.isPrimary ? Color.accentColor : fg.opacity(0.45))
-                    .frame(width: 18, alignment: .center)
+                Group {
+                    if hasWorkingSession {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "rectangle.split.2x1")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(entry.isPrimary ? Color.accentColor : fg.opacity(0.45))
+                    }
+                }
+                .frame(width: 18, alignment: .center)
                 Text(entry.branch)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(fg)
@@ -2657,6 +2711,7 @@ private struct SessionCardView: View {
                 .background(cardBackground)
             }
             .buttonStyle(.plain)
+            .focusable(false)
 
             // Float over the card — do not pad/reflow text when it appears.
             if hovering {
@@ -2784,3 +2839,16 @@ private struct ShortcutBadge: View {
         .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
     }
 }
+
+#if DEBUG
+/// Read-only window into private panel state for `SessionsPanelProbe`.
+extension SessionsSidePanel {
+    var probeFrame: NSRect { panel.frame }
+    var probeIsKey: Bool { panel.isKeyWindow }
+    var probeHintsShown: Bool { selection.showShortcutBadges }
+    var probeWindowNumber: Int { panel.windowNumber }
+    var probeListPage: Int { selection.listPage }
+    var probeListWidth: CGFloat { listWidth }
+    var probeListHeight: CGFloat { listHeight }
+}
+#endif

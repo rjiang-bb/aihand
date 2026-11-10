@@ -4,15 +4,19 @@ import UniformTypeIdentifiers
 
 struct SessionChatView: View {
     @ObservedObject var session: AgentSession
-    var onSend: (String, FollowUpSubmit) -> Void
+    var onSend: (String, FollowUpSubmit, [String]) -> Void
     var onStop: () -> Void
     var onDraw: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
     var compact: Bool = false
     var onPanelDragEnded: (() -> Void)? = nil
+    /// Prefill composer once (e.g. selection → new session), then cleared.
+    var composerSeed: Binding<String?>? = nil
+    var onAddSelectionToNewSession: ((String) -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var draft = ""
+    @State private var attachments: [ComposerAttachment] = []
     @State private var draggingQueueID: UUID?
     @FocusState private var composerFocused: Bool
     @State private var prefsTick = 0
@@ -39,8 +43,13 @@ struct SessionChatView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            ChatTranscriptView(messages: session.messages, sessionID: session.id)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ChatTranscriptView(
+                messages: session.messages,
+                sessionID: session.id,
+                onAddSelectionToChat: { appendSelectionToDraft($0) },
+                onAddSelectionToNewSession: { onAddSelectionToNewSession?($0) }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             Divider()
             if !session.queuedFollowUps.isEmpty {
                 queueSection
@@ -52,7 +61,10 @@ struct SessionChatView: View {
                 requireNonEmpty: true,
                 placeholder: "Follow up…",
                 text: $draft,
+                attachments: $attachments,
                 workspace: workspace,
+                connectionID: session.connectionID,
+                cliKind: session.cliKind,
                 favorites: favorites,
                 selectedFavoriteID: currentFavorite?.id,
                 onSelectFavorite: { session.applyFavorite($0) },
@@ -63,27 +75,100 @@ struct SessionChatView: View {
                 focused: $composerFocused
             )
             .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 12)
+            .padding(.top, 6)
+            .padding(.bottom, 8)
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
         .onAppear {
-            focusComposer()
+            wireSelectionHotkeys()
+            let seeded = consumeComposerSeedIfNeeded()
+            focusComposer(placeCaretAtEnd: seeded)
         }
         .onChange(of: session.id) { _ in
-            draft = ""
-            focusComposer()
+            clearAttachments()
+            let seeded = consumeComposerSeedIfNeeded()
+            if !seeded {
+                draft = ""
+            }
+            focusComposer(placeCaretAtEnd: seeded)
+        }
+        .onDisappear {
+            ChatSelectionHotkeys.onAddToChat = nil
+            ChatSelectionHotkeys.onAddToNewSession = nil
+            ChatSelectionHotkeys.pendingText = ""
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ChatSelectionHotkeys.addToChatNotification)) { note in
+            if let text = note.userInfo?["text"] as? String {
+                appendSelectionToDraft(text)
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: ChatSelectionHotkeys.addToNewSessionNotification)) { note in
+            if let text = note.userInfo?["text"] as? String {
+                onAddSelectionToNewSession?(text)
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
             prefsTick &+= 1
         }
     }
 
-    private func focusComposer() {
+    private func wireSelectionHotkeys() {
+        ChatSelectionHotkeys.onAddToChat = { text in
+            // Posted so @State updates land on the live SessionChatView, not a stale struct copy.
+            NotificationCenter.default.post(
+                name: ChatSelectionHotkeys.addToChatNotification,
+                object: nil,
+                userInfo: ["text": text]
+            )
+        }
+        ChatSelectionHotkeys.onAddToNewSession = { text in
+            NotificationCenter.default.post(
+                name: ChatSelectionHotkeys.addToNewSessionNotification,
+                object: nil,
+                userInfo: ["text": text]
+            )
+        }
+    }
+
+    private func focusComposer(placeCaretAtEnd: Bool = false) {
+        let value = draft
+        // Drop FocusState first so a still-true value re-triggers the NSTextView sync.
+        composerFocused = false
         DispatchQueue.main.async {
             composerFocused = true
+            ComposerFieldEditor.focus()
+            if placeCaretAtEnd {
+                ComposerFieldEditor.setStringPlacingCaretAtEnd(value)
+            }
         }
+    }
+
+    @discardableResult
+    private func consumeComposerSeedIfNeeded() -> Bool {
+        guard let composerSeed,
+              let seed = composerSeed.wrappedValue,
+              !seed.isEmpty else { return false }
+        // Ensure a trailing newline so the caret can sit on the line after the quote.
+        draft = seed.hasSuffix("\n") ? seed : seed + "\n"
+        composerSeed.wrappedValue = nil
+        return true
+    }
+
+    private func appendSelectionToDraft(_ selection: String) {
+        let quote = ChatSelectionQuote.blockquoted(selection)
+        guard !quote.isEmpty else { return }
+        let existing = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let next: String
+        if existing.isEmpty {
+            next = quote + "\n"
+        } else {
+            next = existing + "\n\n" + quote + "\n"
+        }
+        draft = next
+        // Focus first; SwiftUI often select-alls on focus, so caret placement retries.
+        composerFocused = true
+        ComposerFieldEditor.setStringPlacingCaretAtEnd(next)
     }
 
     private var header: some View {
@@ -213,12 +298,12 @@ struct SessionChatView: View {
             } label: {
                 Text("Steer")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(Color.accentColor.opacity(0.12))
+                            .fill(Color.accentColor)
                     )
                     .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
             }
@@ -249,21 +334,66 @@ struct SessionChatView: View {
     }
 
     private func submit(_ mode: FollowUpSubmit) {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let mediaPaths = attachments.filter(\.isMedia).map(\.path)
+        // Inline `⟦file:…⟧` / `⟦dir:…⟧` chips → readable names in the prompt + path list.
+        let expanded = ComposerFileChipToken.expandForSend(draft, workspace: workspace)
+        var prompt = expanded.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chipPaths = expanded.filePaths
+        // Legacy strip chips (if any) still append path refs.
+        let stripFiles = attachments.filter { !$0.isMedia }.map(\.path)
+        let filePaths = chipPaths + stripFiles.filter { path in !chipPaths.contains(path) }
+        guard !prompt.isEmpty || !mediaPaths.isEmpty || !filePaths.isEmpty else { return }
+
+        if !filePaths.isEmpty {
+            let refs = filePaths.map { path -> String in
+                let rel = relativePathIfPossible(path, workspace: workspace)
+                return "Attached file: \(rel)"
+            }
+            prompt = ([prompt] + refs)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+        }
+
         draft = ""
-        // Idle turns treat both as send-now; queue only applies while working.
-        let resolved: FollowUpSubmit = (isWorking && mode == .queue) ? .queue : .sendNow
-        onSend(text, resolved)
+        attachments = []
+        // Idle turns treat both as send-now; queue only applies while working (text-only).
+        let resolved: FollowUpSubmit = (isWorking && mode == .queue && mediaPaths.isEmpty && filePaths.isEmpty)
+            ? .queue : .sendNow
+        onSend(prompt, resolved, mediaPaths)
         // Field editor can write the old string back after we clear; force empty.
         DispatchQueue.main.async {
             draft = ""
         }
     }
 
+    private func relativePathIfPossible(_ path: String, workspace: String) -> String {
+        let ws = (workspace as NSString).standardizingPath
+        let full = (path as NSString).standardizingPath
+        guard !ws.isEmpty, full.hasPrefix(ws + "/") else { return path }
+        return String(full.dropFirst(ws.count + 1))
+    }
+
+    private func clearAttachments() {
+        ComposerMediaImport.discard(attachments)
+        attachments = []
+    }
+
     private func steerQueued(_ item: QueuedFollowUp) {
         session.queuedFollowUps.removeAll { $0.id == item.id }
-        onSend(item.text, .sendNow)
+        onSend(item.text, .sendNow, [])
+    }
+}
+
+enum ChatSelectionQuote {
+    /// Markdown blockquote lines for a chat selection pasted into the composer.
+    static func blockquoted(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        return trimmed
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> \($0)" }
+            .joined(separator: "\n")
     }
 }
 

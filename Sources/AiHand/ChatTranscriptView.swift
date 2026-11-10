@@ -2,10 +2,35 @@ import AppKit
 import SwiftUI
 import WebKit
 
+/// Live chat-selection state for ⌘L / ⌘⇧L (panel key monitor + menu).
+enum ChatSelectionHotkeys {
+    static let addToChatNotification = Notification.Name("AiHandChatSelectionAddToChat")
+    static let addToNewSessionNotification = Notification.Name("AiHandChatSelectionAddToNewSession")
+
+    static var pendingText: String = ""
+    static var onAddToChat: ((String) -> Void)?
+    static var onAddToNewSession: ((String) -> Void)?
+
+    @discardableResult
+    static func perform(addToNewSession: Bool) -> Bool {
+        let text = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        pendingText = ""
+        if addToNewSession {
+            onAddToNewSession?(text)
+        } else {
+            onAddToChat?(text)
+        }
+        return true
+    }
+}
+
 /// Cursor-style agent transcript rendered in a WKWebView (markdown, tool cards, code).
 struct ChatTranscriptView: NSViewRepresentable {
     let messages: [AgentMessage]
     var sessionID: UUID
+    var onAddSelectionToChat: ((String) -> Void)? = nil
+    var onAddSelectionToNewSession: ((String) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -16,6 +41,9 @@ struct ChatTranscriptView: NSViewRepresentable {
         let uc = config.userContentController
         uc.add(context.coordinator, name: "openImage")
         uc.add(context.coordinator, name: "imageMenu")
+        uc.add(context.coordinator, name: "selectionAction")
+        uc.add(context.coordinator, name: "selectionChanged")
+        uc.add(context.coordinator, name: "copyText")
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
@@ -27,11 +55,15 @@ struct ChatTranscriptView: NSViewRepresentable {
 #endif
         context.coordinator.webView = webView
         context.coordinator.pendingSessionID = sessionID
+        context.coordinator.onAddSelectionToChat = onAddSelectionToChat
+        context.coordinator.onAddSelectionToNewSession = onAddSelectionToNewSession
         webView.loadHTMLString(Self.shellHTML, baseURL: URL(fileURLWithPath: "/"))
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onAddSelectionToChat = onAddSelectionToChat
+        context.coordinator.onAddSelectionToNewSession = onAddSelectionToNewSession
         context.coordinator.push(messages: messages, sessionID: sessionID)
     }
 
@@ -39,10 +71,19 @@ struct ChatTranscriptView: NSViewRepresentable {
         let uc = webView.configuration.userContentController
         uc.removeScriptMessageHandler(forName: "openImage")
         uc.removeScriptMessageHandler(forName: "imageMenu")
+        uc.removeScriptMessageHandler(forName: "selectionAction")
+        uc.removeScriptMessageHandler(forName: "selectionChanged")
+        uc.removeScriptMessageHandler(forName: "copyText")
+        if ChatSelectionHotkeys.pendingText.isEmpty == false {
+            // Selection dies with the web view.
+            ChatSelectionHotkeys.pendingText = ""
+        }
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
+        var onAddSelectionToChat: ((String) -> Void)?
+        var onAddSelectionToNewSession: ((String) -> Void)?
         private var ready = false
         private var pendingMessages: [AgentMessage] = []
         var pendingSessionID: UUID?
@@ -102,15 +143,17 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard let body = message.body as? [String: Any],
-                  let key = body["key"] as? String,
-                  !key.isEmpty,
-                  FileManager.default.fileExists(atPath: key) else { return }
+            guard let body = message.body as? [String: Any] else { return }
 
             switch message.name {
-            case "openImage":
-                ChatImageActions.open(path: key)
-            case "imageMenu":
+            case "openImage", "imageMenu":
+                guard let key = body["key"] as? String,
+                      !key.isEmpty,
+                      FileManager.default.fileExists(atPath: key) else { return }
+                if message.name == "openImage" {
+                    ChatImageActions.open(path: key)
+                    return
+                }
                 guard let webView else { return }
                 let clientX = CGFloat((body["x"] as? Double) ?? (body["x"] as? Int).map(Double.init) ?? 0)
                 let clientY = CGFloat((body["y"] as? Double) ?? (body["y"] as? Int).map(Double.init) ?? 0)
@@ -118,6 +161,28 @@ struct ChatTranscriptView: NSViewRepresentable {
                 let y = webView.isFlipped ? clientY : (webView.bounds.height - clientY)
                 let point = NSPoint(x: clientX, y: y)
                 ChatImageActions.showMenu(path: key, at: point, in: webView)
+            case "selectionChanged":
+                let text = (body["text"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                ChatSelectionHotkeys.pendingText = text
+            case "selectionAction":
+                guard let action = body["action"] as? String,
+                      let text = body["text"] as? String else { return }
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                ChatSelectionHotkeys.pendingText = ""
+                switch action {
+                case "chat":
+                    onAddSelectionToChat?(trimmed)
+                case "new":
+                    onAddSelectionToNewSession?(trimmed)
+                default:
+                    break
+                }
+            case "copyText":
+                guard let text = body["text"] as? String else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
             default:
                 break
             }
@@ -146,26 +211,40 @@ struct ChatTranscriptView: NSViewRepresentable {
                     "kind": kindName(msg.kind),
                     "text": msg.text
                 ]
-                if let path = msg.imagePath {
-                    dict["imageKey"] = path
-                    let video = Self.isVideoPath(path)
-                    if video {
-                        dict["mediaKind"] = "video"
-                    }
-                    if imageDataURLs[path] == nil {
-                        if video {
-                            if let poster = Self.videoPosterDataURL(path: path) {
-                                imageDataURLs[path] = poster
+                if msg.steered {
+                    dict["steered"] = true
+                }
+                let paths = msg.imagePaths
+                if !paths.isEmpty {
+                    // Prefer `media` array; keep legacy single-key fields for the first item.
+                    var mediaItems: [[String: String]] = []
+                    for path in paths {
+                        let video = Self.isVideoPath(path)
+                        var item: [String: String] = ["key": path]
+                        if video { item["kind"] = "video" }
+                        mediaItems.append(item)
+                        if imageDataURLs[path] == nil {
+                            if video {
+                                if let poster = Self.videoPosterDataURL(path: path) {
+                                    imageDataURLs[path] = poster
+                                }
+                            } else if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                                let mime = path.lowercased().hasSuffix(".jpg") || path.lowercased().hasSuffix(".jpeg")
+                                    ? "image/jpeg" : "image/png"
+                                imageDataURLs[path] = "data:\(mime);base64,\(data.base64EncodedString())"
                             }
-                        } else if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
-                            let mime = path.lowercased().hasSuffix(".jpg") || path.lowercased().hasSuffix(".jpeg")
-                                ? "image/jpeg" : "image/png"
-                            imageDataURLs[path] = "data:\(mime);base64,\(data.base64EncodedString())"
+                        }
+                        if let url = imageDataURLs[path], !imagesSentToPage.contains(path) {
+                            imagesSentToPage.insert(path)
+                            imageLoads.append(["key": path, "url": url])
                         }
                     }
-                    if let url = imageDataURLs[path], !imagesSentToPage.contains(path) {
-                        imagesSentToPage.insert(path)
-                        imageLoads.append(["key": path, "url": url])
+                    dict["media"] = mediaItems
+                    if let first = paths.first {
+                        dict["imageKey"] = first
+                        if Self.isVideoPath(first) {
+                            dict["mediaKind"] = "video"
+                        }
                     }
                 }
                 return dict
@@ -215,7 +294,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
     }
 
-    private static let shellHTML = """
+    static let shellHTML = """
     <!DOCTYPE html>
     <html>
     <head>
@@ -283,6 +362,22 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-radius: 14px;
         padding: 10px 12px;
         color: var(--text);
+      }
+      .msg.user .steer-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        margin: 6px 0 0;
+        font: 600 11px/1.2 var(--sans);
+        letter-spacing: 0.01em;
+        color: var(--text);
+        opacity: 0.62;
+      }
+      .msg.user .steer-badge svg {
+        width: 11px;
+        height: 11px;
+        flex: none;
+        opacity: 0.9;
       }
       .msg.assistant { align-self: stretch; padding: 2px 0; color: var(--text); min-width: 0; }
       .msg.tool-group {
@@ -354,12 +449,18 @@ struct ChatTranscriptView: NSViewRepresentable {
         font-size: 13px;
         color: var(--text);
       }
+      .msg .media-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
       .msg img.shot {
         display: block;
         max-width: min(280px, 100%);
         max-height: 180px;
         border-radius: 8px;
-        margin-bottom: 8px;
+        margin-bottom: 0;
         object-fit: contain;
         cursor: zoom-in;
       }
@@ -367,7 +468,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         position: relative;
         display: inline-block;
         max-width: min(280px, 100%);
-        margin-bottom: 8px;
+        margin-bottom: 0;
         cursor: pointer;
       }
       .msg .video-shot img.shot {
@@ -411,8 +512,17 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md h1 { font-size: 1.25em; }
       .md h2 { font-size: 1.12em; }
       .md h3 { font-size: 1.05em; }
-      .md ul, .md ol { margin: 0.45em 0; padding-left: 1.35em; }
+      .md ul, .md ol {
+        margin: 0.45em 0;
+        padding-left: 1.35em;
+      }
+      .md ol { list-style-type: decimal; list-style-position: outside; }
+      .md ul { list-style-type: disc; list-style-position: outside; }
+      .md ul ul { list-style-type: circle; }
+      .md ul ul ul { list-style-type: square; }
       .md li { margin: 0.2em 0; }
+      .md li + li { margin-top: 0.15em; }
+      .md li > ul, .md li > ol { margin: 0.15em 0; }
       .md a {
         color: var(--link);
         cursor: pointer;
@@ -424,23 +534,112 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md code {
         font-family: var(--mono);
         font-size: 0.9em;
+        color: var(--text);
         background: var(--code-bg);
         padding: 0.12em 0.35em;
         border-radius: 4px;
       }
-      .md pre {
+      .md .code-block {
+        position: relative;
+        margin: 0.7em 0;
+      }
+      .md .code-block pre {
         background: var(--pre-bg);
         border: 1px solid var(--border);
         border-radius: 10px;
-        padding: 10px 12px;
-        overflow-x: auto;
-        margin: 0.7em 0;
+        padding: 10px 40px 10px 12px;
+        margin: 0;
+        overflow-x: hidden;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        color: var(--text);
       }
-      .md pre code {
+      .md .code-block pre code {
         background: none;
         padding: 0;
         font-size: 13px;
         line-height: 1.45;
+        color: var(--text);
+        white-space: inherit;
+        overflow-wrap: inherit;
+        word-break: inherit;
+      }
+      .md .code-copy {
+        appearance: none;
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 1;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        margin: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--pre-bg);
+        color: var(--muted);
+        cursor: pointer;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .md .code-block.single .code-copy {
+        top: 50%;
+        transform: translateY(-50%);
+      }
+      .md .code-copy:hover {
+        color: var(--text);
+        border-color: var(--text);
+      }
+      .md .code-copy svg {
+        width: 13px;
+        height: 13px;
+        display: block;
+      }
+      .md .code-copy .icon-check { display: none; }
+      .md .code-copy.copied .icon-copy { display: none; }
+      .md .code-copy.copied .icon-check { display: block; }
+      .md .code-copy.copied {
+        color: #34c759;
+        border-color: rgba(52, 199, 89, 0.45);
+      }
+      /* Custom tip — native `title` is slow and system-styled. */
+      .md .code-copy[data-tip]::after {
+        content: attr(data-tip);
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 6px);
+        padding: 4px 8px;
+        border-radius: 6px;
+        background: rgba(20, 20, 22, 0.96);
+        color: #f2f2f7;
+        font: 600 11px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+        letter-spacing: -0.01em;
+        white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(2px);
+        transition: opacity 0.12s ease, transform 0.12s ease;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        z-index: 2;
+      }
+      .md .code-copy[data-tip]:hover::after,
+      .md .code-copy[data-tip]:focus-visible::after {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .md .code-copy.copied[data-tip]::after {
+        content: "Copied";
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .md .code-block.single .code-copy[data-tip]::after {
+        /* Vertically centered button — keep the tip above the chip, not over code. */
+        bottom: calc(50% + 18px);
       }
       .md blockquote {
         margin: 0.6em 0;
@@ -470,10 +669,104 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 40px 20px;
         font-size: 14px;
       }
+      #sel-toolbar {
+        display: none;
+        position: fixed;
+        z-index: 1000;
+        align-items: center;
+        gap: 0;
+        padding: 3px;
+        background: rgba(36, 36, 36, 0.96);
+        border: 1px solid rgba(255,255,255,0.16);
+        border-radius: 10px;
+        box-shadow: 0 10px 28px rgba(0,0,0,0.42);
+        -webkit-user-select: none;
+        user-select: none;
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+      }
+      @media (prefers-color-scheme: light) {
+        #sel-toolbar {
+          background: rgba(255,255,255,0.96);
+          border-color: rgba(0,0,0,0.12);
+          box-shadow: 0 10px 28px rgba(0,0,0,0.14);
+        }
+      }
+      #sel-toolbar button {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        font: 500 12.5px/1.2 var(--sans);
+        padding: 6px 10px;
+        border-radius: 7px;
+        cursor: pointer;
+        white-space: nowrap;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #sel-toolbar button:hover {
+        background: rgba(255,255,255,0.10);
+      }
+      @media (prefers-color-scheme: light) {
+        #sel-toolbar button:hover {
+          background: rgba(0,0,0,0.06);
+        }
+      }
+      #sel-toolbar .keys {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+      }
+      #sel-toolbar kbd {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 18px;
+        height: 18px;
+        padding: 0 4px;
+        border-radius: 4px;
+        background: rgba(255,255,255,0.10);
+        border: 1px solid rgba(255,255,255,0.14);
+        color: rgba(255,255,255,0.78);
+        font: 600 11px/1 var(--sans);
+        box-sizing: border-box;
+      }
+      @media (prefers-color-scheme: light) {
+        #sel-toolbar kbd {
+          background: rgba(0,0,0,0.06);
+          border-color: rgba(0,0,0,0.10);
+          color: rgba(0,0,0,0.72);
+        }
+      }
+      #sel-toolbar .sep {
+        width: 1px;
+        align-self: stretch;
+        margin: 4px 1px;
+        background: rgba(255,255,255,0.14);
+        flex: none;
+      }
+      @media (prefers-color-scheme: light) {
+        #sel-toolbar .sep {
+          background: rgba(0,0,0,0.10);
+        }
+      }
     </style>
     </head>
     <body>
     <div id="root"></div>
+    <div id="sel-toolbar" role="toolbar" aria-label="Selection actions">
+      <button type="button" data-action="chat" title="Add to chat (⌘L)">
+        <span>Add to chat</span>
+        <span class="keys" aria-hidden="true"><kbd>⌘</kbd><kbd>L</kbd></span>
+      </button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" data-action="new" title="Add to new session (⇧⌘L)">
+        <span>Add to new session</span>
+        <span class="keys" aria-hidden="true"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>L</kbd></span>
+      </button>
+    </div>
     <script>
     function esc(s) {
       return String(s)
@@ -499,11 +792,53 @@ struct ChatTranscriptView: NSViewRepresentable {
       const lines = String(md).replace(/\\r\\n?/g, '\\n').split('\\n');
       const out = [];
       let i = 0;
-      let inUl = false, inOl = false, inPara = false;
+      let inPara = false;
+      // Stack of open lists: { kind: 'ul'|'ol', level }. Nesting follows source indent
+      // (composer uses 4 spaces / level); a flat renderer used to squash every nest.
+      const listStack = [];
+      let openLi = false;
 
-      function closeLists() {
-        if (inUl) { out.push('</ul>'); inUl = false; }
-        if (inOl) { out.push('</ol>'); inOl = false; }
+      function listIndent(spaces) {
+        return Math.min(3, Math.floor(spaces / 4));
+      }
+      function closeListsTo(level) {
+        while (listStack.length > level) {
+          if (openLi) { out.push('</li>'); openLi = false; }
+          const top = listStack.pop();
+          out.push('</' + top.kind + '>');
+          // Parent <li> is still open after a nested list closes.
+          openLi = listStack.length > 0;
+        }
+      }
+      function closeLists() { closeListsTo(0); }
+      function pushListItem(kind, level, body, start) {
+        closePara();
+        // Pop deeper nests and same-level lists of a different kind.
+        while (listStack.length && (
+          listStack[listStack.length - 1].level > level
+          || (listStack[listStack.length - 1].level === level
+              && listStack[listStack.length - 1].kind !== kind)
+        )) {
+          if (openLi) { out.push('</li>'); openLi = false; }
+          const top = listStack.pop();
+          out.push('</' + top.kind + '>');
+          openLi = listStack.length > 0;
+        }
+        // Open any missing nest levels (at most one step past the parent).
+        while (!listStack.length || listStack[listStack.length - 1].level < level) {
+          const nextLevel = listStack.length ? listStack[listStack.length - 1].level + 1 : 0;
+          // Nested list lives inside the parent's open <li>.
+          if (kind === 'ol' && start > 1 && nextLevel === level) {
+            out.push('<ol start="' + start + '">');
+          } else {
+            out.push('<' + kind + '>');
+          }
+          listStack.push({ kind: kind, level: nextLevel });
+          openLi = false;
+        }
+        if (openLi) out.push('</li>');
+        out.push('<li>' + inlineMarkdown(body));
+        openLi = true;
       }
       function closePara() {
         if (inPara) { out.push('</p>'); inPara = false; }
@@ -523,7 +858,23 @@ struct ChatTranscriptView: NSViewRepresentable {
             buf.push(lines[i]);
             i++;
           }
-          out.push('<pre><code class="lang-' + esc(lang) + '">' + esc(buf.join('\\n')) + '</code></pre>');
+          const single = buf.length <= 1;
+          out.push(
+            '<div class="code-block' + (single ? ' single' : '') + '">'
+            + '<button type="button" class="code-copy" data-tip="Copy to clipboard" aria-label="Copy to clipboard">'
+            + '<svg class="icon-copy" viewBox="0 0 16 16" aria-hidden="true">'
+            + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>'
+            + '<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" '
+            + 'd="M3.5 10.5V3.8A1.3 1.3 0 0 1 4.8 2.5h6.7"/>'
+            + '</svg>'
+            + '<svg class="icon-check" viewBox="0 0 16 16" aria-hidden="true">'
+            + '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" '
+            + 'stroke-linejoin="round" d="M3.5 8.5 6.5 11.5 12.5 4.5"/>'
+            + '</svg>'
+            + '</button>'
+            + '<pre><code class="lang-' + esc(lang) + '">' + esc(buf.join('\\n')) + '</code></pre>'
+            + '</div>'
+          );
           i++;
           continue;
         }
@@ -557,26 +908,29 @@ struct ChatTranscriptView: NSViewRepresentable {
           continue;
         }
 
-        const ul = line.match(/^\\s*[-*]\\s+(.+)$/);
+        // Bullets: -, *, or composer nest glyphs • ○ ▪. Leading spaces set the nest level.
+        const ul = line.match(/^([ \\t]*)([-*•○◦▪■])\\s+(.+)$/);
         if (ul) {
-          closePara();
-          if (inOl) { out.push('</ol>'); inOl = false; }
-          if (!inUl) { out.push('<ul>'); inUl = true; }
-          out.push('<li>' + inlineMarkdown(ul[1]) + '</li>');
+          const spaces = ul[1].replace(/\\t/g, '    ').length;
+          pushListItem('ul', listIndent(spaces), ul[3], 1);
           i++; continue;
         }
 
-        const ol = line.match(/^\\s*(\\d+)\\.\\s+(.+)$/);
+        // Ordered: "1. item" — markdown allows every line to say 1.; the <ol> increments.
+        const ol = line.match(/^([ \\t]*)(\\d+)\\.\\s+(.+)$/);
         if (ol) {
-          closePara();
-          if (inUl) { out.push('</ul>'); inUl = false; }
-          if (!inOl) { out.push('<ol>'); inOl = true; }
-          out.push('<li>' + inlineMarkdown(ol[2]) + '</li>');
+          const spaces = ol[1].replace(/\\t/g, '    ').length;
+          pushListItem('ol', listIndent(spaces), ol[3], parseInt(ol[2], 10));
           i++; continue;
         }
 
         if (/^\\s*$/.test(line)) {
-          closePara(); closeLists();
+          closePara();
+          // Blank lines inside a list make it "loose" but must NOT restart numbering
+          // (lazy "1. / 1. / 1." would otherwise render as three separate 1s).
+          if (!listStack.length) {
+            closeLists();
+          }
           i++; continue;
         }
 
@@ -586,7 +940,8 @@ struct ChatTranscriptView: NSViewRepresentable {
         out.push(inlineMarkdown(line));
         i++;
       }
-      closePara(); closeLists();
+      closePara();
+      closeLists();
       return out.join('');
     }
 
@@ -679,25 +1034,45 @@ struct ChatTranscriptView: NSViewRepresentable {
         const m = block.item;
         const kind = m.kind || 'assistant';
         let body = '';
-        const image = m.image || (m.imageKey ? window.__images[m.imageKey] : null);
-        if (image) {
-          const keyAttr = m.imageKey ? ' data-key="' + esc(m.imageKey) + '"' : '';
-          if (m.mediaKind === 'video') {
-            body += '<div class="video-shot"' + keyAttr + ' title="Click to play">'
-              + '<img class="shot" src="' + image + '" alt="Screen recording">'
-              + '<span class="play"></span></div>';
-          } else {
-            body += '<img class="shot" src="' + image + '"' + keyAttr + ' alt="Screenshot" title="Click to open · Right-click to copy">';
-          }
-        } else if (m.imageKey && m.mediaKind === 'video') {
-          body += '<div class="video-shot" data-key="' + esc(m.imageKey) + '" title="Click to play">'
-            + '<div class="shot" style="width:160px;height:90px;background:rgba(0,0,0,0.35);border-radius:8px;"></div>'
-            + '<span class="play"></span></div>';
+        const mediaList = (m.media && m.media.length)
+          ? m.media
+          : (m.imageKey ? [{ key: m.imageKey, kind: m.mediaKind === 'video' ? 'video' : undefined }] : []);
+        if (mediaList.length) {
+          body += '<div class="media-row">';
+          mediaList.forEach(function(item) {
+            const key = item.key;
+            const image = m.image || (key ? window.__images[key] : null);
+            const keyAttr = key ? ' data-key="' + esc(key) + '"' : '';
+            if (item.kind === 'video') {
+              if (image) {
+                body += '<div class="video-shot"' + keyAttr + ' title="Click to play">'
+                  + '<img class="shot" src="' + image + '" alt="Screen recording">'
+                  + '<span class="play"></span></div>';
+              } else if (key) {
+                body += '<div class="video-shot"' + keyAttr + ' title="Click to play">'
+                  + '<div class="shot" style="width:160px;height:90px;background:rgba(0,0,0,0.35);border-radius:8px;"></div>'
+                  + '<span class="play"></span></div>';
+              }
+            } else if (image) {
+              body += '<img class="shot" src="' + image + '"' + keyAttr + ' alt="Screenshot" title="Click to open · Right-click to copy">';
+            }
+          });
+          body += '</div>';
         }
         if (kind === 'assistant' || kind === 'user') {
           body += '<div class="md">' + markdownToHTML(m.text || '') + '</div>';
         } else {
           body += esc(m.text || '');
+        }
+        if (kind === 'user' && m.steered) {
+          body += '<div class="steer-badge">'
+            + '<svg viewBox="0 0 16 16" aria-hidden="true">'
+            + '<circle cx="8" cy="8" r="6.1" fill="none" stroke="currentColor" stroke-width="1.5"/>'
+            + '<circle cx="8" cy="8" r="1.55" fill="currentColor"/>'
+            + '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" '
+            + 'd="M8 2.7v2.9M4.05 10.35l2.45-1.45M11.95 10.35l-2.45-1.45"/>'
+            + '</svg>'
+            + 'Steered</div>';
         }
         return '<div class="msg ' + kind + '" data-id="' + esc(m.id) + '">' + body + '</div>';
       }).join('');
@@ -739,6 +1114,24 @@ struct ChatTranscriptView: NSViewRepresentable {
       }
       root.querySelectorAll('img.shot[data-key]').forEach(bindMediaOpen);
       root.querySelectorAll('.video-shot[data-key]').forEach(bindMediaOpen);
+      root.querySelectorAll('.code-block .code-copy').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var block = btn.closest('.code-block');
+          var code = block && block.querySelector('pre code');
+          var text = code ? String(code.textContent || '') : '';
+          if (window.webkit && window.webkit.messageHandlers.copyText) {
+            window.webkit.messageHandlers.copyText.postMessage({ text: text });
+          }
+          btn.classList.add('copied');
+          if (btn._copyTimer) clearTimeout(btn._copyTimer);
+          btn._copyTimer = setTimeout(function() {
+            btn.classList.remove('copied');
+            btn._copyTimer = null;
+          }, 1200);
+        });
+      });
       if (forceScroll || nearBottom) {
         const goBottom = function() { window.scrollTo(0, document.body.scrollHeight); };
         goBottom();
@@ -747,7 +1140,119 @@ struct ChatTranscriptView: NSViewRepresentable {
           if (!img.complete) img.addEventListener('load', goBottom, { once: true });
         });
       }
+      hideSelectionToolbar();
     };
+
+    var pendingSelectionText = '';
+    var selToolbar = document.getElementById('sel-toolbar');
+
+    function postSelectionChanged(text) {
+      if (window.webkit && window.webkit.messageHandlers.selectionChanged) {
+        window.webkit.messageHandlers.selectionChanged.postMessage({ text: text || '' });
+      }
+    }
+
+    function hideSelectionToolbar() {
+      pendingSelectionText = '';
+      postSelectionChanged('');
+      if (selToolbar) selToolbar.style.display = 'none';
+    }
+
+    function currentSelectionText() {
+      var sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return '';
+      return String(sel.toString() || '').trim();
+    }
+
+    function runSelectionAction(action) {
+      var text = pendingSelectionText || currentSelectionText();
+      if (!action || !text) return false;
+      if (window.webkit && window.webkit.messageHandlers.selectionAction) {
+        window.webkit.messageHandlers.selectionAction.postMessage({
+          action: action,
+          text: text
+        });
+      }
+      hideSelectionToolbar();
+      var sel = window.getSelection();
+      if (sel) sel.removeAllRanges();
+      return true;
+    }
+
+    function updateSelectionToolbar() {
+      if (!selToolbar) return;
+      var text = currentSelectionText();
+      if (!text) {
+        hideSelectionToolbar();
+        return;
+      }
+      var sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) {
+        hideSelectionToolbar();
+        return;
+      }
+      var range = sel.getRangeAt(0);
+      var rect = range.getBoundingClientRect();
+      if (!rect || (rect.width === 0 && rect.height === 0)) {
+        hideSelectionToolbar();
+        return;
+      }
+      pendingSelectionText = text;
+      postSelectionChanged(text);
+      selToolbar.style.display = 'flex';
+      var tb = selToolbar.getBoundingClientRect();
+      var left = rect.left + (rect.width / 2) - (tb.width / 2);
+      var top = rect.top - tb.height - 8;
+      left = Math.max(8, Math.min(left, window.innerWidth - tb.width - 8));
+      if (top < 8) top = Math.min(window.innerHeight - tb.height - 8, rect.bottom + 8);
+      selToolbar.style.left = left + 'px';
+      selToolbar.style.top = top + 'px';
+    }
+
+    document.addEventListener('mouseup', function(e) {
+      if (selToolbar && selToolbar.contains(e.target)) return;
+      requestAnimationFrame(updateSelectionToolbar);
+    });
+    document.addEventListener('keydown', function(e) {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key !== 'l' && e.key !== 'L') return;
+      if (e.altKey) return;
+      var text = pendingSelectionText || currentSelectionText();
+      if (!text) return;
+      e.preventDefault();
+      e.stopPropagation();
+      runSelectionAction(e.shiftKey ? 'new' : 'chat');
+    }, true);
+    document.addEventListener('keyup', function(e) {
+      if (e.key === 'Escape') {
+        hideSelectionToolbar();
+        return;
+      }
+      // Shift+arrows / keyboard selection.
+      if (e.shiftKey || e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+          || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        requestAnimationFrame(updateSelectionToolbar);
+      }
+    });
+    document.addEventListener('selectionchange', function() {
+      if (!currentSelectionText()) hideSelectionToolbar();
+    });
+    document.addEventListener('scroll', function() {
+      if (selToolbar && selToolbar.style.display !== 'none') {
+        requestAnimationFrame(updateSelectionToolbar);
+      }
+    }, true);
+    if (selToolbar) {
+      selToolbar.addEventListener('mousedown', function(e) {
+        // Keep the selection while clicking toolbar buttons.
+        e.preventDefault();
+      });
+      selToolbar.addEventListener('click', function(e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button[data-action]') : null;
+        if (!btn) return;
+        runSelectionAction(btn.getAttribute('data-action'));
+      });
+    }
     </script>
     </body>
     </html>

@@ -98,14 +98,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func wireAgentFlow() {
-        sessionsPanel.onFollowUp = { [weak self] id, text, submit in
-            self?.sessionManager.followUp(sessionID: id, text: text, submit: submit)
+        sessionsPanel.onFollowUp = { [weak self] id, text, submit, imagePaths in
+            self?.sessionManager.followUp(
+                sessionID: id,
+                text: text,
+                submit: submit,
+                imagePaths: imagePaths
+            )
         }
         sessionsPanel.onStop = { [weak self] id in
             self?.sessionManager.stop(sessionID: id)
         }
         sessionsPanel.onNew = { [weak self] in
             self?.startBlankSession()
+        }
+        sessionsPanel.onNewWithDraft = { [weak self] text in
+            self?.startBlankSession(composerSeed: text)
         }
         sessionsPanel.onStartDrawing = { [weak self] in
             self?.startPointerWithSessions()
@@ -195,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    private func startBlankSession() {
+    private func startBlankSession(composerSeed: String? = nil) {
         let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else {
             settings.show(.workspaces)
@@ -205,6 +213,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             sessionsPanel.show()
         }
         if let session = sessionManager.createBlankSession() {
+            if let seed = composerSeed {
+                sessionsPanel.setComposerSeed(seed)
+            }
             sessionsPanel.openChat(for: session.id)
         }
     }
@@ -878,6 +889,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             keyEquivalent: "/"
         )
         cycle.keyEquivalentModifierMask = [.command]
+        // Same for selection → composer shortcuts (⌘L / ⇧⌘L).
+        let addChat = edit.addItem(
+            withTitle: "Add Selection to Chat",
+            action: #selector(addChatSelectionToChat),
+            keyEquivalent: "l"
+        )
+        addChat.keyEquivalentModifierMask = [.command]
+        let addNew = edit.addItem(
+            withTitle: "Add Selection to New Session",
+            action: #selector(addChatSelectionToNewSession),
+            keyEquivalent: "l"
+        )
+        addNew.keyEquivalentModifierMask = [.command, .shift]
         editItem.submenu = edit
         main.addItem(editItem)
         return main
@@ -892,6 +916,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
               let id = sessionsPanel.selectedSessionID,
               let session = sessionStore.session(id: id) else { return }
         session.cycleFavorite()
+    }
+
+    @objc private func addChatSelectionToChat() {
+        _ = ChatSelectionHotkeys.perform(addToNewSession: false)
+    }
+
+    @objc private func addChatSelectionToNewSession() {
+        _ = ChatSelectionHotkeys.perform(addToNewSession: true)
+    }
+
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(addChatSelectionToChat), #selector(addChatSelectionToNewSession):
+            return sessionsPanel.isVisible
+                && sessionsPanel.selectedSessionID != nil
+                && !ChatSelectionHotkeys.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default:
+            return true
+        }
     }
 
     @objc private func archiveSelectedSession() {

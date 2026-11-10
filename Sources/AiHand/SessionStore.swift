@@ -21,15 +21,86 @@ struct AgentMessage: Identifiable, Equatable, Codable {
     let id: UUID
     var kind: AgentMessageKind
     var text: String
-    var imagePath: String?
+    /// Attached media paths (screenshots / pasted images / videos).
+    var imagePaths: [String]
+    /// True when this user turn interrupted an in-flight run (⌘↩ / steer).
+    var steered: Bool
     var createdAt: Date
 
-    init(id: UUID = UUID(), kind: AgentMessageKind, text: String, imagePath: String? = nil, createdAt: Date = Date()) {
+    /// First attachment — kept for call sites that only need one path.
+    var imagePath: String? {
+        get { imagePaths.first }
+        set {
+            if let newValue {
+                if imagePaths.isEmpty {
+                    imagePaths = [newValue]
+                } else {
+                    imagePaths[0] = newValue
+                }
+            } else {
+                imagePaths = []
+            }
+        }
+    }
+
+    init(
+        id: UUID = UUID(),
+        kind: AgentMessageKind,
+        text: String,
+        imagePath: String? = nil,
+        imagePaths: [String] = [],
+        steered: Bool = false,
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.kind = kind
         self.text = text
-        self.imagePath = imagePath
+        if !imagePaths.isEmpty {
+            self.imagePaths = imagePaths
+        } else if let imagePath {
+            self.imagePaths = [imagePath]
+        } else {
+            self.imagePaths = []
+        }
+        self.steered = steered
         self.createdAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, text, imagePath, imagePaths, steered, createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decode(AgentMessageKind.self, forKey: .kind)
+        text = try c.decode(String.self, forKey: .text)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        steered = try c.decodeIfPresent(Bool.self, forKey: .steered) ?? false
+        if let paths = try c.decodeIfPresent([String].self, forKey: .imagePaths), !paths.isEmpty {
+            imagePaths = paths
+        } else if let one = try c.decodeIfPresent(String.self, forKey: .imagePath) {
+            imagePaths = [one]
+        } else {
+            imagePaths = []
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(text, forKey: .text)
+        try c.encode(createdAt, forKey: .createdAt)
+        if steered {
+            try c.encode(true, forKey: .steered)
+        }
+        if imagePaths.count == 1 {
+            try c.encode(imagePaths[0], forKey: .imagePath)
+        } else if imagePaths.count > 1 {
+            try c.encode(imagePaths, forKey: .imagePaths)
+            try c.encode(imagePaths[0], forKey: .imagePath)
+        }
     }
 }
 
@@ -353,6 +424,20 @@ final class SessionStore: ObservableObject {
         return (inProgress, succeeded)
     }
 
+    /// True when any session on this workspace path + branch is actively running.
+    func hasWorkingSession(
+        for workspace: String,
+        branch: String = "",
+        connectionID: UUID? = nil
+    ) -> Bool {
+        allSessions.contains {
+            Self.sameConnection($0.connectionID, connectionID)
+                && Self.sameWorkspace($0.workspace, workspace)
+                && Self.sameGitBranch($0.gitBranch, branch)
+                && $0.status == .working
+        }
+    }
+
     init() {
         syncFromPreferences(clearSelectionIfNeeded: false)
         load()
@@ -615,7 +700,7 @@ final class SessionStore: ObservableObject {
         var paths = Set<String>()
         if let path = session.screenshotPath { paths.insert(path) }
         for message in session.messages {
-            if let path = message.imagePath { paths.insert(path) }
+            for path in message.imagePaths { paths.insert(path) }
         }
         let fm = FileManager.default
         for path in paths {

@@ -6,3 +6,6 @@ dist/
 *.zip
 assets/unused/
 .debug-codesign-identity
+
+# Local MarkdownEngine spike clone (not vendored)
+.spike-markdown-engine/
