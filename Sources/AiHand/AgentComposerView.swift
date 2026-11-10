@@ -108,7 +108,7 @@ struct AgentComposerView: View {
             }
 
             promptField
-                .help("Type @ for files · / for skills · ⇧↩ for a new line · ⌘V / drop to attach files")
+                .help("Type @ for files · / for skills · Enter send · ⇧↩ list / code newline · Tab / ⇧Tab indent · ⌘↩ send · ⌘V / drop to attach")
 
             HStack(alignment: .center, spacing: 6) {
                 composerPlusButton
@@ -138,6 +138,11 @@ struct AgentComposerView: View {
         }
         .onChange(of: text) { _ in
             updateAutocomplete(for: text)
+            // Submit clears the draft while the editor height binding may still
+            // hold the multiline value — snap back so SoftChrome doesn't stay tall.
+            if text.isEmpty, promptEditorHeight > 28 {
+                promptEditorHeight = 22
+            }
             onLayoutNeeded?()
         }
         .onChange(of: skillAC.isActive) { active in
@@ -175,18 +180,17 @@ struct AgentComposerView: View {
         skillAC.configure(workspace: workspace, connectionID: conn)
         skillAC.readText = { text }
         skillAC.writeText = { text = $0 }
+        skillAC.onPick = { [self] skill in
+            applySkill(skill)
+        }
         fileAC.configure(workspace: workspace, connectionID: conn)
         fileAC.readText = { text }
         fileAC.writeText = { text = $0 }
         let attachBinding = attachments
         let ws = workspace
         fileAC.onPick = { [self] entry in
-            // @ query already removed by FileAutocomplete; append an inline chip token.
-            appendInlineFileChipToken(
-                path: absolutePath(for: entry),
-                isDirectory: entry.isDirectory
-            )
-            onLayoutNeeded?()
+            // Keyboard pick — same deferred path as click (avoid list teardown crashes).
+            applyFile(entry)
             _ = attachBinding
             _ = ws
         }
@@ -223,12 +227,15 @@ struct AgentComposerView: View {
                 onSubmit: handleSubmit,
                 onHeightChange: { onLayoutNeeded?() }
             )
-            .frame(maxWidth: .infinity, minHeight: promptEditorHeight, maxHeight: promptEditorHeight, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: promptEditorHeight, maxHeight: promptEditorHeight, alignment: .topLeading)
+            // NSTextView can paint past its frame; without this, lines sit on + / Shortcuts.
+            .clipped()
         }
         // Match toolbar inset (SessionChatView 12 + row 2 → 14pt).
+        // Keep a little air above + / Shortcuts so list lines never sit under them.
         .padding(.horizontal, 2)
         .padding(.top, 6)
-        .padding(.bottom, 0)
+        .padding(.bottom, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         // No inset field chrome — share the panel’s SoftChrome card fill.
         .background(
@@ -527,8 +534,10 @@ struct AgentComposerView: View {
             if isWorking {
                 return [
                     ("Enter", "queue"),
-                    ("⇧↩", "newline"),
                     ("⌘↩", "steer"),
+                    ("⇧↩", "list / code newline"),
+                    ("Tab", "indent list"),
+                    ("⇧Tab", "outdent / unlist"),
                     ("⌃C", "stop"),
                     ("⌘/", "model"),
                 ]
@@ -536,8 +545,11 @@ struct AgentComposerView: View {
             return [
                 ("@", "files"),
                 ("/", "skills"),
-                ("⇧↩", "newline"),
-                ("Enter", "send / next list item"),
+                ("Enter", "send"),
+                ("⌘↩", "send"),
+                ("⇧↩", "list / code newline"),
+                ("Tab", "indent list"),
+                ("⇧Tab", "outdent / unlist"),
                 ("⌘V", "paste file"),
                 ("⌘L", "add selection"),
                 ("⇧⌘L", "selection → new"),
@@ -546,6 +558,9 @@ struct AgentComposerView: View {
         }
         return [
             ("Enter", "send to agent"),
+            ("⌘↩", "send"),
+            ("⇧↩", "list / code newline"),
+            ("Tab / ⇧Tab", "indent / outdent"),
             ("Esc", "cancel"),
         ]
     }
@@ -647,26 +662,34 @@ struct AgentComposerView: View {
     }
 
     private func applySkill(_ skill: AgentSkill) {
-        var next = text
-        skillAC.apply(skill, to: &next)
-        text = next
+        // Defer — mutating @Published / tearing down SkillSuggestionList's ScrollView
+        // inside the Button action crashes SwiftUI Observation (EXC_BAD_ACCESS).
+        DispatchQueue.main.async {
+            var next = self.text
+            self.skillAC.apply(skill, to: &next)
+            self.text = next
+            self.focused = true
+            ComposerFieldEditor.setStringPlacingCaretAtEnd(next)
+            self.onLayoutNeeded?()
+        }
     }
 
     private func applySelectedSkill() {
-        var next = text
-        skillAC.applySelected(to: &next)
-        text = next
+        guard skillAC.matches.indices.contains(skillAC.selectedIndex) else { return }
+        applySkill(skillAC.matches[skillAC.selectedIndex])
     }
 
     private func applyFile(_ entry: WorkspaceFileEntry) {
-        replaceAtQuery(withChipFor: entry)
-        onLayoutNeeded?()
+        // Same deferral as skills — avoid tearing down FileSuggestionList mid-click.
+        DispatchQueue.main.async {
+            self.replaceAtQuery(withChipFor: entry)
+            self.onLayoutNeeded?()
+        }
     }
 
     private func applySelectedFile() {
         guard fileAC.matches.indices.contains(fileAC.selectedIndex) else { return }
-        replaceAtQuery(withChipFor: fileAC.matches[fileAC.selectedIndex])
-        onLayoutNeeded?()
+        applyFile(fileAC.matches[fileAC.selectedIndex])
     }
 
     private func absolutePath(for entry: WorkspaceFileEntry) -> String {
@@ -678,6 +701,8 @@ struct AgentComposerView: View {
 
     /// Swap the active `@…` token for an inline chip in one draft update (avoids wipe races).
     private func replaceAtQuery(withChipFor entry: WorkspaceFileEntry) {
+        // Dismiss before mutating text so onChange / index refresh can't reopen the list.
+        fileAC.clear()
         var next = text
         let token = ComposerFileChipToken.serialize(
             path: absolutePath(for: entry),
@@ -688,9 +713,10 @@ struct AgentComposerView: View {
         } else {
             appendChipToken(token, to: &next)
         }
-        fileAC.clear()
         text = next
+        fileAC.clear()
         focused = true
+        ComposerFieldEditor.setStringPlacingCaretAtEnd(next)
     }
 
     private func appendInlineFileChipToken(path: String, isDirectory: Bool) {
@@ -748,7 +774,7 @@ struct AgentComposerView: View {
         return true
     }
 
-    /// ⇧↩ newline + ⌘V media paste into the focused field editor / composer.
+    /// ⌘V media paste + Esc dismiss for the + menu (Return owned by the prompt editor).
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -779,36 +805,9 @@ struct AgentComposerView: View {
                 return nil
             }
 
-            guard let textView = ComposerFieldEditor.editableTextView(), textView.isEditable else { return event }
-            guard code == kVK_Return || code == kVK_ANSI_KeypadEnter else { return event }
-            guard flags.contains(.shift),
-                  !flags.contains(.command),
-                  !flags.contains(.option),
-                  !flags.contains(.control) else {
-                return event
-            }
-
-            let range = textView.selectedRange()
-            let ns = textView.string as NSString
-            let updated = ns.replacingCharacters(in: range, with: "\n")
-            // Mutate the live editor — binding-only updates often don't reach it.
-            textView.string = updated
-            text = updated
-            let insertedAt = min(range.location + 1, (updated as NSString).length)
-            textView.setSelectedRange(NSRange(location: insertedAt, length: 0))
-            if let prompt = textView as? ComposerPromptTextView {
-                prompt.restyleAfterExternalEdit()
-            } else if let storage = textView.textStorage {
-                ComposerMarkdownStyler.apply(
-                    to: storage,
-                    darkChrome: colorScheme == .dark
-                )
-            }
-
-            DispatchQueue.main.async {
-                onLayoutNeeded?()
-            }
-            return nil
+            // Return / ⇧↩ / ⌘↩ are owned by ComposerPromptEditor.doCommandBy
+            // (chat map: Enter submit, ⇧↩ structure, ⌘↩ send/steer).
+            return event
         }
     }
 
@@ -928,6 +927,7 @@ enum ComposerFieldEditor {
     }
 
     /// Sync the live prompt editor to `string` and leave an empty caret at the end.
+    /// Uses chip-aware apply so `⟦file:…⟧` / `⟦skill:…⟧` stay as attachments.
     static func setStringPlacingCaretAtEnd(_ string: String) {
         placeCaretAtEnd(of: string, attemptsRemaining: 10)
     }
@@ -935,21 +935,23 @@ enum ComposerFieldEditor {
     private static func placeCaretAtEnd(of string: String, attemptsRemaining: Int) {
         let apply: () -> Bool = {
             guard let textView = editableTextView() else { return false }
-            if textView.string != string {
+            if let prompt = textView as? ComposerPromptTextView,
+               let coordinator = prompt.parent {
+                let current = textView.textStorage.map { ComposerFileChipCodec.serialize($0) }
+                    ?? textView.string
+                if current != string {
+                    coordinator.applyText(string, force: true)
+                }
+            } else if textView.string != string {
                 textView.string = string
+                if let storage = textView.textStorage {
+                    ComposerMarkdownStyler.apply(to: storage, darkChrome: nil)
+                }
             }
-            if let prompt = textView as? ComposerPromptTextView {
-                prompt.restyleAfterExternalEdit()
-            } else if let storage = textView.textStorage {
-                ComposerMarkdownStyler.apply(to: storage)
-            }
-            let end = (string as NSString).length
+            let end = textView.textStorage?.length ?? (textView.string as NSString).length
             let caret = NSRange(location: end, length: 0)
             textView.setSelectedRange(caret)
             textView.scrollRangeToVisible(caret)
-            if textView.selectedRange().length != 0 {
-                textView.setSelectedRange(caret)
-            }
             return textView.selectedRange().length == 0
                 && textView.selectedRange().location == end
         }

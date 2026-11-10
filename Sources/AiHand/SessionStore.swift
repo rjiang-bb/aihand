@@ -424,6 +424,20 @@ final class SessionStore: ObservableObject {
         return (inProgress, succeeded)
     }
 
+    /// True when any session on this workspace path + branch is actively running.
+    func hasWorkingSession(
+        for workspace: String,
+        branch: String = "",
+        connectionID: UUID? = nil
+    ) -> Bool {
+        allSessions.contains {
+            Self.sameConnection($0.connectionID, connectionID)
+                && Self.sameWorkspace($0.workspace, workspace)
+                && Self.sameGitBranch($0.gitBranch, branch)
+                && $0.status == .working
+        }
+    }
+
     init() {
         syncFromPreferences(clearSelectionIfNeeded: false)
         load()

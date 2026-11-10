@@ -8,12 +8,17 @@ final class SkillAutocompleteController: ObservableObject {
     @Published private(set) var isActive: Bool = false
 
     private var skills: [AgentSkill] = []
-    private var queryRange: Range<String.Index>?
     private var keyMonitor: Any?
     private var workspace: String = ""
     private var connectionID: UUID?
+    /// Bumped on every dismiss so in-flight skill scans can't reopen a dismissed picker.
+    private var dismissGeneration: Int = 0
+    /// After a pick, ignore `/<name>` until the user starts a new `/` token.
+    private var committedSkillName: String?
     var readText: () -> String = { "" }
     var writeText: (String) -> Void = { _ in }
+    /// Host replaces the `/query` with the chosen skill (same path as click).
+    var onPick: ((AgentSkill) -> Void)?
 
     func configure(workspace: String, connectionID: UUID? = Preferences.agentWorkspaceConnectionID) {
         if self.workspace != workspace || self.connectionID != connectionID {
@@ -29,7 +34,7 @@ final class SkillAutocompleteController: ObservableObject {
     func refreshSkills() {
         let ws = workspace
         let conn = connectionID
-        // Remote skill scans are SSH — never block the composer/main thread.
+        let gen = dismissGeneration
         if conn != nil {
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let list = SkillCatalog.skills(
@@ -39,6 +44,11 @@ final class SkillAutocompleteController: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self, self.workspace == ws, self.connectionID == conn else { return }
                     self.skills = list
+                    guard self.dismissGeneration == gen else { return }
+                    let text = self.readText()
+                    if SkillCatalog.slashQuery(in: text) != nil {
+                        self.update(text: text)
+                    }
                 }
             }
             return
@@ -50,11 +60,35 @@ final class SkillAutocompleteController: ObservableObject {
     }
 
     func update(text: String) {
+        // Keep / reopen the catalog even if teardown cleared the in-memory list.
+        if skills.isEmpty {
+            refreshSkills()
+        }
+
         guard let slash = SkillCatalog.slashQuery(in: text) else {
-            clear()
+            // No active `/token` — drop commit lock so the next `/` can open the picker.
+            committedSkillName = nil
+            dismiss(clearCommit: false)
             return
         }
-        queryRange = slash.range
+
+        // Bare `/` always opens the picker (new token).
+        if slash.query.isEmpty {
+            committedSkillName = nil
+        } else if let committed = committedSkillName, slash.query == committed {
+            // Still sitting on the just-picked `/name` (space lost) — stay dismissed.
+            dismiss(clearCommit: false)
+            return
+        } else if let committed = committedSkillName, !committed.hasPrefix(slash.query) {
+            // Diverged from the committed name — allow suggestions again.
+            committedSkillName = nil
+        } else if let committed = committedSkillName,
+                  slash.query.count < committed.count,
+                  committed.hasPrefix(slash.query) {
+            // User is backspacing the committed name — allow suggestions.
+            committedSkillName = nil
+        }
+
         matches = SkillCatalog.matches(query: slash.query, in: skills)
         if selectedIndex >= matches.count {
             selectedIndex = max(0, matches.count - 1)
@@ -63,26 +97,44 @@ final class SkillAutocompleteController: ObservableObject {
         if isActive {
             installKeyMonitor()
         } else {
-            // Keep monitor if user might keep typing after a failed filter — remove when idle.
-            if matches.isEmpty { /* stay ready */ }
+            removeKeyMonitor()
         }
     }
 
+    /// Hide the list without wiping the skill cache.
     func clear() {
+        dismiss(clearCommit: false)
+    }
+
+    private func dismiss(clearCommit: Bool) {
+        dismissGeneration &+= 1
+        if clearCommit { committedSkillName = nil }
         matches = []
-        queryRange = nil
         selectedIndex = 0
-        isActive = false
+        if isActive { isActive = false }
         removeKeyMonitor()
     }
 
     func apply(_ skill: AgentSkill, to text: inout String) {
-        if let range = queryRange ?? SkillCatalog.slashQuery(in: text)?.range {
-            text.replaceSubrange(range, with: "/\(skill.name) ")
+        let token = ComposerFileChipToken.serializeSkill(skill.name)
+        if let range = SkillCatalog.slashQuery(in: text)?.range {
+            text.replaceSubrange(range, with: token + " ")
+        } else if text.isEmpty || text.hasSuffix(" ") || text.hasSuffix("\n") {
+            text += token + " "
         } else {
-            text = "/\(skill.name) "
+            text += " " + token + " "
         }
-        clear()
+        committedSkillName = skill.name
+        // Defer emptying matches so SwiftUI can finish the Button / ScrollView tear-down.
+        isActive = false
+        removeKeyMonitor()
+        dismissGeneration &+= 1
+        let gen = dismissGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.dismissGeneration == gen else { return }
+            self.matches = []
+            self.selectedIndex = 0
+        }
     }
 
     func applySelected(to text: inout String) {
@@ -91,9 +143,11 @@ final class SkillAutocompleteController: ObservableObject {
     }
 
     func applySelectedFromMonitor() {
-        var text = readText()
-        applySelected(to: &text)
-        writeText(text)
+        let skill = matches.indices.contains(selectedIndex) ? matches[selectedIndex] : nil
+        isActive = false
+        removeKeyMonitor()
+        guard let skill else { return }
+        onPick?(skill)
     }
 
     func moveSelection(delta: Int) {
@@ -115,12 +169,15 @@ final class SkillAutocompleteController: ObservableObject {
             case 48: // tab
                 Task { @MainActor in self.applySelectedFromMonitor() }
                 return nil
-            case 36, 76: // return — Shift+Return inserts a newline (handled elsewhere)
+            case 36, 76: // return
                 if event.modifierFlags.contains(.shift) { return event }
                 Task { @MainActor in self.applySelectedFromMonitor() }
                 return nil
             case 53: // escape
-                Task { @MainActor in self.clear() }
+                Task { @MainActor in
+                    self.committedSkillName = nil
+                    self.clear()
+                }
                 return nil
             default:
                 return event
@@ -129,11 +186,9 @@ final class SkillAutocompleteController: ObservableObject {
     }
 
     func teardown() {
-        removeKeyMonitor()
-        matches = []
-        queryRange = nil
-        selectedIndex = 0
-        isActive = false
+        // Keep `skills` cached — wiping it made the 2nd `/` show an empty picker.
+        committedSkillName = nil
+        clear()
     }
 
     private func removeKeyMonitor() {

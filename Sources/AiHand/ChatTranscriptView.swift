@@ -43,6 +43,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         uc.add(context.coordinator, name: "imageMenu")
         uc.add(context.coordinator, name: "selectionAction")
         uc.add(context.coordinator, name: "selectionChanged")
+        uc.add(context.coordinator, name: "copyText")
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
@@ -72,6 +73,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         uc.removeScriptMessageHandler(forName: "imageMenu")
         uc.removeScriptMessageHandler(forName: "selectionAction")
         uc.removeScriptMessageHandler(forName: "selectionChanged")
+        uc.removeScriptMessageHandler(forName: "copyText")
         if ChatSelectionHotkeys.pendingText.isEmpty == false {
             // Selection dies with the web view.
             ChatSelectionHotkeys.pendingText = ""
@@ -177,6 +179,10 @@ struct ChatTranscriptView: NSViewRepresentable {
                 default:
                     break
                 }
+            case "copyText":
+                guard let text = body["text"] as? String else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
             default:
                 break
             }
@@ -506,8 +512,17 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md h1 { font-size: 1.25em; }
       .md h2 { font-size: 1.12em; }
       .md h3 { font-size: 1.05em; }
-      .md ul, .md ol { margin: 0.45em 0; padding-left: 1.35em; }
+      .md ul, .md ol {
+        margin: 0.45em 0;
+        padding-left: 1.35em;
+      }
+      .md ol { list-style-type: decimal; list-style-position: outside; }
+      .md ul { list-style-type: disc; list-style-position: outside; }
+      .md ul ul { list-style-type: circle; }
+      .md ul ul ul { list-style-type: square; }
       .md li { margin: 0.2em 0; }
+      .md li + li { margin-top: 0.15em; }
+      .md li > ul, .md li > ol { margin: 0.15em 0; }
       .md a {
         color: var(--link);
         cursor: pointer;
@@ -524,21 +539,107 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 0.12em 0.35em;
         border-radius: 4px;
       }
-      .md pre {
+      .md .code-block {
+        position: relative;
+        margin: 0.7em 0;
+      }
+      .md .code-block pre {
         background: var(--pre-bg);
         border: 1px solid var(--border);
         border-radius: 10px;
-        padding: 10px 12px;
-        overflow-x: auto;
-        margin: 0.7em 0;
+        padding: 10px 40px 10px 12px;
+        margin: 0;
+        overflow-x: hidden;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
         color: var(--text);
       }
-      .md pre code {
+      .md .code-block pre code {
         background: none;
         padding: 0;
         font-size: 13px;
         line-height: 1.45;
         color: var(--text);
+        white-space: inherit;
+        overflow-wrap: inherit;
+        word-break: inherit;
+      }
+      .md .code-copy {
+        appearance: none;
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 1;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        margin: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--pre-bg);
+        color: var(--muted);
+        cursor: pointer;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .md .code-block.single .code-copy {
+        top: 50%;
+        transform: translateY(-50%);
+      }
+      .md .code-copy:hover {
+        color: var(--text);
+        border-color: var(--text);
+      }
+      .md .code-copy svg {
+        width: 13px;
+        height: 13px;
+        display: block;
+      }
+      .md .code-copy .icon-check { display: none; }
+      .md .code-copy.copied .icon-copy { display: none; }
+      .md .code-copy.copied .icon-check { display: block; }
+      .md .code-copy.copied {
+        color: #34c759;
+        border-color: rgba(52, 199, 89, 0.45);
+      }
+      /* Custom tip — native `title` is slow and system-styled. */
+      .md .code-copy[data-tip]::after {
+        content: attr(data-tip);
+        position: absolute;
+        right: 0;
+        bottom: calc(100% + 6px);
+        padding: 4px 8px;
+        border-radius: 6px;
+        background: rgba(20, 20, 22, 0.96);
+        color: #f2f2f7;
+        font: 600 11px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+        letter-spacing: -0.01em;
+        white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        transform: translateY(2px);
+        transition: opacity 0.12s ease, transform 0.12s ease;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        z-index: 2;
+      }
+      .md .code-copy[data-tip]:hover::after,
+      .md .code-copy[data-tip]:focus-visible::after {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .md .code-copy.copied[data-tip]::after {
+        content: "Copied";
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .md .code-block.single .code-copy[data-tip]::after {
+        /* Vertically centered button — keep the tip above the chip, not over code. */
+        bottom: calc(50% + 18px);
       }
       .md blockquote {
         margin: 0.6em 0;
@@ -691,11 +792,53 @@ struct ChatTranscriptView: NSViewRepresentable {
       const lines = String(md).replace(/\\r\\n?/g, '\\n').split('\\n');
       const out = [];
       let i = 0;
-      let inUl = false, inOl = false, inPara = false;
+      let inPara = false;
+      // Stack of open lists: { kind: 'ul'|'ol', level }. Nesting follows source indent
+      // (composer uses 4 spaces / level); a flat renderer used to squash every nest.
+      const listStack = [];
+      let openLi = false;
 
-      function closeLists() {
-        if (inUl) { out.push('</ul>'); inUl = false; }
-        if (inOl) { out.push('</ol>'); inOl = false; }
+      function listIndent(spaces) {
+        return Math.min(3, Math.floor(spaces / 4));
+      }
+      function closeListsTo(level) {
+        while (listStack.length > level) {
+          if (openLi) { out.push('</li>'); openLi = false; }
+          const top = listStack.pop();
+          out.push('</' + top.kind + '>');
+          // Parent <li> is still open after a nested list closes.
+          openLi = listStack.length > 0;
+        }
+      }
+      function closeLists() { closeListsTo(0); }
+      function pushListItem(kind, level, body, start) {
+        closePara();
+        // Pop deeper nests and same-level lists of a different kind.
+        while (listStack.length && (
+          listStack[listStack.length - 1].level > level
+          || (listStack[listStack.length - 1].level === level
+              && listStack[listStack.length - 1].kind !== kind)
+        )) {
+          if (openLi) { out.push('</li>'); openLi = false; }
+          const top = listStack.pop();
+          out.push('</' + top.kind + '>');
+          openLi = listStack.length > 0;
+        }
+        // Open any missing nest levels (at most one step past the parent).
+        while (!listStack.length || listStack[listStack.length - 1].level < level) {
+          const nextLevel = listStack.length ? listStack[listStack.length - 1].level + 1 : 0;
+          // Nested list lives inside the parent's open <li>.
+          if (kind === 'ol' && start > 1 && nextLevel === level) {
+            out.push('<ol start="' + start + '">');
+          } else {
+            out.push('<' + kind + '>');
+          }
+          listStack.push({ kind: kind, level: nextLevel });
+          openLi = false;
+        }
+        if (openLi) out.push('</li>');
+        out.push('<li>' + inlineMarkdown(body));
+        openLi = true;
       }
       function closePara() {
         if (inPara) { out.push('</p>'); inPara = false; }
@@ -715,7 +858,23 @@ struct ChatTranscriptView: NSViewRepresentable {
             buf.push(lines[i]);
             i++;
           }
-          out.push('<pre><code class="lang-' + esc(lang) + '">' + esc(buf.join('\\n')) + '</code></pre>');
+          const single = buf.length <= 1;
+          out.push(
+            '<div class="code-block' + (single ? ' single' : '') + '">'
+            + '<button type="button" class="code-copy" data-tip="Copy to clipboard" aria-label="Copy to clipboard">'
+            + '<svg class="icon-copy" viewBox="0 0 16 16" aria-hidden="true">'
+            + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>'
+            + '<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" '
+            + 'd="M3.5 10.5V3.8A1.3 1.3 0 0 1 4.8 2.5h6.7"/>'
+            + '</svg>'
+            + '<svg class="icon-check" viewBox="0 0 16 16" aria-hidden="true">'
+            + '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" '
+            + 'stroke-linejoin="round" d="M3.5 8.5 6.5 11.5 12.5 4.5"/>'
+            + '</svg>'
+            + '</button>'
+            + '<pre><code class="lang-' + esc(lang) + '">' + esc(buf.join('\\n')) + '</code></pre>'
+            + '</div>'
+          );
           i++;
           continue;
         }
@@ -749,26 +908,29 @@ struct ChatTranscriptView: NSViewRepresentable {
           continue;
         }
 
-        const ul = line.match(/^\\s*[-*]\\s+(.+)$/);
+        // Bullets: -, *, or composer nest glyphs • ○ ▪. Leading spaces set the nest level.
+        const ul = line.match(/^([ \\t]*)([-*•○◦▪■])\\s+(.+)$/);
         if (ul) {
-          closePara();
-          if (inOl) { out.push('</ol>'); inOl = false; }
-          if (!inUl) { out.push('<ul>'); inUl = true; }
-          out.push('<li>' + inlineMarkdown(ul[1]) + '</li>');
+          const spaces = ul[1].replace(/\\t/g, '    ').length;
+          pushListItem('ul', listIndent(spaces), ul[3], 1);
           i++; continue;
         }
 
-        const ol = line.match(/^\\s*(\\d+)\\.\\s+(.+)$/);
+        // Ordered: "1. item" — markdown allows every line to say 1.; the <ol> increments.
+        const ol = line.match(/^([ \\t]*)(\\d+)\\.\\s+(.+)$/);
         if (ol) {
-          closePara();
-          if (inUl) { out.push('</ul>'); inUl = false; }
-          if (!inOl) { out.push('<ol>'); inOl = true; }
-          out.push('<li>' + inlineMarkdown(ol[2]) + '</li>');
+          const spaces = ol[1].replace(/\\t/g, '    ').length;
+          pushListItem('ol', listIndent(spaces), ol[3], parseInt(ol[2], 10));
           i++; continue;
         }
 
         if (/^\\s*$/.test(line)) {
-          closePara(); closeLists();
+          closePara();
+          // Blank lines inside a list make it "loose" but must NOT restart numbering
+          // (lazy "1. / 1. / 1." would otherwise render as three separate 1s).
+          if (!listStack.length) {
+            closeLists();
+          }
           i++; continue;
         }
 
@@ -778,7 +940,8 @@ struct ChatTranscriptView: NSViewRepresentable {
         out.push(inlineMarkdown(line));
         i++;
       }
-      closePara(); closeLists();
+      closePara();
+      closeLists();
       return out.join('');
     }
 
@@ -951,6 +1114,24 @@ struct ChatTranscriptView: NSViewRepresentable {
       }
       root.querySelectorAll('img.shot[data-key]').forEach(bindMediaOpen);
       root.querySelectorAll('.video-shot[data-key]').forEach(bindMediaOpen);
+      root.querySelectorAll('.code-block .code-copy').forEach(function(btn) {
+        btn.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          var block = btn.closest('.code-block');
+          var code = block && block.querySelector('pre code');
+          var text = code ? String(code.textContent || '') : '';
+          if (window.webkit && window.webkit.messageHandlers.copyText) {
+            window.webkit.messageHandlers.copyText.postMessage({ text: text });
+          }
+          btn.classList.add('copied');
+          if (btn._copyTimer) clearTimeout(btn._copyTimer);
+          btn._copyTimer = setTimeout(function() {
+            btn.classList.remove('copied');
+            btn._copyTimer = null;
+          }, 1200);
+        });
+      });
       if (forceScroll || nearBottom) {
         const goBottom = function() { window.scrollTo(0, document.body.scrollHeight); };
         goBottom();

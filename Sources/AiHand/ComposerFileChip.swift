@@ -23,7 +23,18 @@ enum ComposerFileChipToken {
         return nil
     }
 
+    static func serializeSkill(_ name: String) -> String {
+        let escaped = name.replacingOccurrences(of: "⟧", with: "")
+        return "⟦skill:\(escaped)⟧"
+    }
+
+    static func parseSkill(_ token: String) -> String? {
+        guard token.hasPrefix("⟦skill:"), token.hasSuffix("⟧"), token.count > 8 else { return nil }
+        return String(token.dropFirst(7).dropLast())
+    }
+
     /// Expand chips in plain draft text for send: inline relative/name + collected paths.
+    /// Skill chips become `/name` in the prompt.
     static func expandForSend(
         _ text: String,
         workspace: String
@@ -34,6 +45,11 @@ enum ComposerFileChipToken {
         while i < text.endIndex {
             if text[i] == "⟦", let end = text[i...].firstIndex(of: "⟧") {
                 let token = String(text[i...end])
+                if let skill = parseSkill(token) {
+                    prompt += "/\(skill)"
+                    i = text.index(after: end)
+                    continue
+                }
                 if let parsed = parse(token) {
                     paths.append(parsed.path)
                     prompt += displayName(for: parsed.path, isDirectory: parsed.isDirectory)
@@ -80,6 +96,10 @@ final class ComposerFileChipAttachment: NSTextAttachment {
             darkChrome: darkChrome
         )
         attachmentCell = cell
+        // Pin intrinsic size — without bounds, AppKit lays the chip out full-width
+        // on its own line and backspace leaves a stuck bar.
+        let size = cell.cellSize()
+        bounds = NSRect(x: 0, y: -4, width: size.width, height: size.height)
     }
 
     required init?(coder: NSCoder) {
@@ -91,6 +111,35 @@ final class ComposerFileChipAttachment: NSTextAttachment {
 
     var serializedToken: String {
         ComposerFileChipToken.serialize(path: path, isDirectory: isDirectory)
+    }
+
+    var attributedString: NSAttributedString {
+        NSAttributedString(attachment: self)
+    }
+}
+
+final class ComposerSkillChipAttachment: NSTextAttachment {
+    let name: String
+    let darkChrome: Bool
+
+    init(name: String, darkChrome: Bool) {
+        self.name = name
+        self.darkChrome = darkChrome
+        super.init(data: nil, ofType: nil)
+        let cell = ComposerSkillChipAttachmentCell(name: name, darkChrome: darkChrome)
+        attachmentCell = cell
+        let size = cell.cellSize()
+        bounds = NSRect(x: 0, y: -4, width: size.width, height: size.height)
+    }
+
+    required init?(coder: NSCoder) {
+        self.name = ""
+        self.darkChrome = true
+        super.init(coder: coder)
+    }
+
+    var serializedToken: String {
+        ComposerFileChipToken.serializeSkill(name)
     }
 
     var attributedString: NSAttributedString {
@@ -143,13 +192,29 @@ final class ComposerFileChipAttachmentCell: NSTextAttachmentCell {
         return NSSize(width: w, height: h)
     }
 
+    override func cellSize(forBounds rect: NSRect) -> NSSize {
+        cellSize()
+    }
+
     override func cellBaselineOffset() -> NSPoint {
         NSPoint(x: 0, y: -4)
     }
 
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
+        // AppKit often passes a line-wide frame; keep the capsule intrinsic-sized.
+        let size = cellSize()
+        var frame = NSRect(
+            x: cellFrame.minX,
+            y: cellFrame.minY + max(0, (cellFrame.height - size.height) / 2),
+            width: size.width,
+            height: size.height
+        )
+        if frame.maxX > cellFrame.maxX {
+            frame.origin.x = max(cellFrame.minX, cellFrame.maxX - size.width)
+        }
+
         let radius: CGFloat = 6
-        let path = NSBezierPath(roundedRect: cellFrame.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
+        let path = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
         chipFill.setFill()
         path.fill()
         chipBlue.withAlphaComponent(0.28).setStroke()
@@ -161,8 +226,8 @@ final class ComposerFileChipAttachmentCell: NSTextAttachmentCell {
         if let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(config) {
             let iconRect = NSRect(
-                x: cellFrame.minX + paddingX,
-                y: cellFrame.midY - iconSize / 2,
+                x: frame.minX + paddingX,
+                y: frame.midY - iconSize / 2,
                 width: iconSize,
                 height: iconSize
             )
@@ -177,8 +242,8 @@ final class ComposerFileChipAttachmentCell: NSTextAttachmentCell {
         }
 
         let textOrigin = NSPoint(
-            x: cellFrame.minX + paddingX + iconSize + gap,
-            y: cellFrame.minY + (cellFrame.height - chipFont.ascender + chipFont.descender) / 2 - 1
+            x: frame.minX + paddingX + iconSize + gap,
+            y: frame.minY + (frame.height - chipFont.ascender + chipFont.descender) / 2 - 1
         )
         (label as NSString).draw(
             at: textOrigin,
@@ -190,11 +255,119 @@ final class ComposerFileChipAttachmentCell: NSTextAttachmentCell {
     }
 }
 
+final class ComposerSkillChipAttachmentCell: NSTextAttachmentCell {
+    private let name: String
+    private let darkChrome: Bool
+    private let label: String
+
+    private let chipFont = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+    private let iconSize: CGFloat = 12
+    private let paddingX: CGFloat = 7
+    private let paddingY: CGFloat = 3
+    private let gap: CGFloat = 5
+
+    init(name: String, darkChrome: Bool) {
+        self.name = name
+        self.darkChrome = darkChrome
+        self.label = "/\(name)"
+        super.init()
+    }
+
+    required init(coder: NSCoder) {
+        self.name = ""
+        self.darkChrome = true
+        self.label = ""
+        super.init(coder: coder)
+    }
+
+    private var chipAccent: NSColor {
+        // Soft violet — distinct from file-chip blue.
+        NSColor(srgbRed: 0.72, green: 0.58, blue: 1.0, alpha: 1)
+    }
+
+    private var chipFill: NSColor {
+        darkChrome
+            ? NSColor(white: 1, alpha: 0.08)
+            : NSColor(white: 0, alpha: 0.06)
+    }
+
+    override func cellSize() -> NSSize {
+        let textSize = (label as NSString).size(withAttributes: [.font: chipFont])
+        let w = paddingX + iconSize + gap + ceil(textSize.width) + paddingX
+        let h = max(20, ceil(textSize.height) + paddingY * 2)
+        return NSSize(width: w, height: h)
+    }
+
+    override func cellSize(forBounds rect: NSRect) -> NSSize {
+        cellSize()
+    }
+
+    override func cellBaselineOffset() -> NSPoint {
+        NSPoint(x: 0, y: -4)
+    }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
+        let size = cellSize()
+        var frame = NSRect(
+            x: cellFrame.minX,
+            y: cellFrame.minY + max(0, (cellFrame.height - size.height) / 2),
+            width: size.width,
+            height: size.height
+        )
+        if frame.maxX > cellFrame.maxX {
+            frame.origin.x = max(cellFrame.minX, cellFrame.maxX - size.width)
+        }
+
+        let radius: CGFloat = 6
+        let path = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: radius, yRadius: radius)
+        chipFill.setFill()
+        path.fill()
+        chipAccent.withAlphaComponent(0.28).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+        if let base = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) {
+            let iconRect = NSRect(
+                x: frame.minX + paddingX,
+                y: frame.midY - iconSize / 2,
+                width: iconSize,
+                height: iconSize
+            )
+            let tinted = NSImage(size: iconRect.size)
+            tinted.lockFocus()
+            let local = NSRect(origin: .zero, size: iconRect.size)
+            base.draw(in: local, from: .zero, operation: .sourceOver, fraction: 1)
+            chipAccent.set()
+            local.fill(using: .sourceAtop)
+            tinted.unlockFocus()
+            tinted.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+        }
+
+        let textOrigin = NSPoint(
+            x: frame.minX + paddingX + iconSize + gap,
+            y: frame.minY + (frame.height - chipFont.ascender + chipFont.descender) / 2 - 1
+        )
+        (label as NSString).draw(
+            at: textOrigin,
+            withAttributes: [
+                .font: chipFont,
+                .foregroundColor: chipAccent,
+            ]
+        )
+    }
+}
+
 enum ComposerFileChipCodec {
     private static let tokenRegex: NSRegularExpression = {
         // swiftlint:disable:next force_try
-        try! NSRegularExpression(pattern: #"⟦(?:file|dir):([^⟧]*)⟧"#)
+        try! NSRegularExpression(pattern: #"⟦(?:file|dir|skill):([^⟧]*)⟧"#)
     }()
+
+    static func isComposerChip(_ value: Any?) -> Bool {
+        value is ComposerFileChipAttachment || value is ComposerSkillChipAttachment
+    }
 
     /// Plain draft (with `⟦…⟧` tokens) → attributed string with chips.
     static func attributedString(
@@ -213,7 +386,10 @@ enum ComposerFileChipCodec {
                 out.append(NSAttributedString(string: ns.substring(with: before), attributes: base))
             }
             let token = ns.substring(with: tokenRange)
-            if let parsed = ComposerFileChipToken.parse(token) {
+            if let skill = ComposerFileChipToken.parseSkill(token) {
+                let chip = ComposerSkillChipAttachment(name: skill, darkChrome: darkChrome)
+                out.append(chip.attributedString)
+            } else if let parsed = ComposerFileChipToken.parse(token) {
                 let chip = ComposerFileChipAttachment(
                     path: parsed.path,
                     isDirectory: parsed.isDirectory,
@@ -241,13 +417,61 @@ enum ComposerFileChipCodec {
                 result += chip.serializedToken
                 return
             }
+            if let skill = attrs[.attachment] as? ComposerSkillChipAttachment {
+                result += skill.serializedToken
+                return
+            }
             if attrs[.attachment] != nil {
                 // Unknown attachment — skip object-replacement glyph.
                 return
             }
-            result += (storage.string as NSString).substring(with: range)
+            let chunk = (storage.string as NSString).substring(with: range)
+            // Drop stray U+FFFC left after a half-deleted chip (breaks later `@` parsing).
+            result += chunk.replacingOccurrences(of: ComposerFileChipToken.objectReplacement, with: "")
         }
         return result
+    }
+
+    /// Remove orphan object-replacement chars / unknown attachments after a bad backspace.
+    static func sanitizeOrphans(in storage: NSTextStorage) -> Bool {
+        let ns = storage.string as NSString
+        var removals: [NSRange] = []
+        var loc = 0
+        while loc < ns.length {
+            if ns.character(at: loc) == 0xFFFC {
+                let att = storage.attribute(.attachment, at: loc, effectiveRange: nil)
+                if !isComposerChip(att) {
+                    removals.append(NSRange(location: loc, length: 1))
+                }
+            }
+            loc += 1
+        }
+        guard !removals.isEmpty else { return false }
+        for range in removals.reversed() {
+            storage.replaceCharacters(in: range, with: "")
+        }
+        return true
+    }
+
+    /// Expand `range` so any intersected chip is deleted as a whole.
+    static func expansionForChipMutation(in storage: NSTextStorage, range: NSRange) -> NSRange {
+        guard storage.length > 0, range.length > 0 else { return range }
+        var start = range.location
+        var end = NSMaxRange(range)
+        let first = min(start, storage.length - 1)
+        var eff = NSRange()
+        if storage.attribute(.attachment, at: first, effectiveRange: &eff) != nil {
+            start = min(start, eff.location)
+            end = max(end, NSMaxRange(eff))
+        }
+        let last = min(NSMaxRange(range) - 1, storage.length - 1)
+        if last >= 0, last != first {
+            if storage.attribute(.attachment, at: last, effectiveRange: &eff) != nil {
+                start = min(start, eff.location)
+                end = max(end, NSMaxRange(eff))
+            }
+        }
+        return NSRange(location: start, length: max(0, end - start))
     }
 
     static func insertChip(

@@ -297,12 +297,12 @@ struct SessionChatView: View {
             } label: {
                 Text("Steer")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(Color.accentColor.opacity(0.12))
+                            .fill(Color.accentColor)
                     )
                     .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
             }

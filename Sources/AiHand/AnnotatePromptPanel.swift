@@ -235,23 +235,7 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let code = Int(event.keyCode)
 
-            // ⇧↩ → insert newline into the live field editor + SwiftUI binding.
-            if (code == kVK_Return || code == kVK_ANSI_KeypadEnter),
-               flags.contains(.shift),
-               !flags.contains(.command),
-               !flags.contains(.option),
-               !flags.contains(.control),
-               let textView = self.editableFieldEditor() {
-                let range = textView.selectedRange()
-                let ns = textView.string as NSString
-                let updated = ns.replacingCharacters(in: range, with: "\n")
-                textView.string = updated
-                self.model.text = updated
-                let insertedAt = min(range.location + 1, (updated as NSString).length)
-                textView.setSelectedRange(NSRange(location: insertedAt, length: 0))
-                self.refitContent()
-                return nil
-            }
+            // Return / ⇧↩ / ⌘↩ are owned by ComposerPromptEditor.doCommandBy.
 
             // ⌘/ → cycle favorite models (keyCode: ⌘ makes charactersIgnoringModifiers flaky).
             if flags.contains(.command),

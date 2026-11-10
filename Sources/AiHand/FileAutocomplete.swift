@@ -8,10 +8,11 @@ final class FileAutocompleteController: ObservableObject {
     @Published private(set) var isActive: Bool = false
 
     private var entries: [WorkspaceFileEntry] = []
-    private var queryRange: Range<String.Index>?
     private var keyMonitor: Any?
     private var workspace: String = ""
     private var connectionID: UUID?
+    /// Bumped on every `clear()` so in-flight index loads can't reopen a dismissed picker.
+    private var dismissGeneration: Int = 0
     var readText: () -> String = { "" }
     var writeText: (String) -> Void = { _ in }
     /// Called after a pick — host should attach a chip (not insert plain `@path` text).
@@ -33,6 +34,7 @@ final class FileAutocompleteController: ObservableObject {
     func refreshEntries() {
         let ws = workspace
         let conn = connectionID
+        let gen = dismissGeneration
         if conn != nil || !ws.isEmpty {
             // Indexing (especially SSH / large trees) stays off the composer thread.
             DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -43,7 +45,8 @@ final class FileAutocompleteController: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self, self.workspace == ws, self.connectionID == conn else { return }
                     self.entries = list
-                    // Re-filter if `@` is already open while the index was loading.
+                    // Don't resurrect a picker the user just dismissed / picked from.
+                    guard self.dismissGeneration == gen else { return }
                     let text = self.readText()
                     if WorkspaceFileCatalog.atQuery(in: text) != nil {
                         self.update(text: text)
@@ -56,11 +59,13 @@ final class FileAutocompleteController: ObservableObject {
     }
 
     func update(text: String) {
+        if entries.isEmpty {
+            refreshEntries()
+        }
         guard let at = WorkspaceFileCatalog.atQuery(in: text) else {
             clear()
             return
         }
-        queryRange = at.range
         matches = WorkspaceFileCatalog.matches(query: at.query, in: entries)
         if selectedIndex >= matches.count {
             selectedIndex = max(0, matches.count - 1)
@@ -71,8 +76,8 @@ final class FileAutocompleteController: ObservableObject {
     }
 
     func clear() {
+        dismissGeneration &+= 1
         matches = []
-        queryRange = nil
         selectedIndex = 0
         isActive = false
         removeKeyMonitor()
@@ -80,7 +85,9 @@ final class FileAutocompleteController: ObservableObject {
 
     /// Remove the active `@…` query from the draft (chips carry the reference).
     func apply(_ entry: WorkspaceFileEntry, to text: inout String) {
-        if let range = queryRange ?? WorkspaceFileCatalog.atQuery(in: text)?.range {
+        // Always resolve against the live string — stale String.Index from an older
+        // draft left `@…` in place and kept the picker stuck on old matches.
+        if let range = WorkspaceFileCatalog.atQuery(in: text)?.range {
             text.replaceSubrange(range, with: "")
         }
         clear()
@@ -94,9 +101,10 @@ final class FileAutocompleteController: ObservableObject {
     }
 
     func applySelectedFromMonitor() {
-        var text = readText()
-        guard let entry = applySelected(to: &text) else { return }
-        writeText(text)
+        let entry = matches.indices.contains(selectedIndex) ? matches[selectedIndex] : nil
+        // Dismiss first so a slow index refresh can't flash the list back open.
+        clear()
+        guard let entry else { return }
         onPick?(entry)
     }
 
@@ -148,8 +156,8 @@ final class FileAutocompleteController: ObservableObject {
     }
 
     func teardown() {
+        // Keep `entries` cached — wiping forced a cold index on the next `@`.
         clear()
-        entries = []
     }
 }
 

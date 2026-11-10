@@ -1543,6 +1543,7 @@ private struct SessionsSidePanelView: View {
                 )
                 if let git = store.gitRepo, !git.worktrees.isEmpty {
                     GitWorktreePicker(
+                        store: store,
                         repo: git,
                         currentPath: store.currentWorkspace,
                         workspaceRoot: {
@@ -1970,6 +1971,7 @@ private struct WorkspacePickerActionRow: View {
 }
 
 private struct GitWorktreePicker: View {
+    @ObservedObject var store: SessionStore
     let repo: GitRepoInfo
     let currentPath: String
     let workspaceRoot: String
@@ -2006,6 +2008,10 @@ private struct GitWorktreePicker: View {
     private var connection: SSHConnection? {
         guard let id = Preferences.agentWorkspaceConnectionID else { return nil }
         return Preferences.sshConnection(id: id)
+    }
+
+    private var connectionID: UUID? {
+        Preferences.agentWorkspaceConnectionID
     }
 
     var body: some View {
@@ -2056,6 +2062,11 @@ private struct GitWorktreePicker: View {
                         entry: entry,
                         shortcutIndex: index + 1,
                         isCurrent: SessionStore.sameWorkspace(entry.path, currentPath),
+                        hasWorkingSession: store.hasWorkingSession(
+                            for: entry.path,
+                            branch: entry.branch,
+                            connectionID: connectionID
+                        ),
                         fg: fg,
                         onSelect: { onSelect(entry) },
                         onRemove: { removeWorktree(entry) }
@@ -2198,6 +2209,7 @@ private struct GitWorktreeRow: View {
     let entry: GitWorktreeEntry
     let shortcutIndex: Int
     let isCurrent: Bool
+    let hasWorkingSession: Bool
     let fg: Color
     var onSelect: () -> Void
     var onRemove: () -> Void
@@ -2212,10 +2224,17 @@ private struct GitWorktreeRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "rectangle.split.2x1")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(entry.isPrimary ? Color.accentColor : fg.opacity(0.45))
-                    .frame(width: 18, alignment: .center)
+                Group {
+                    if hasWorkingSession {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: entry.isPrimary ? "arrow.triangle.branch" : "rectangle.split.2x1")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(entry.isPrimary ? Color.accentColor : fg.opacity(0.45))
+                    }
+                }
+                .frame(width: 18, alignment: .center)
                 Text(entry.branch)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(fg)

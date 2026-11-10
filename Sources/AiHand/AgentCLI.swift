@@ -34,6 +34,14 @@ extension AgentCLI {
         !isVideoMedia(path)
     }
 
+    /// Append a positional prompt after `--` so clap never treats a leading `-`
+    /// (lists, flags, `--help` jokes) as an option, and so a greedy flag like
+    /// Codex `--image` (num_args=1..) can't swallow the prompt as another path.
+    func appendPromptArg(_ args: inout [String], _ prompt: String) {
+        args.append("--")
+        args.append(prompt)
+    }
+
     func composePrompt(_ prompt: String, imagePath: String?, includeImagePathInText: Bool) -> String {
         var parts: [String] = []
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -127,7 +135,7 @@ struct CursorAgentCLI: AgentCLI {
             args += ["--image", imagePath]
         }
         // Screenshots also get the path in text; videos rely on the path (no --image).
-        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        appendPromptArg(&args, composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         return args
     }
 
@@ -152,7 +160,10 @@ struct CursorAgentCLI: AgentCLI {
             args += ["--image", imagePath]
         }
         // Match start: empty prompt + screenshot still needs a usable instruction + path.
-        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: imagePath != nil))
+        appendPromptArg(
+            &args,
+            composePrompt(prompt, imagePath: imagePath, includeImagePathInText: imagePath != nil)
+        )
         return args
     }
 
@@ -212,7 +223,7 @@ struct ClaudeAgentCLI: AgentCLI {
             args += ["--effort", effort]
         }
         // No native --image; include the path in the prompt text.
-        args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+        appendPromptArg(&args, composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         return args
     }
 
@@ -238,9 +249,9 @@ struct ClaudeAgentCLI: AgentCLI {
             args += ["--effort", effort]
         }
         if let imagePath {
-            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+            appendPromptArg(&args, composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
         } else {
-            args.append(prompt)
+            appendPromptArg(&args, prompt)
         }
         return args
     }
@@ -282,14 +293,20 @@ struct CodexAgentCLI: AgentCLI {
         // arbitrary folders chosen in Settings.
         var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            // `--image` is greedy (num_args=1..): put the prompt *before* it so clap
-            // does not consume the prompt as another image path (openai/codex#30106 / #40545).
-            // `--` alone does not fix this; prompt-first does.
-            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
+            // `--image` is greedy (num_args=1..). Put it before `--` so clap can't
+            // eat the prompt as another image path (openai/codex#30106 / #40545),
+            // and `--` so a list prompt starting with `-` isn't a flag.
             args += ["--image", imagePath]
+            appendPromptArg(
+                &args,
+                composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false)
+            )
         } else {
             // Video (or unknown): path in prompt so Codex can open the file.
-            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+            appendPromptArg(
+                &args,
+                composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true)
+            )
         }
         return args
     }
@@ -305,13 +322,18 @@ struct CodexAgentCLI: AgentCLI {
         var args = baseExecArguments(workspace: workspace, model: model, effort: effort)
         args += ["resume", chatId]
         if let imagePath, Self.shouldPassImageFlag(imagePath) {
-            // resume's --image is num_args=1; prompt-first matches startArguments.
-            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false))
             args += ["--image", imagePath]
+            appendPromptArg(
+                &args,
+                composePrompt(prompt, imagePath: imagePath, includeImagePathInText: false)
+            )
         } else if let imagePath {
-            args.append(composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true))
+            appendPromptArg(
+                &args,
+                composePrompt(prompt, imagePath: imagePath, includeImagePathInText: true)
+            )
         } else {
-            args.append(prompt)
+            appendPromptArg(&args, prompt)
         }
         return args
     }

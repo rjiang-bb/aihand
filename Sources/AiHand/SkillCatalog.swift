@@ -60,11 +60,13 @@ enum SkillCatalog {
     }
 
     /// Slash token currently being typed, e.g. draft `hello /com` → `com`.
+    /// Ignores `/` that sit inside serialized chips (`⟦skill:…⟧` / `⟦file:…⟧`).
     static func slashQuery(in text: String) -> (query: String, range: Range<String.Index>)? {
-        guard let slash = text.lastIndex(of: "/") else { return nil }
+        guard let slash = lastActiveSlash(in: text) else { return nil }
         if slash > text.startIndex {
             let before = text[text.index(before: slash)]
-            if before != " " && before != "\n" && before != "\t" { return nil }
+            // Space / newline / chip close are valid token boundaries.
+            if before != " " && before != "\n" && before != "\t" && before != "⟧" { return nil }
         }
         let after = text.index(after: slash)
         let rest = text[after...]
@@ -79,6 +81,25 @@ enum SkillCatalog {
             return nil
         }
         return (query, slash..<text.endIndex)
+    }
+
+    /// Last `/` that is not inside a `⟦…⟧` chip token.
+    private static func lastActiveSlash(in text: String) -> String.Index? {
+        var best: String.Index?
+        var i = text.startIndex
+        var inChip = false
+        while i < text.endIndex {
+            let ch = text[i]
+            if ch == "⟦" {
+                inChip = true
+            } else if ch == "⟧" {
+                inChip = false
+            } else if ch == "/", !inChip {
+                best = i
+            }
+            i = text.index(after: i)
+        }
+        return best
     }
 
     static func matches(query: String, in skills: [AgentSkill], limit: Int = 8) -> [AgentSkill] {

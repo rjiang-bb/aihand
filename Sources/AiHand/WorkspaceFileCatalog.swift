@@ -79,24 +79,48 @@ enum WorkspaceFileCatalog {
 
     /// Active `@` token, e.g. `look at @Src/Fo` → query `Src/Fo`.
     static func atQuery(in text: String) -> (query: String, range: Range<String.Index>)? {
-        guard let at = text.lastIndex(of: "@") else { return nil }
-        if at > text.startIndex {
-            let before = text[text.index(before: at)]
-            if before != " " && before != "\n" && before != "\t" { return nil }
+        // Walk backward so `@` inside a `⟦file:…⟧` chip token is ignored.
+        var i = text.endIndex
+        while i > text.startIndex {
+            i = text.index(before: i)
+            guard text[i] == "@" else { continue }
+            if isInsideChipToken(at: i, in: text) { continue }
+            if i > text.startIndex {
+                let before = text[text.index(before: i)]
+                // Allow `@` after whitespace or a chip token (`⟧`).
+                if before != " ", before != "\n", before != "\t", before != "⟧",
+                   before != "\u{FFFC}" {
+                    return nil
+                }
+            }
+            let after = text.index(after: i)
+            let rest = text[after...]
+            if rest.contains(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) {
+                return nil
+            }
+            let query = String(rest)
+            if query.contains(where: { ch in
+                !(ch.isLetter || ch.isNumber || ch == "-" || ch == "_" || ch == "." || ch == "/" || ch == "+")
+            }) {
+                return nil
+            }
+            return (query, i..<text.endIndex)
         }
-        let after = text.index(after: at)
-        let rest = text[after...]
-        if rest.contains(where: { $0 == " " || $0 == "\n" || $0 == "\t" }) {
-            return nil
+        return nil
+    }
+
+    private static func isInsideChipToken(at atIndex: String.Index, in text: String) -> Bool {
+        var open: String.Index?
+        var i = text.startIndex
+        while i < text.endIndex {
+            if text[i] == "⟦" { open = i }
+            else if text[i] == "⟧" { open = nil }
+            if i == atIndex {
+                return open != nil
+            }
+            i = text.index(after: i)
         }
-        let query = String(rest)
-        // Paths: letters, digits, and common path punctuation.
-        if query.contains(where: { ch in
-            !(ch.isLetter || ch.isNumber || ch == "-" || ch == "_" || ch == "." || ch == "/" || ch == "+")
-        }) {
-            return nil
-        }
-        return (query, at..<text.endIndex)
+        return false
     }
 
     static func matches(query: String, in entries: [WorkspaceFileEntry], limit: Int = matchLimit) -> [WorkspaceFileEntry] {
