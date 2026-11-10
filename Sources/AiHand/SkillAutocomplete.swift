@@ -19,6 +19,7 @@ final class SkillAutocompleteController: ObservableObject {
         if self.workspace != workspace || self.connectionID != connectionID {
             self.workspace = workspace
             self.connectionID = connectionID
+            skills = []
             refreshSkills()
         } else if skills.isEmpty {
             refreshSkills()
@@ -26,9 +27,25 @@ final class SkillAutocompleteController: ObservableObject {
     }
 
     func refreshSkills() {
+        let ws = workspace
+        let conn = connectionID
+        // Remote skill scans are SSH — never block the composer/main thread.
+        if conn != nil {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let list = SkillCatalog.skills(
+                    workspace: ws.isEmpty ? nil : ws,
+                    connectionID: conn
+                )
+                DispatchQueue.main.async {
+                    guard let self, self.workspace == ws, self.connectionID == conn else { return }
+                    self.skills = list
+                }
+            }
+            return
+        }
         skills = SkillCatalog.skills(
-            workspace: workspace.isEmpty ? nil : workspace,
-            connectionID: connectionID
+            workspace: ws.isEmpty ? nil : ws,
+            connectionID: nil
         )
     }
 

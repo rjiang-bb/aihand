@@ -21,18 +21,23 @@ enum SSHClient {
     /// Options shared by validate / run / scp so multiplexed sessions reuse one login.
     private static func multiplexOptions(for connection: SSHConnection, master: Bool) -> [String] {
         let path = controlPath(for: connection.id)
-        var opts = [
+        // `master` reserved for callers that still distinguish ControlMaster start vs reuse.
+        _ = master
+        return [
             "-o", "ControlMaster=auto",
             "-o", "ControlPath=\(path)",
             "-o", "ControlPersist=10m",
             "-o", "BatchMode=yes",
-            "-o", "StrictHostKeyChecking=accept-new"
+            "-o", "StrictHostKeyChecking=accept-new",
+            // Bound connect/hang time — stuck remote git on huge trees used to wedge the app.
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=5",
+            "-o", "ServerAliveCountMax=3"
         ]
-        if master {
-            opts += ["-o", "ConnectTimeout=10"]
-        }
-        return opts
     }
+
+    /// Hard ceiling for a single ssh/scp child (remote `git` on huge trees can otherwise run forever).
+    private static let commandTimeoutSeconds: TimeInterval = 45
 
     @discardableResult
     static func ensureMaster(_ connection: SSHConnection) -> SSHRunResult {
@@ -265,18 +270,40 @@ enum SSHClient {
         process.standardError = err
         do {
             try process.run()
-            process.waitUntilExit()
+            wait(for: process, timeout: commandTimeoutSeconds)
         } catch {
             return SSHRunResult(ok: false, status: -1, stdout: "", stderr: error.localizedDescription)
         }
         let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        var errText = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if process.terminationStatus != 0, errText.isEmpty {
+            errText = "SSH command timed out."
+        }
         return SSHRunResult(
             ok: process.terminationStatus == 0,
             status: process.terminationStatus,
             stdout: stdout.trimmingCharacters(in: .whitespacesAndNewlines),
-            stderr: stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            stderr: errText
         )
+    }
+
+    private static func wait(for process: Process, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if process.isRunning {
+            process.terminate()
+            let killDeadline = Date().addingTimeInterval(2)
+            while process.isRunning, Date() < killDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+        }
+        process.waitUntilExit()
     }
 
     /// Map ssh argv (with -p) onto scp argv (with -P).

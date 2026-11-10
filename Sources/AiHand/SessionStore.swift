@@ -395,28 +395,45 @@ final class SessionStore: ObservableObject {
                 selectedSessionID = nil
             }
         }
-        scheduleGitRefresh(forRoot: nextRoot.isEmpty ? next : nextRoot)
+        // Drop stale git UI immediately so switching to a huge SSH repo doesn’t wait on probes.
+        if rootChanged || currentChanged {
+            gitRepo = nil
+            currentGitBranch = ""
+            restartGitPollingIfNeeded()
+        }
+        scheduleGitRefresh(forRoot: nextRoot.isEmpty ? next : nextRoot, force: rootChanged || currentChanged)
     }
 
-    /// Refresh worktree list + diff stats for the registered root (async).
+    /// Refresh worktree list (+ local diff stats) for the registered root (async).
     func refreshGitInfo() {
         scheduleGitRefresh(forRoot: workspaceRoot.isEmpty ? currentWorkspace : workspaceRoot, force: true)
     }
 
-    /// Keep branch name + dirty stats fresh while the sessions panel is on screen.
+    /// Keep branch / worktree list fresh while the sessions panel is on screen.
     func setGitPollingEnabled(_ enabled: Bool) {
         if enabled {
             refreshGitInfo()
-            guard gitPollTimer == nil else { return }
-            let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
-                self?.refreshGitInfo()
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            gitPollTimer = timer
+            startGitPollingTimer()
         } else {
             gitPollTimer?.invalidate()
             gitPollTimer = nil
         }
+    }
+
+    private func restartGitPollingIfNeeded() {
+        guard gitPollTimer != nil else { return }
+        startGitPollingTimer()
+    }
+
+    private func startGitPollingTimer() {
+        gitPollTimer?.invalidate()
+        // SSH metadata is cheap but still a network hop — don’t hammer every 2s.
+        let interval: TimeInterval = currentConnectionID == nil ? 2.0 : 20.0
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            self?.refreshGitInfo()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        gitPollTimer = timer
     }
 
     private func scheduleGitRefresh(forRoot root: String, force: Bool = false) {
@@ -455,12 +472,29 @@ final class SessionStore: ObservableObject {
             let id = Preferences.agentWorkspaceConnectionID
             return id.flatMap { Preferences.sshConnection(id: $0) }
         }()
-        let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key, connection: connection)
+        let activePath = currentWorkspace
+        // SSH: metadata only (one remote shell). Full diffs hang on large trees.
+        let detail: GitWorkspace.InspectDetail = connection == nil ? .full : .metadata
+        let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key, connection: connection, detail: detail)
+        // Resolve branch off the main thread — never SSH from `DispatchQueue.main`.
+        let branch: String
+        if let entry = info?.entry(forPath: activePath) {
+            branch = entry.branch
+        } else if let info, info.worktrees.count == 1 {
+            branch = info.worktrees[0].branch
+        } else if info == nil {
+            branch = ""
+        } else if connection == nil {
+            branch = GitWorkspace.currentBranch(in: activePath, connection: nil) ?? ""
+        } else {
+            // Remote branch should already be in porcelain; skip another SSH hop.
+            branch = ""
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // Apply only if this root is still the one being shown (the user may have switched).
             if key == self.probedRootKey {
-                self.applyGitInfo(info, activePath: self.currentWorkspace, connection: connection)
+                self.applyGitInfo(info, branch: branch)
             }
             self.gitProbeQueue.async { [weak self] in
                 guard let self else { return }
@@ -476,17 +510,7 @@ final class SessionStore: ObservableObject {
         Self.normalizedWorkspace(workspaceRoot.isEmpty ? currentWorkspace : workspaceRoot)
     }
 
-    private func applyGitInfo(_ info: GitRepoInfo?, activePath: String, connection: SSHConnection?) {
-        let branch: String
-        if let entry = info?.entry(forPath: activePath) {
-            branch = entry.branch
-        } else if let info, info.worktrees.count == 1 {
-            branch = info.worktrees[0].branch
-        } else if info == nil {
-            branch = ""
-        } else {
-            branch = GitWorkspace.currentBranch(in: activePath, connection: connection) ?? ""
-        }
+    private func applyGitInfo(_ info: GitRepoInfo?, branch: String) {
         // Avoid redraw churn when polling finds nothing new.
         guard gitRepo != info || currentGitBranch != branch else { return }
         gitRepo = info

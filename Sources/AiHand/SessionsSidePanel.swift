@@ -1970,6 +1970,11 @@ private struct GitWorktreePicker: View {
         !busy && !branchName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var connection: SSHConnection? {
+        guard let id = Preferences.agentWorkspaceConnectionID else { return nil }
+        return Preferences.sshConnection(id: id)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             Button {
@@ -1987,6 +1992,7 @@ private struct GitWorktreePicker: View {
                         .truncationMode(.middle)
                     Spacer(minLength: 4)
                     // Working-tree changes only — same idea as the editor “Changes” badge.
+                    // (SSH probes skip diffs, so this stays empty remotely.)
                     if let diff = current?.workingDiff, !diff.isEmpty {
                         GitDiffLinesView(diff: diff)
                     }
@@ -2055,8 +2061,9 @@ private struct GitWorktreePicker: View {
         busy = true
         errorMessage = nil
         let root = workspaceRoot
+        let conn = connection
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = GitWorkspace.addWorktree(branch: name, inRepo: root)
+            let result = GitWorkspace.addWorktree(branch: name, inRepo: root, connection: conn)
             DispatchQueue.main.async {
                 busy = false
                 if let path = result.path {
@@ -2071,13 +2078,15 @@ private struct GitWorktreePicker: View {
     }
 
     private func removeWorktree(_ entry: GitWorktreeEntry) {
+        // Local full inspect fills workingDiff; SSH metadata skips it and checks dirty at remove time.
         guard !busy, !entry.isPrimary, entry.workingDiff.isEmpty else { return }
         busy = true
         errorMessage = nil
         let root = workspaceRoot
+        let conn = connection
         let wasCurrent = SessionStore.sameWorkspace(entry.path, currentPath)
         DispatchQueue.global(qos: .userInitiated).async {
-            let error = GitWorkspace.removeWorktree(path: entry.path, inRepo: root)
+            let error = GitWorkspace.removeWorktree(path: entry.path, inRepo: root, connection: conn)
             DispatchQueue.main.async {
                 busy = false
                 if let error {

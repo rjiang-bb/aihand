@@ -1035,12 +1035,10 @@ enum Preferences {
     }
 
     /// Branch name for the active working directory (empty when not a git repo).
+    /// Local only — never blocks the main thread on SSH (SessionStore probes remotes async).
     static var agentGitBranch: String {
-        let connection: SSHConnection? = {
-            guard let id = agentWorkspaceConnectionID else { return nil }
-            return sshConnection(id: id)
-        }()
-        return GitWorkspace.currentBranch(in: agentWorkspace, connection: connection) ?? ""
+        if agentWorkspaceConnectionID != nil { return "" }
+        return GitWorkspace.currentBranch(in: agentWorkspace, connection: nil) ?? ""
     }
 
     private static func rememberedWorktree(forRootID id: UUID) -> String? {

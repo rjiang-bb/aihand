@@ -1687,7 +1687,9 @@ private struct WorkspaceWorktreesBlock: View {
         let conn = connection
         let path = root
         DispatchQueue.global(qos: .userInitiated).async {
-            let info = GitWorkspace.inspect(path: path, connection: conn)
+            // SSH skips line-diff walks — they dominate large remote repos.
+            let detail: GitWorkspace.InspectDetail = conn == nil ? .full : .metadata
+            let info = GitWorkspace.inspect(path: path, connection: conn, detail: detail)
             DispatchQueue.main.async {
                 repo = info
                 model.refresh()

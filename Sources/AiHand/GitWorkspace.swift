@@ -62,6 +62,15 @@ struct GitDiffLinesView: View {
 }
 
 enum GitWorkspace {
+    /// How much git metadata to gather. Diffs are local-only by default — over SSH they
+    /// walk the whole tree (`diff --numstat`, untracked) and stall startup / folder switches.
+    enum InspectDetail {
+        /// Worktree paths + branch names (and local commit order when cheap).
+        case metadata
+        /// Also branch-vs-base and working-tree line stats.
+        case full
+    }
+
     /// Cheap check — one `rev-parse`, no worktree/diff walks.
     static func isRepository(path: String, connection: SSHConnection? = nil) -> Bool {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -69,10 +78,21 @@ enum GitWorkspace {
         return runGit(["rev-parse", "--is-inside-work-tree"], in: trimmed, connection: connection)?.stdout == "true"
     }
 
-    /// Probe worktrees + branch/working diff stats for a folder. Returns nil when not a git repo.
-    static func inspect(path: String, connection: SSHConnection? = nil) -> GitRepoInfo? {
+    /// Probe worktrees (+ optional diff stats). SSH defaults to `.metadata` (diffs hang on large trees).
+    static func inspect(
+        path: String,
+        connection: SSHConnection? = nil,
+        detail: InspectDetail? = nil
+    ) -> GitRepoInfo? {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
+        let resolvedDetail = detail ?? (connection == nil ? .full : .metadata)
+
+        // One remote shell for metadata — avoids N SSH round-trips on large hosts.
+        if let connection, resolvedDetail == .metadata {
+            return inspectRemoteMetadata(path: trimmed, connection: connection)
+        }
+
         guard let toplevel = runGit(["rev-parse", "--show-toplevel"], in: trimmed, connection: connection)?.stdout else {
             return nil
         }
@@ -82,17 +102,18 @@ enum GitWorkspace {
         let porcelain = runGit(["worktree", "list", "--porcelain"], in: probe, connection: connection)?.stdout ?? ""
         var entries = parseWorktrees(porcelain)
         let root = entries.first?.path ?? probe
-        let base = defaultBaseRef(in: root, connection: connection)
+        let includeDiffs = resolvedDetail == .full
+        let base = includeDiffs ? defaultBaseRef(in: root, connection: connection) : nil
         if entries.isEmpty {
             let branch = currentBranch(in: root, connection: connection) ?? "HEAD"
             entries = [
                 GitWorktreeEntry(
                     path: root,
                     branch: branch,
-                    diff: branchDiffStat(base: base, in: root, connection: connection),
-                    workingDiff: workingDiffStat(in: root, connection: connection),
+                    diff: includeDiffs ? branchDiffStat(base: base, in: root, connection: connection) : GitDiffStat(),
+                    workingDiff: includeDiffs ? workingDiffStat(in: root, connection: connection) : GitDiffStat(),
                     isPrimary: true,
-                    commitTimestamp: commitTimestamp(in: root, connection: connection)
+                    commitTimestamp: includeDiffs ? commitTimestamp(in: root, connection: connection) : 0
                 )
             ]
         } else {
@@ -102,10 +123,12 @@ enum GitWorkspace {
                 if next.branch.isEmpty {
                     next.branch = currentBranch(in: entry.path, connection: connection) ?? "HEAD"
                 }
-                next.diff = branchDiffStat(base: base, in: entry.path, connection: connection)
-                next.workingDiff = workingDiffStat(in: entry.path, connection: connection)
+                if includeDiffs {
+                    next.diff = branchDiffStat(base: base, in: entry.path, connection: connection)
+                    next.workingDiff = workingDiffStat(in: entry.path, connection: connection)
+                    next.commitTimestamp = commitTimestamp(in: entry.path, connection: connection)
+                }
                 next.isPrimary = SessionStore.sameWorkspace(next.path, mainPath)
-                next.commitTimestamp = commitTimestamp(in: entry.path, connection: connection)
                 return next
             }
             entries.sort {
@@ -116,6 +139,49 @@ enum GitWorkspace {
             }
         }
         return GitRepoInfo(repoRoot: root, baseRef: base, worktrees: entries)
+    }
+
+    /// Single SSH: toplevel + `worktree list --porcelain` (branches included). No diffs.
+    private static func inspectRemoteMetadata(path: String, connection: SSHConnection) -> GitRepoInfo? {
+        let escaped = SSHClient.shellEscape(path)
+        let script = """
+        cd \(escaped) || exit 1
+        root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 1
+        printf '%s\\n' "$root"
+        printf '---WORKTREES---\\n'
+        git worktree list --porcelain 2>/dev/null || true
+        """
+        let result = SSHClient.runShell(connection, script)
+        guard result.ok else { return nil }
+        let parts = result.stdout.components(separatedBy: "---WORKTREES---\n")
+        guard let rawRoot = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines), !rawRoot.isEmpty else {
+            return nil
+        }
+        let probe = SessionStore.normalizedWorkspace(rawRoot)
+        guard !probe.isEmpty else { return nil }
+        let porcelain = parts.count > 1 ? parts[1] : ""
+        var entries = parseWorktrees(porcelain)
+        let root = entries.first?.path ?? probe
+        if entries.isEmpty {
+            let branch = currentBranch(in: root, connection: connection) ?? "HEAD"
+            entries = [
+                GitWorktreeEntry(path: root, branch: branch, diff: GitDiffStat(), isPrimary: true)
+            ]
+        } else {
+            let mainPath = root
+            entries = entries.map { entry in
+                var next = entry
+                if next.branch.isEmpty {
+                    next.branch = "HEAD"
+                }
+                next.isPrimary = SessionStore.sameWorkspace(next.path, mainPath)
+                return next
+            }
+            entries.sort {
+                $0.branch.localizedCaseInsensitiveCompare($1.branch) == .orderedAscending
+            }
+        }
+        return GitRepoInfo(repoRoot: root, baseRef: nil, worktrees: entries)
     }
 
     static func commitTimestamp(in path: String, connection: SSHConnection? = nil) -> TimeInterval {
@@ -139,8 +205,8 @@ enum GitWorkspace {
     static func workingDiffStat(in path: String, connection: SSHConnection? = nil) -> GitDiffStat {
         var stat = parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path, connection: connection)?.stdout)
         if let connection {
-            // One remote script — never N SSH round-trips (was catastrophic on large untracked trees).
-            stat.insertions += remoteUntrackedInsertionTotal(connection: connection, repoPath: path)
+            // Count untracked files only — never open/wc each file over SSH (hangs on huge trees).
+            stat.insertions += remoteUntrackedFileCount(connection: connection, repoPath: path)
             return stat
         }
         guard let listed = runGit(
@@ -158,23 +224,12 @@ enum GitWorkspace {
         return stat
     }
 
-    /// Line-count untracked files in a single SSH invocation.
-    private static func remoteUntrackedInsertionTotal(connection: SSHConnection, repoPath: String) -> Int {
+    /// Untracked file count in one cheap remote git call (not per-file line reads).
+    private static func remoteUntrackedFileCount(connection: SSHConnection, repoPath: String) -> Int {
         let escaped = SSHClient.shellEscape(repoPath)
         let script = """
         cd \(escaped) || exit 0
-        total=0
-        while IFS= read -r -d '' f; do
-          if [ ! -f "$f" ]; then
-            total=$((total + 1))
-          elif grep -Iq . "$f" 2>/dev/null; then
-            n=$(wc -l < "$f" | tr -d '[:space:]')
-            total=$((total + ${n:-1}))
-          else
-            total=$((total + 1))
-          fi
-        done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
-        printf '%s' "$total"
+        git ls-files --others --exclude-standard -z 2>/dev/null | tr -cd '\\0' | wc -c | tr -d '[:space:]'
         """
         let result = SSHClient.runShell(connection, script)
         let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -224,7 +279,7 @@ enum GitWorkspace {
         guard isSafeBranchName(name) else {
             return (nil, "Use letters, numbers, dashes, slashes, or dots in the branch name.")
         }
-        guard let info = inspect(path: root, connection: connection) else {
+        guard let info = inspect(path: root, connection: connection, detail: .metadata) else {
             return (nil, "That folder isn’t a git repository.")
         }
         if info.worktrees.contains(where: { $0.branch == name }) {
@@ -255,7 +310,8 @@ enum GitWorkspace {
     }
 
     static func removeWorktree(path: String, inRepo root: String, connection: SSHConnection? = nil) -> String? {
-        guard let info = inspect(path: root, connection: connection) else {
+        // Metadata only — full diffs are too expensive over SSH and unnecessary here.
+        guard let info = inspect(path: root, connection: connection, detail: .metadata) else {
             return "That folder isn’t a git repository."
         }
         guard let entry = info.entry(forPath: path) else {
@@ -264,10 +320,16 @@ enum GitWorkspace {
         if entry.isPrimary {
             return "The main checkout can’t be removed as a worktree."
         }
-        if !entry.workingDiff.isEmpty {
+        if isWorkingTreeDirty(in: entry.path, connection: connection) {
             return "Commit or stash changes before removing this worktree."
         }
         return runGit(["worktree", "remove", entry.path], in: info.repoRoot, connection: connection)?.error
+    }
+
+    /// Tracked dirty check only (`-uno`) so huge untracked trees don’t stall SSH.
+    static func isWorkingTreeDirty(in path: String, connection: SSHConnection? = nil) -> Bool {
+        let status = runGit(["status", "--porcelain", "-uno"], in: path, connection: connection)?.stdout ?? ""
+        return !status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     static func suggestedWorktreePath(repoRoot: String, branch: String) -> String {

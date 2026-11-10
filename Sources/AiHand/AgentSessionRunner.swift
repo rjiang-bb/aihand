@@ -745,6 +745,10 @@ final class AgentSessionManager {
             prompt: prompt,
             screenshotPath: screenshotPath,
             workspace: workspace,
+            // SSH: Preferences.agentGitBranch stays empty (no sync remote git); use probed branch.
+            gitBranch: Preferences.agentWorkspaceConnectionID != nil
+                ? store.currentGitBranch
+                : Preferences.agentGitBranch,
             connectionID: Preferences.agentWorkspaceConnectionID,
             cliKind: cliKind,
             favoriteId: favorite.id,
@@ -771,6 +775,9 @@ final class AgentSessionManager {
             prompt: "",
             screenshotPath: nil,
             workspace: workspace,
+            gitBranch: Preferences.agentWorkspaceConnectionID != nil
+                ? store.currentGitBranch
+                : Preferences.agentGitBranch,
             connectionID: Preferences.agentWorkspaceConnectionID,
             cliKind: cliKind,
             favoriteId: favorite.id,
