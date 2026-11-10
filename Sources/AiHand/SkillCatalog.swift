@@ -13,9 +13,10 @@ enum SkillCatalog {
         var workspace: String
     }
 
-    private static var cached: [AgentSkill]?
-    private static var cachedKey: CacheKey?
-    private static var cachedAt: Date?
+    /// Per-(machine, workspace) cache so flipping between folders doesn't rescan over SSH.
+    /// Touched from main and background threads — always under `lock`.
+    private static var cache: [CacheKey: (skills: [AgentSkill], at: Date)] = [:]
+    private static let lock = NSLock()
     private static let cacheTTL: TimeInterval = 30
 
     static func skills(
@@ -27,36 +28,35 @@ enum SkillCatalog {
             connectionKey: connectionID?.uuidString ?? "local",
             workspace: workspace ?? ""
         )
-        if !forceRefresh,
-           let cached,
-           cachedKey == key,
-           let cachedAt,
-           Date().timeIntervalSince(cachedAt) < cacheTTL {
-            return cached
+        if !forceRefresh {
+            lock.lock()
+            let hit = cache[key]
+            lock.unlock()
+            if let hit, Date().timeIntervalSince(hit.at) < cacheTTL {
+                return hit.skills
+            }
         }
         let list: [AgentSkill]
         if let connectionID {
             // Missing connection must not fall through to local scan of a remote path.
-            guard let connection = Preferences.sshConnection(id: connectionID) else {
-                cached = []
-                cachedKey = key
-                cachedAt = Date()
-                return []
+            if let connection = Preferences.sshConnection(id: connectionID) {
+                list = scanRemote(connection: connection, workspace: workspace)
+            } else {
+                list = []
             }
-            list = scanRemote(connection: connection, workspace: workspace)
         } else {
             list = scanLocal(workspace: workspace)
         }
-        cached = list
-        cachedKey = key
-        cachedAt = Date()
+        lock.lock()
+        cache[key] = (list, Date())
+        lock.unlock()
         return list
     }
 
     static func invalidate() {
-        cached = nil
-        cachedKey = nil
-        cachedAt = nil
+        lock.lock()
+        cache.removeAll()
+        lock.unlock()
     }
 
     /// Slash token currently being typed, e.g. draft `hello /com` → `com`.
@@ -158,49 +158,46 @@ enum SkillCatalog {
     // MARK: - Remote scan
 
     private static func scanRemote(connection: SSHConnection, workspace: String?) -> [AgentSkill] {
-        guard let home = SSHClient.remoteHome(connection) else { return [] }
+        // Highest priority first (first skill name wins). `$HOME` expands remotely, so the whole
+        // scan is ONE ssh round-trip instead of 1 (home) + 1 per root.
         var roots = [
-            "\(home)/.cursor/skills",
-            "\(home)/.agents/skills",
-            "\(home)/.cursor/skills-cursor"
+            "\"$HOME/.cursor/skills\"",
+            "\"$HOME/.agents/skills\"",
+            "\"$HOME/.cursor/skills-cursor\""
         ]
         if let workspace, !workspace.isEmpty {
-            roots.append("\(workspace)/.cursor/skills")
-            roots.append("\(workspace)/.agents/skills")
+            roots.append(SSHClient.shellEscape("\(workspace)/.cursor/skills"))
+            roots.append(SSHClient.shellEscape("\(workspace)/.agents/skills"))
         }
 
+        // Emit per skill: dirname\0first-16KB-of-SKILL.md\0\0, roots in priority order.
+        let script = """
+        for root in \(roots.joined(separator: " ")); do
+          [ -d "$root" ] || continue
+          for d in "$root"/*/; do
+            [ -d "$d" ] || continue
+            f="${d}SKILL.md"
+            [ -f "$f" ] || continue
+            name=$(basename "$d")
+            printf '%s\\0' "$name"
+            head -c 16000 "$f"
+            printf '\\0\\0'
+          done
+        done
+        """
+        let result = SSHClient.runShellFast(connection, script)
+        guard result.ok, !result.stdout.isEmpty else { return [] }
+
         var byName: [String: AgentSkill] = [:]
-        for root in roots {
-            for skill in loadSkillsRemote(connection: connection, root: root) {
-                if byName[skill.name] == nil {
-                    byName[skill.name] = skill
-                }
-            }
+        for skill in parseRemoteSkills(result.stdout) where byName[skill.name] == nil {
+            byName[skill.name] = skill
         }
         return byName.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private static func loadSkillsRemote(connection: SSHConnection, root: String) -> [AgentSkill] {
-        let escaped = SSHClient.shellEscape(root)
-        // Emit: dirname\0frontmatter-ish first 8KB of SKILL.md separated by records.
-        let script = """
-        root=\(escaped)
-        [ -d "$root" ] || exit 0
-        for d in "$root"/*/; do
-          [ -d "$d" ] || continue
-          f="${d}SKILL.md"
-          [ -f "$f" ] || continue
-          name=$(basename "$d")
-          printf '%s\\0' "$name"
-          head -c 16000 "$f"
-          printf '\\0\\0'
-        done
-        """
-        let result = SSHClient.runShell(connection, script)
-        guard result.ok, !result.stdout.isEmpty else { return [] }
-
+    private static func parseRemoteSkills(_ stdout: String) -> [AgentSkill] {
         var skills: [AgentSkill] = []
-        let parts = result.stdout.components(separatedBy: "\0\0")
+        let parts = stdout.components(separatedBy: "\0\0")
         for part in parts {
             guard !part.isEmpty else { continue }
             let pieces = part.split(separator: "\0", maxSplits: 1, omittingEmptySubsequences: false)

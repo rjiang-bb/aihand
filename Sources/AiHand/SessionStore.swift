@@ -280,11 +280,30 @@ final class SessionStore: ObservableObject {
     private var gitRefreshWork: DispatchWorkItem?
     /// Polls branch / dirty stats while the sessions panel is visible.
     private var gitPollTimer: Timer?
-    /// Serializes `inspect` runs so a slow poll can’t stack git subprocesses.
-    private let gitProbeQueue = DispatchQueue(label: "net.penguinlabs.aihand.gitprobe", qos: .utility)
-    /// Guarded by `gitProbeQueue`: a probe is running, and the newest root requested meanwhile.
-    private var gitProbeInFlight = false
-    private var gitProbePendingKey: String?
+    /// Bookkeeping queue for probes — never blocks, so it stays responsive while SSH is slow.
+    private let gitProbeState = DispatchQueue(label: "net.penguinlabs.aihand.gitprobe.state", qos: .userInitiated)
+    /// Where the (blocking) `inspect` calls run. Concurrent so a slow/hung probe for the previous
+    /// folder can’t make the one you just clicked wait behind it.
+    private let gitProbeWork = DispatchQueue(
+        label: "net.penguinlabs.aihand.gitprobe.work",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+    /// Guarded by `gitProbeState`: at most one probe per (machine, root) at a time; a poll that
+    /// lands mid-probe coalesces into a single follow-up.
+    private var gitProbeInFlight = Set<String>()
+    private var gitProbePending: [String: GitProbeRequest] = [:]
+
+    /// Everything a probe needs, captured on the main thread when it’s scheduled.
+    private struct GitProbeRequest {
+        var root: String
+        var connectionID: UUID?
+        /// Resolved SSH connection (`nil` for local, or when the saved connection is gone).
+        var connection: SSHConnection?
+        var activePath: String
+
+        var flightKey: String { "\(connectionID?.uuidString ?? "local")|\(root)" }
+    }
 
     /// Sessions for the current working directory + branch (panel list / ⌘1…9).
     var sessions: [AgentSession] {
@@ -438,9 +457,18 @@ final class SessionStore: ObservableObject {
 
     private func scheduleGitRefresh(forRoot root: String, force: Bool = false) {
         let key = Self.normalizedWorkspace(root)
+        // Capture on the main thread — the probe itself runs on background queues and must not
+        // read `@Published` state or hit UserDefaults for a root the user may have left already.
+        let connectionID = currentConnectionID
+        let request = GitProbeRequest(
+            root: key,
+            connectionID: connectionID,
+            connection: connectionID.flatMap { Preferences.sshConnection(id: $0) },
+            activePath: currentWorkspace
+        )
         gitRefreshWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.startGitProbe(for: key)
+            self?.startGitProbe(request)
         }
         gitRefreshWork = work
         // Debounce rapid workspace flips; force path still waits a tick so UI can settle.
@@ -450,32 +478,36 @@ final class SessionStore: ObservableObject {
         )
     }
 
-    /// Run one probe at a time. A poll that lands mid-probe coalesces into a single follow-up
-    /// instead of queueing behind every tick (slow repos would otherwise never surface results).
-    private func startGitProbe(for key: String) {
-        gitProbeQueue.async { [weak self] in
+    /// One probe per root at a time. A poll that lands mid-probe coalesces into a single follow-up
+    /// instead of queueing behind every tick. Different roots probe concurrently, so switching
+    /// folders never waits on a slow probe for the folder you just left.
+    private func startGitProbe(_ request: GitProbeRequest) {
+        gitProbeState.async { [weak self] in
             guard let self else { return }
-            guard !self.gitProbeInFlight else {
-                self.gitProbePendingKey = key
+            let flightKey = request.flightKey
+            guard !self.gitProbeInFlight.contains(flightKey) else {
+                self.gitProbePending[flightKey] = request
                 return
             }
-            self.gitProbeInFlight = true
-            self.runGitProbe(for: key)
+            self.gitProbeInFlight.insert(flightKey)
+            self.gitProbeWork.async { [weak self] in
+                self?.runGitProbe(request)
+            }
         }
     }
 
-    /// Must be called on `gitProbeQueue` so the in-flight flags stay consistent.
-    private func runGitProbe(for key: String) {
-        let connection: SSHConnection? = {
-            // Capture connection for the root being probed (main-thread prefs are OK here;
-            // this block runs on gitProbeQueue after startGitProbe was scheduled from main).
-            let id = Preferences.agentWorkspaceConnectionID
-            return id.flatMap { Preferences.sshConnection(id: $0) }
-        }()
-        let activePath = currentWorkspace
+    /// Blocking (SSH / git). Runs on `gitProbeWork`, never on main.
+    private func runGitProbe(_ request: GitProbeRequest) {
+        let key = request.root
+        let connection = request.connection
+        let activePath = request.activePath
+        // A saved SSH connection that no longer exists must not fall back to a local probe of a remote path.
+        let missingConnection = request.connectionID != nil && connection == nil
         // SSH: metadata only (one remote shell). Full diffs hang on large trees.
         let detail: GitWorkspace.InspectDetail = connection == nil ? .full : .metadata
-        let info = key.isEmpty ? nil : GitWorkspace.inspect(path: key, connection: connection, detail: detail)
+        let info = (key.isEmpty || missingConnection)
+            ? nil
+            : GitWorkspace.inspect(path: key, connection: connection, detail: detail)
         // Resolve branch off the main thread — never SSH from `DispatchQueue.main`.
         let branch: String
         if let entry = info?.entry(forPath: activePath) {
@@ -493,15 +525,16 @@ final class SessionStore: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             // Apply only if this root is still the one being shown (the user may have switched).
-            if key == self.probedRootKey {
+            if key == self.probedRootKey && request.connectionID == self.currentConnectionID {
                 self.applyGitInfo(info, branch: branch)
             }
-            self.gitProbeQueue.async { [weak self] in
-                guard let self else { return }
-                self.gitProbeInFlight = false
-                guard let next = self.gitProbePendingKey else { return }
-                self.gitProbePendingKey = nil
-                self.startGitProbe(for: next)
+        }
+        gitProbeState.async { [weak self] in
+            guard let self else { return }
+            let flightKey = request.flightKey
+            self.gitProbeInFlight.remove(flightKey)
+            if let next = self.gitProbePending.removeValue(forKey: flightKey) {
+                self.startGitProbe(next)
             }
         }
     }

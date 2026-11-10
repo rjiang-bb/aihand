@@ -151,7 +151,8 @@ enum GitWorkspace {
         printf '---WORKTREES---\\n'
         git worktree list --porcelain 2>/dev/null || true
         """
-        let result = SSHClient.runShell(connection, script)
+        // Runs on every workspace switch + poll tick: skip the login shell's profile/rc cost.
+        let result = SSHClient.runShellFast(connection, script)
         guard result.ok else { return nil }
         let parts = result.stdout.components(separatedBy: "---WORKTREES---\n")
         guard let rawRoot = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines), !rawRoot.isEmpty else {
