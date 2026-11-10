@@ -553,49 +553,43 @@ struct AgentComposerView: View {
                 scheduleShortcutDismissFromButton()
             }
         }
-        .zIndex(showShortcutPopover ? 2 : 0)
-        .overlay(alignment: .topLeading) {
-            if showShortcutPopover {
-                shortcutsHoverPanel
-                    // Pin the panel’s bottom just above the Shortcuts label.
-                    .alignmentGuide(.top) { d in d.height + 6 }
-                    .onHover { hovering in
-                        shortcutDismissWork?.cancel()
-                        shortcutPopoverHovered = hovering
-                        if !hovering {
-                            scheduleShortcutDismissFromPopover()
-                        }
+        .popover(isPresented: shortcutPopoverBinding, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(shortcutHints.enumerated()), id: \.offset) { _, hint in
+                    HStack(spacing: 10) {
+                        Text(hint.key)
+                            .font(.system(size: 11, weight: .semibold).monospaced())
+                            .foregroundStyle(Color.primary.opacity(0.85))
+                            .frame(minWidth: 52, alignment: .leading)
+                        Text(hint.label)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.primary.opacity(0.6))
+                        Spacer(minLength: 0)
                     }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(minWidth: 180)
+            .onHover { hovering in
+                shortcutDismissWork?.cancel()
+                shortcutPopoverHovered = hovering
+                if !hovering {
+                    scheduleShortcutDismissFromPopover()
+                }
             }
         }
     }
 
-    private var shortcutsHoverPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(Array(shortcutHints.enumerated()), id: \.offset) { _, hint in
-                HStack(spacing: 10) {
-                    Text(hint.key)
-                        .font(.system(size: 11, weight: .semibold).monospaced())
-                        .foregroundStyle(Color.primary.opacity(0.85))
-                        .frame(minWidth: 52, alignment: .leading)
-                    Text(hint.label)
-                        .font(.system(size: 11))
-                        .foregroundStyle(Color.primary.opacity(0.6))
-                    Spacer(minLength: 0)
+    private var shortcutPopoverBinding: Binding<Bool> {
+        Binding(
+            get: { showShortcutPopover },
+            set: { presented in
+                if !presented {
+                    shortcutButtonHovered = false
+                    shortcutPopoverHovered = false
                 }
             }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(minWidth: 180, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(SoftChrome.cardFill(dark: colorScheme == .dark))
-                .shadow(color: .black.opacity(colorScheme == .dark ? 0.45 : 0.18), radius: 16, y: 6)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
         )
     }
 
