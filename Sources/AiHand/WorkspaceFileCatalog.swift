@@ -219,8 +219,17 @@ enum WorkspaceFileCatalog {
 
     private static func walkFiles(root: String) -> [WorkspaceFileEntry] {
         let fm = FileManager.default
+        // Resolve symlinks (`/var` → `/private/var`, linked project dirs): the enumerator
+        // yields resolved paths, so a relative-path strip against the unresolved root
+        // left garbage like `privatevar/...`.
+        // (`resolvingSymlinksInPath` special-cases `/var`, `/tmp` and drops `/private`, so use realpath.)
+        let resolvedRoot = realpath(root, nil).map { ptr -> String in
+            defer { free(ptr) }
+            return String(cString: ptr)
+        } ?? root
+        let rootURL = URL(fileURLWithPath: resolvedRoot)
         guard let enumerator = fm.enumerator(
-            at: URL(fileURLWithPath: root),
+            at: rootURL,
             includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else {
@@ -229,7 +238,6 @@ enum WorkspaceFileCatalog {
 
         var files: [WorkspaceFileEntry] = []
         files.reserveCapacity(512)
-        let rootURL = URL(fileURLWithPath: root)
 
         while let item = enumerator.nextObject() as? URL {
             let name = item.lastPathComponent

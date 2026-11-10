@@ -294,7 +294,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
     }
 
-    private static let shellHTML = """
+    static let shellHTML = """
     <!DOCTYPE html>
     <html>
     <head>

@@ -341,7 +341,8 @@ enum CaptureScope: String, CaseIterable {
 
 enum Preferences {
     static let changed = Notification.Name("AiHandPreferencesChanged")
-    private static let defaults = UserDefaults.standard
+    /// Swapped for a throwaway suite in tests.
+    static var defaults = UserDefaults.standard
 
     static var toggleShortcut: Shortcut {
         get { loadShortcut("shortcut.toggle") ?? .toggleDefault }

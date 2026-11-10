@@ -56,3 +56,10 @@ Composer editing (lists, quotes, fences, inline code, height) has a real-keystro
 
 - Run `./scripts/composer-probe.sh` (or pass sections: `quotes lists ordered fences inline height`). Exits non-zero on failure; renders land in `/tmp/probe-*.png`.
 - Run it after any change to `ComposerMarkdownStyler` / `ComposerPromptEditor`, and add checks for new behaviour or reported bugs.
+
+## Test suites
+
+- `swift test` — headless unit/logic tests (`Tests/AiHandTests`): CLI args, transcript markdown, composer handlers, session persistence, autocomplete. Prefs/Application Support are sandboxed (`SandboxedTestCase`).
+- `./scripts/composer-probe.sh` — composer real-keystroke harness (see above).
+- `./scripts/panel-probe.sh [placement height hints keys paging dismiss]` — sessions-panel harness (DEBUG-only, `SessionsPanelProbe.swift`): list/chat edge placement, list height, ⌘-hold hints, ⌘1–9 / ⌘↑↓ / ⌘W / ⌘/ / Esc. Needs a GUI session; run it after touching `SessionsSidePanel`.
+- `./scripts/overlay-probe.sh` — overlay/drawing end-to-end (`OverlayProbe.swift`): real HID mouse events → freehand/rectangle/arrow/text, undo/clear, toolbar click, click-swallowing, Esc. Needs Accessibility and **moves the real cursor** (hands off); prints SKIPPED if the event tap can't install.

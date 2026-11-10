@@ -39,7 +39,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     /// Workspace key last applied to selection memory (normalized path).
     private var trackedWorkspaceKey: String = ""
 
-    private let listWidth: CGFloat = 360
+    /// Must equal the SwiftUI content width (`listColumnWidth` + 14pt padding each side).
+    /// At 360 the hosting view silently widened the window to 372, so the layout math
+    /// (close → list's right edge == chat's right edge) was off by 12pt.
+    private let listWidth: CGFloat = SessionsSidePanelView.listColumnWidth + 28
     /// Grows with session count up to 10 rows + pagination (+ ⌘ hints / open workspace picker).
     private var listHeight: CGFloat {
         SessionsListMetrics.panelHeight(
@@ -1132,7 +1135,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 }
 
-private enum SessionsListPaging {
+enum SessionsListPaging {
     static let pageSize = 10
     /// Show the pager once the list grows past the old hard cap of 9.
     static let threshold = 9
@@ -1159,7 +1162,7 @@ private enum SessionsListPaging {
 }
 
 /// List panel height grows with session count up to one full page + pagination.
-private enum SessionsListMetrics {
+enum SessionsListMetrics {
     static let chromeVertical: CGFloat = 68 + 14
     /// Workspace picker closed: 13+13 pad + ~34pt title/path stack.
     static let picker: CGFloat = 60
@@ -1345,7 +1348,8 @@ private struct SessionsSidePanelView: View {
     var onChatResizeEnded: () -> Void
     var onPanelDragEnded: () -> Void
 
-    private let listColumnWidth: CGFloat = 344
+    static let listColumnWidth: CGFloat = 344
+    private var listColumnWidth: CGFloat { Self.listColumnWidth }
 
     @Environment(\.colorScheme) private var colorScheme
 
@@ -2835,3 +2839,16 @@ private struct ShortcutBadge: View {
         .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
     }
 }
+
+#if DEBUG
+/// Read-only window into private panel state for `SessionsPanelProbe`.
+extension SessionsSidePanel {
+    var probeFrame: NSRect { panel.frame }
+    var probeIsKey: Bool { panel.isKeyWindow }
+    var probeHintsShown: Bool { selection.showShortcutBadges }
+    var probeWindowNumber: Int { panel.windowNumber }
+    var probeListPage: Int { selection.listPage }
+    var probeListWidth: CGFloat { listWidth }
+    var probeListHeight: CGFloat { listHeight }
+}
+#endif

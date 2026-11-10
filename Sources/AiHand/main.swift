@@ -91,6 +91,12 @@ if let idx = CommandLine.arguments.firstIndex(of: "--make-hand"), CommandLine.ar
 if CommandLine.arguments.contains("--composer-probe") {
     exit(ComposerProbe.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--overlay-probe") {
+    exit(OverlayProbe.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--panel-probe") {
+    exit(SessionsPanelProbe.run() ? 0 : 1)
+}
 #endif
 
 if CommandLine.arguments.contains("--e2e-test") {
