@@ -7,6 +7,7 @@ class SandboxedTestCase: XCTestCase {
     private(set) var tempDir: URL!
     private var savedDefaults: UserDefaults!
     private var savedRoot: URL?
+    private var savedSkillHome: URL?
     private var suiteName: String!
 
     override func setUpWithError() throws {
@@ -15,9 +16,15 @@ class SandboxedTestCase: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         savedDefaults = Preferences.defaults
         savedRoot = AppSupport.rootOverride
+        savedSkillHome = SkillCatalog.homeDirectoryOverride
         suiteName = "aihand.tests.\(UUID().uuidString)"
         Preferences.defaults = UserDefaults(suiteName: suiteName)!
         AppSupport.rootOverride = tempDir.appendingPathComponent("support", isDirectory: true)
+        // Empty fake home so SkillCatalog never scans the developer's real ~/.codex / plugins.
+        SkillCatalog.homeDirectoryOverride = tempDir.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: SkillCatalog.homeDirectoryOverride!, withIntermediateDirectories: true
+        )
         WorkspaceFileCatalog.invalidate()
         SkillCatalog.invalidate()
     }
@@ -26,6 +33,8 @@ class SandboxedTestCase: XCTestCase {
         Preferences.defaults.removePersistentDomain(forName: suiteName)
         Preferences.defaults = savedDefaults
         AppSupport.rootOverride = savedRoot
+        SkillCatalog.homeDirectoryOverride = savedSkillHome
+        SkillCatalog.invalidate()
         try? FileManager.default.removeItem(at: tempDir)
     }
 

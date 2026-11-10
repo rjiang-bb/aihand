@@ -11,6 +11,9 @@ struct ComposerPromptEditor: NSViewRepresentable {
     var darkChrome: Bool = true
     var onSubmit: () -> Void
     var onHeightChange: (() -> Void)?
+    /// When the pasteboard has files/images the chat can attach, return true to
+    /// swallow the paste (⌘V hits this via the Edit menu — not only the key monitor).
+    var onPasteMedia: (() -> Bool)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -1030,6 +1033,11 @@ final class ComposerPromptTextView: NSTextView {
     }
 
     override func paste(_ sender: Any?) {
+        // Media first — screenshot boards often also carry a string/HTML flavor, and
+        // the FocusState key monitor can miss ⌘V when the Edit menu routes paste: here.
+        if parent?.parent.onPasteMedia?() == true {
+            return
+        }
         if let plain = NSPasteboard.general.string(forType: .string) {
             let normalized = ComposerMarkdownStyler.normalizePastedListMarkers(plain)
             insertText(normalized, replacementRange: selectedRange())

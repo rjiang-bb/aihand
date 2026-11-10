@@ -300,17 +300,19 @@ final class AgentSessionRunner {
                 handle.readabilityHandler = nil
                 return
             }
-            guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
-            Log.write("agent stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-            self?.bufferLock.lock()
-            self?.stderrText.append(text)
-            if let self, self.stderrText.count > 8_000 {
-                self.stderrText = String(self.stderrText.suffix(6_000))
-            }
-            self?.bufferLock.unlock()
+            self?.appendStderr(data)
         }
 
         process.terminationHandler = { [weak self] proc in
+            // The process is gone but its pipes may still hold unread output (the final
+            // `result` line, stderr). Drain to EOF *before* handling termination, otherwise the
+            // exit races the readability handlers and drops trailing events.
+            out.fileHandleForReading.readabilityHandler = nil
+            err.fileHandleForReading.readabilityHandler = nil
+            let restOut = out.fileHandleForReading.readDataToEndOfFile()
+            let restErr = err.fileHandleForReading.readDataToEndOfFile()
+            if !restOut.isEmpty { self?.consume(restOut) }
+            if !restErr.isEmpty { self?.appendStderr(restErr) }
             DispatchQueue.main.async {
                 self?.clearPipeHandlers()
                 self?.handleTermination(status: proc.terminationStatus)
@@ -353,6 +355,17 @@ final class AgentSessionRunner {
         stderr?.fileHandleForReading.readabilityHandler = nil
         stdout = nil
         stderr = nil
+    }
+
+    private func appendStderr(_ data: Data) {
+        guard let text = String(data: data, encoding: .utf8), !text.isEmpty else { return }
+        Log.write("agent stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        bufferLock.lock()
+        stderrText.append(text)
+        if stderrText.count > 8_000 {
+            stderrText = String(stderrText.suffix(6_000))
+        }
+        bufferLock.unlock()
     }
 
     private func consume(_ data: Data) {

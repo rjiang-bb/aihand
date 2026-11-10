@@ -63,7 +63,12 @@ extension AgentCLI {
 }
 
 enum AgentPathLookup {
+    /// Test hook: command name → executable path. An empty string means "not installed".
+    /// Lets tests point `agent` / `claude` / `codex` at a fake binary.
+    static var overrides: [String: String] = [:]
+
     static func resolve(_ name: String, extraCandidates: [String] = []) -> String? {
+        if let forced = overrides[name] { return forced.isEmpty ? nil : forced }
         let home = NSHomeDirectory()
         let candidates = extraCandidates + [
             "\(home)/.local/bin/\(name)",

@@ -390,3 +390,12 @@ private struct AnnotatePromptView: View {
         .onAppear { focused = true }
     }
 }
+
+#if DEBUG
+/// Read-only window into private panel state for `SessionsPanelProbe`.
+extension AnnotatePromptPanel {
+    var probeModel: AnnotatePromptModel { model }
+    var probeWindowNumber: Int { panel.windowNumber }
+    var probeIsKey: Bool { panel.isKeyWindow }
+}
+#endif

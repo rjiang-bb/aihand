@@ -130,7 +130,7 @@ enum SessionsPanelProbe {
         let requested = Set(CommandLine.arguments)
         let sections: [(String, () -> Void)] = [
             ("placement", placement), ("height", height), ("hints", hints),
-            ("keys", keys), ("paging", paging), ("dismiss", dismiss),
+            ("keys", keys), ("paging", paging), ("dismiss", dismiss), ("annotate", annotate),
         ]
         let known = Set(sections.map(\.0))
         let chosen = requested.intersection(known)
@@ -366,6 +366,83 @@ enum SessionsPanelProbe {
         expect("dismiss: reopening restores the same placement", near(panel.probeFrame.minX, frame.minX) && near(panel.probeFrame.maxY, frame.maxY),
                "before=\(fmt(frame)) after=\(fmt(panel.probeFrame))")
         panel.hide()
+    }
+
+    /// The annotate comment box: ⌘/ model cycling, typing, Return submits, Esc cancels.
+    static func annotate() {
+        panel?.hide()
+        let box = AnnotatePromptPanel()
+        let kind = Preferences.agentCLI(for: Preferences.runtimeAgentTarget)
+        Preferences.addAgentFavorite(AgentFavorite(title: "A", cliKind: kind, modelId: "ma", modelTitle: "A", effort: nil, isBuiltIn: false))
+        Preferences.addAgentFavorite(AgentFavorite(title: "B", cliKind: kind, modelId: "mb", modelTitle: "B", effort: nil, isBuiltIn: false))
+        var submitted: [String] = []
+        var cancelled = 0
+        var openStates: [Bool] = []
+        box.onSubmit = { submitted.append($0) }
+        box.onCancel = { cancelled += 1 }
+        box.onOpenChanged = { openStates.append($0) }
+
+        let screen = NSScreen.screens.first ?? NSScreen.main!
+        box.show(on: screen, placement: .bottom, workspaceMissing: false)
+        pump(0.5)
+        expect("annotate: panel is visible", box.isVisible)
+        expect("annotate: open state reported", openStates == [true], "\(openStates)")
+        expect("annotate: becomes key", box.probeIsKey)
+
+        func boxKey(_ code: Int, _ chars: String, _ flags: NSEvent.ModifierFlags = []) {
+            guard let e = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: box.probeWindowNumber, context: nil,
+                characters: chars, charactersIgnoringModifiers: chars,
+                isARepeat: false, keyCode: UInt16(code)
+            ) else { return }
+            NSApp.postEvent(e, atStart: false)
+            pump(0.08)
+        }
+
+        let model = box.probeModel
+        let favs = model.favorites
+        expect("annotate: favorites loaded", favs.count >= 3, "n=\(favs.count)")
+        var seen: [UUID?] = []
+        for _ in 0..<(favs.count + 1) {
+            boxKey(kVK_ANSI_Slash, "/", .command)
+            pump(0.05)
+            seen.append(model.selectedFavoriteID)
+        }
+        expect("annotate: ⌘/ visits every favorite", Set(seen.compactMap { $0 }) == Set(favs.map(\.id)))
+        expect("annotate: ⌘/ wraps", seen.first == seen.last)
+        expect("annotate: ⌘/ keeps the box open", box.isVisible)
+        expect("annotate: ⌘/ doesn't type a slash", model.text.isEmpty, "text=\(model.text)")
+
+        for ch in "fix it" { boxKey(0, String(ch)) }
+        expect("annotate: typing reaches the prompt", model.text == "fix it", "text=\(model.text)")
+
+        boxKey(kVK_Return, "\r")
+        pump(0.2)
+        expect("annotate: Return submits the text once", submitted == ["fix it"], "\(submitted)")
+        expect("annotate: box closes after submit", !box.isVisible)
+        expect("annotate: close reported", openStates.last == false)
+        expect("annotate: submit keeps the chosen model as Current",
+               Preferences.currentAgentFavoriteID(for: kind, target: Preferences.runtimeAgentTarget) == model.selectedFavoriteID)
+
+        // Reopen: fresh prompt, Esc cancels without submitting.
+        box.show(on: screen, placement: .bottom, workspaceMissing: false)
+        pump(0.4)
+        expect("annotate: reopens with an empty prompt", model.text.isEmpty, "text=\(model.text)")
+        boxKey(0, "x")
+        boxKey(kVK_Escape, "\u{1b}")
+        pump(0.2)
+        expect("annotate: Esc cancels", cancelled == 1 && submitted.count == 1, "cancelled=\(cancelled) submitted=\(submitted)")
+        expect("annotate: Esc closes the box", !box.isVisible)
+
+        // requirePrompt: empty Return must not submit.
+        box.show(on: screen, placement: .bottom, workspaceMissing: false, requirePrompt: true)
+        pump(0.4)
+        boxKey(kVK_Return, "\r")
+        pump(0.2)
+        expect("annotate: required prompt blocks empty submit", submitted.count == 1 && box.isVisible, "submitted=\(submitted)")
+        box.hide()
     }
 }
 #endif

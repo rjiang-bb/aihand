@@ -54,15 +54,15 @@ enum ComposerMediaImport {
     /// Import files / images from the general pasteboard.
     /// Returns `nil` when there's nothing to attach (caller falls through to text paste).
     static func attachmentsFromPasteboard(_ pasteboard: NSPasteboard = .general) -> [ComposerAttachment]? {
+        // Prefer real file URLs when they import; don't let a stale/promised URL
+        // short-circuit bitmap paste (⌃⌘⇧4 and many “Copy Image” boards ship both).
         if let urls = fileURLs(from: pasteboard), !urls.isEmpty {
-            return urls.compactMap { importURL($0) }
+            let imported = urls.compactMap { importURL($0) }
+            if !imported.isEmpty { return imported }
         }
 
-        if let image = nsImage(from: pasteboard) {
-            if let path = writePNG(image) {
-                return [ComposerAttachment(path: path, ownsFile: true)]
-            }
-            return []
+        if let path = writeImage(from: pasteboard) {
+            return [ComposerAttachment(path: path, ownsFile: true)]
         }
 
         return nil
@@ -83,9 +83,10 @@ enum ComposerMediaImport {
     static func attachmentsFromDragPasteboard() -> [ComposerAttachment] {
         let pb = NSPasteboard(name: .drag)
         if let urls = fileURLs(from: pb), !urls.isEmpty {
-            return attachments(fromFileURLs: urls)
+            let imported = attachments(fromFileURLs: urls)
+            if !imported.isEmpty { return imported }
         }
-        if let image = nsImage(from: pb), let path = writePNG(image) {
+        if let path = writeImage(from: pb) {
             return [ComposerAttachment(path: path, ownsFile: true)]
         }
         return []
@@ -138,12 +139,39 @@ enum ComposerMediaImport {
         }
     }
 
+    /// Persist pasteboard image bytes (prefer raw PNG/JPEG/HEIC; TIFF last because AppKit
+    /// often synthesizes it from other flavors and we'd save the wrong container).
+    private static func writeImage(from pasteboard: NSPasteboard) -> String? {
+        let rawTypes: [(NSPasteboard.PasteboardType, String)] = [
+            (.png, "png"),
+            (NSPasteboard.PasteboardType("public.jpeg"), "jpg"),
+            (NSPasteboard.PasteboardType("public.heic"), "heic"),
+            (.tiff, "tiff"),
+        ]
+        // Stick to types the board declared — `data(forType:)` can otherwise invent flavors.
+        let declared = Set(pasteboard.types ?? [])
+        for (type, ext) in rawTypes where declared.contains(type) {
+            if let data = pasteboard.data(forType: type), !data.isEmpty {
+                if let path = writeData(data, ext: ext) { return path }
+            }
+        }
+        if let image = nsImage(from: pasteboard), let path = writePNG(image) {
+            return path
+        }
+        return nil
+    }
+
     private static func nsImage(from pasteboard: NSPasteboard) -> NSImage? {
         if let image = NSImage(pasteboard: pasteboard),
            image.size.width > 0, image.size.height > 0 {
             return image
         }
-        for type in [NSPasteboard.PasteboardType.png, .tiff] {
+        for type in [
+            NSPasteboard.PasteboardType.png,
+            .tiff,
+            NSPasteboard.PasteboardType("public.jpeg"),
+            NSPasteboard.PasteboardType("public.heic"),
+        ] {
             if let data = pasteboard.data(forType: type),
                let image = NSImage(data: data),
                image.size.width > 0 {
@@ -154,18 +182,31 @@ enum ComposerMediaImport {
     }
 
     private static func writePNG(_ image: NSImage) -> String? {
-        guard let tiff = image.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let png = rep.representation(using: .png, properties: [:]) else {
-            return nil
+        if let tiff = image.tiffRepresentation,
+           let rep = NSBitmapImageRep(data: tiff),
+           let png = rep.representation(using: .png, properties: [:]) {
+            return writeData(png, ext: "png")
         }
+        // Some pasteboard images have no TIFF rep but still expose a CGImage.
+        var rect = CGRect(origin: .zero, size: image.size)
+        if let cg = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) {
+            let rep = NSBitmapImageRep(cgImage: cg)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                return writeData(png, ext: "png")
+            }
+        }
+        Log.write("composer paste png encode failed (\(Int(image.size.width))×\(Int(image.size.height)))")
+        return nil
+    }
+
+    private static func writeData(_ data: Data, ext: String) -> String? {
         let folder = Preferences.ensureScreenshotsFolder()
-        let path = uniqueDestination(in: folder, ext: "png")
+        let path = uniqueDestination(in: folder, ext: ext)
         do {
-            try png.write(to: URL(fileURLWithPath: path))
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
             return path
         } catch {
-            Log.write("composer paste png write failed: \(error.localizedDescription)")
+            Log.write("composer paste \(ext) write failed: \(error.localizedDescription)")
             return nil
         }
     }

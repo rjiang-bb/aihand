@@ -4,7 +4,7 @@
 # Prefs and Application Support are sandboxed to a temp dir.
 #
 #   ./scripts/panel-probe.sh                # all sections
-#   ./scripts/panel-probe.sh hints keys     # placement height hints keys paging dismiss
+#   ./scripts/panel-probe.sh hints keys     # placement height hints keys paging dismiss annotate
 #
 # Exits non-zero on failure. Renders land in /tmp/probe-panel-*.png.
 set -euo pipefail

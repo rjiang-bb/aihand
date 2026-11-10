@@ -19,6 +19,9 @@ enum SkillCatalog {
     private static let lock = NSLock()
     private static let cacheTTL: TimeInterval = 30
 
+    /// Tests point this at a temp home so they never scan the real `~/.codex` / plugins trees.
+    static var homeDirectoryOverride: URL?
+
     static func skills(
         workspace: String? = nil,
         connectionID: UUID? = Preferences.agentWorkspaceConnectionID,
@@ -124,24 +127,85 @@ enum SkillCatalog {
 
     // MARK: - Local scan
 
-    private static func scanLocal(workspace: String?) -> [AgentSkill] {
-        var roots: [URL] = []
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        roots.append(home.appendingPathComponent(".cursor/skills"))
-        roots.append(home.appendingPathComponent(".agents/skills"))
-        roots.append(home.appendingPathComponent(".cursor/skills-cursor"))
+    private static var homeDirectory: URL {
+        homeDirectoryOverride ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// Skill containers whose immediate children are `name/SKILL.md` folders.
+    /// First root wins when names collide (Cursor/agents before CLI/plugin caches).
+    static func skillContainerRoots(workspace: String?) -> [URL] {
+        let home = homeDirectory
+        var roots: [URL] = [
+            home.appendingPathComponent(".cursor/skills"),
+            home.appendingPathComponent(".agents/skills"),
+            home.appendingPathComponent(".cursor/skills-cursor"),
+        ]
         if let workspace, !workspace.isEmpty {
             let base = URL(fileURLWithPath: workspace, isDirectory: true)
             roots.append(base.appendingPathComponent(".cursor/skills"))
             roots.append(base.appendingPathComponent(".agents/skills"))
+            roots.append(base.appendingPathComponent(".claude/skills"))
+            roots.append(base.appendingPathComponent(".codex/skills"))
+            roots.append(base.appendingPathComponent(".codex/skills/.system"))
         }
+        // CLI-specific personal + bundled system skills.
+        roots.append(home.appendingPathComponent(".claude/skills"))
+        roots.append(home.appendingPathComponent(".codex/skills"))
+        roots.append(home.appendingPathComponent(".codex/skills/.system"))
+        // Installed plugins (Codex / Claude / Cursor) — lowest priority.
+        for tree in pluginSkillTrees(home: home) {
+            roots.append(contentsOf: discoverPluginSkillContainers(under: tree))
+        }
+        return roots
+    }
 
+    private static func pluginSkillTrees(home: URL) -> [URL] {
+        [
+            home.appendingPathComponent(".codex/plugins"),
+            home.appendingPathComponent(".codex/.tmp/plugins"),
+            home.appendingPathComponent(".claude/plugins"),
+            home.appendingPathComponent(".cursor/plugins"),
+        ]
+    }
+
+    /// Directories named `skills`, `skills-*`, or `*-skills` that hold skill folders.
+    static func discoverPluginSkillContainers(under base: URL, maxDepth: Int = 8) -> [URL] {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: base.path) else { return [] }
+        guard let enumerator = fm.enumerator(
+            at: base,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsPackageDescendants]
+        ) else { return [] }
+
+        var found: [URL] = []
+        let basePath = base.path
+        while let item = enumerator.nextObject() as? URL {
+            let rel = item.path.dropFirst(basePath.count)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let depth = rel.isEmpty ? 0 : rel.split(separator: "/").count
+            if depth > maxDepth {
+                enumerator.skipDescendants()
+                continue
+            }
+            let name = item.lastPathComponent
+            let isSkillsDir = name == "skills"
+                || name.hasPrefix("skills-")
+                || name.hasSuffix("-skills")
+            guard isSkillsDir else { continue }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: item.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            found.append(item)
+            enumerator.skipDescendants()
+        }
+        return found
+    }
+
+    private static func scanLocal(workspace: String?) -> [AgentSkill] {
         var byName: [String: AgentSkill] = [:]
-        for root in roots {
-            for skill in loadSkillsLocal(in: root) {
-                if byName[skill.name] == nil {
-                    byName[skill.name] = skill
-                }
+        for root in skillContainerRoots(workspace: workspace) {
+            for skill in loadSkillsLocal(in: root) where byName[skill.name] == nil {
+                byName[skill.name] = skill
             }
         }
         return byName.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -149,10 +213,14 @@ enum SkillCatalog {
 
     private static func loadSkillsLocal(in root: URL) -> [AgentSkill] {
         let fm = FileManager.default
+        // Include hidden children when the root itself is a hidden system folder
+        // (`~/.codex/skills/.system`); still skip dotfiles under normal roots.
+        let options: FileManager.DirectoryEnumerationOptions =
+            root.lastPathComponent.hasPrefix(".") ? [] : [.skipsHiddenFiles]
         guard let entries = try? fm.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
+            options: options
         ) else { return [] }
 
         var skills: [AgentSkill] = []
@@ -188,23 +256,51 @@ enum SkillCatalog {
             "\"$HOME/.cursor/skills-cursor\""
         ]
         if let workspace, !workspace.isEmpty {
-            roots.append(SSHClient.shellEscape("\(workspace)/.cursor/skills"))
-            roots.append(SSHClient.shellEscape("\(workspace)/.agents/skills"))
+            let ws = SSHClient.shellEscape(workspace)
+            roots.append("\(ws)/.cursor/skills")
+            roots.append("\(ws)/.agents/skills")
+            roots.append("\(ws)/.claude/skills")
+            roots.append("\(ws)/.codex/skills")
+            roots.append("\(ws)/.codex/skills/.system")
         }
+        roots.append(contentsOf: [
+            "\"$HOME/.claude/skills\"",
+            "\"$HOME/.codex/skills\"",
+            "\"$HOME/.codex/skills/.system\""
+        ])
+
+        let pluginTrees = [
+            "\"$HOME/.codex/plugins\"",
+            "\"$HOME/.codex/.tmp/plugins\"",
+            "\"$HOME/.claude/plugins\"",
+            "\"$HOME/.cursor/plugins\""
+        ]
 
         // Emit per skill: dirname\0first-16KB-of-SKILL.md\0\0, roots in priority order.
+        // Plugin trees: find `skills` / `skills-*` / `*-skills` containers (depth ≤ 8).
         let script = """
-        for root in \(roots.joined(separator: " ")); do
-          [ -d "$root" ] || continue
+        emit_root() {
+          local root="$1"
+          [ -d "$root" ] || return 0
+          local d
           for d in "$root"/*/; do
             [ -d "$d" ] || continue
-            f="${d}SKILL.md"
+            local f="${d}SKILL.md"
             [ -f "$f" ] || continue
-            name=$(basename "$d")
-            printf '%s\\0' "$name"
+            printf '%s\\0' "$(basename "$d")"
             head -c 16000 "$f"
             printf '\\0\\0'
           done
+        }
+        for root in \(roots.joined(separator: " ")); do
+          emit_root "$root"
+        done
+        for base in \(pluginTrees.joined(separator: " ")); do
+          [ -d "$base" ] || continue
+          # -name patterns cover Cursor's skills-figquery / workflow-skills too.
+          while IFS= read -r root; do
+            emit_root "$root"
+          done < <(find "$base" -maxdepth 8 \\( -type d -name 'skills' -o -type d -name 'skills-*' -o -type d -name '*-skills' \\) 2>/dev/null)
         done
         """
         let result = SSHClient.runShellFast(connection, script)

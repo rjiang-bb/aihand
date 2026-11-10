@@ -225,7 +225,8 @@ struct AgentComposerView: View {
                 placeholder: placeholder,
                 darkChrome: colorScheme == .dark,
                 onSubmit: handleSubmit,
-                onHeightChange: { onLayoutNeeded?() }
+                onHeightChange: { onLayoutNeeded?() },
+                onPasteMedia: attachments == nil ? nil : { pasteMediaFromClipboard() }
             )
             .frame(maxWidth: .infinity, minHeight: promptEditorHeight, maxHeight: promptEditorHeight, alignment: .topLeading)
             // NSTextView can paint past its frame; without this, lines sit on + / Shortcuts.
@@ -774,7 +775,18 @@ struct AgentComposerView: View {
         return true
     }
 
-    /// ⌘V media paste + Esc dismiss for the + menu (Return owned by the prompt editor).
+    /// True when the pasteboard had attachable media and it was appended.
+    @discardableResult
+    private func pasteMediaFromClipboard() -> Bool {
+        guard attachments != nil,
+              let imported = ComposerMediaImport.attachmentsFromPasteboard(),
+              !imported.isEmpty else { return false }
+        appendAttachments(imported)
+        return true
+    }
+
+    /// ⌘V media paste (backup when the prompt isn't first responder) + Esc dismiss
+    /// for the + menu (Return owned by the prompt editor).
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -787,21 +799,17 @@ struct AgentComposerView: View {
                 return nil
             }
 
-            // Require FocusState so a hidden sessions chat composer doesn't steal
-            // keys from the annotate panel (sessions is ordered out, not destroyed).
-            guard focused else { return event }
-
-            if code == kVK_ANSI_V,
+            // Prompt first-responder paste: is handled in ComposerPromptTextView.paste.
+            // This path covers ⌘V while the SoftChrome chrome / strip has focus.
+            let promptActive = focused
+                || (ComposerFieldEditor.editableTextView() as? ComposerPromptTextView) != nil
+            if promptActive,
+               code == kVK_ANSI_V,
                flags.contains(.command),
                !flags.contains(.shift),
                !flags.contains(.option),
                !flags.contains(.control),
-               attachments != nil,
-               let imported = ComposerMediaImport.attachmentsFromPasteboard(),
-               !imported.isEmpty {
-                DispatchQueue.main.async {
-                    appendAttachments(imported)
-                }
+               pasteMediaFromClipboard() {
                 return nil
             }
 

@@ -125,6 +125,85 @@ final class SkillCatalogTests: SandboxedTestCase {
         XCTAssertNotNil(found.first { $0.name == "zz-noname" }, "falls back to directory name")
         XCTAssertNil(found.first { $0.name == "zz-broken" })
     }
+
+    func testCodexAndClaudePersonalAndSystemSkillsAreDiscovered() throws {
+        let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
+        try write(".codex/skills/zz-codex-user/SKILL.md", """
+        ---
+        name: zz-codex-user
+        description: from ~/.codex/skills
+        ---
+        """, under: home)
+        try write(".codex/skills/.system/zz-codex-system/SKILL.md", """
+        ---
+        name: zz-codex-system
+        description: bundled system skill
+        ---
+        """, under: home)
+        try write(".claude/skills/zz-claude-user/SKILL.md", """
+        ---
+        name: zz-claude-user
+        description: from ~/.claude/skills
+        ---
+        """, under: home)
+
+        let found = SkillCatalog.skills(workspace: nil, connectionID: nil, forceRefresh: true)
+        XCTAssertNotNil(found.first { $0.name == "zz-codex-user" })
+        XCTAssertNotNil(found.first { $0.name == "zz-codex-system" },
+                        "~/.codex/skills/.system is a hidden folder — must still be scanned")
+        XCTAssertNotNil(found.first { $0.name == "zz-claude-user" })
+    }
+
+    func testPluginSkillContainersAreDiscovered() throws {
+        let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
+        // Codex installed plugin cache shape: plugins/cache/<mkt>/<plugin>/<ver>/skills/<name>/
+        try write(
+            ".codex/plugins/cache/mkt/demo/1.0.0/skills/zz-codex-plugin/SKILL.md",
+            "---\nname: zz-codex-plugin\ndescription: codex plugin skill\n---\n",
+            under: home
+        )
+        // Claude marketplace plugin shape.
+        try write(
+            ".claude/plugins/marketplaces/official/plugins/demo/skills/zz-claude-plugin/SKILL.md",
+            "---\nname: zz-claude-plugin\ndescription: claude plugin skill\n---\n",
+            under: home
+        )
+        // Cursor cache also uses skills-* / *-skills folder names.
+        try write(
+            ".cursor/plugins/cache/pub/hash/skills-figquery/zz-cursor-plugin/SKILL.md",
+            "---\nname: zz-cursor-plugin\ndescription: cursor plugin skill\n---\n",
+            under: home
+        )
+
+        let containers = SkillCatalog.discoverPluginSkillContainers(
+            under: home.appendingPathComponent(".codex/plugins")
+        )
+        XCTAssertTrue(containers.contains { $0.path.hasSuffix("/skills") })
+
+        let found = SkillCatalog.skills(workspace: nil, connectionID: nil, forceRefresh: true)
+        XCTAssertNotNil(found.first { $0.name == "zz-codex-plugin" })
+        XCTAssertNotNil(found.first { $0.name == "zz-claude-plugin" })
+        XCTAssertNotNil(found.first { $0.name == "zz-cursor-plugin" })
+    }
+
+    func testCursorPersonalSkillBeatsPluginWithSameName() throws {
+        let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
+        try write(".cursor/skills/zz-dup/SKILL.md", """
+        ---
+        name: zz-dup
+        description: from cursor personal
+        ---
+        """, under: home)
+        try write(
+            ".codex/plugins/cache/m/p/1/skills/zz-dup/SKILL.md",
+            "---\nname: zz-dup\ndescription: from plugin\n---\n",
+            under: home
+        )
+        let found = SkillCatalog.skills(workspace: nil, connectionID: nil, forceRefresh: true)
+        let skill = try XCTUnwrap(found.first { $0.name == "zz-dup" })
+        XCTAssertEqual(skill.description, "from cursor personal",
+                       "earlier roots win; plugins must not override personal Cursor skills")
+    }
 }
 
 @MainActor
@@ -175,9 +254,13 @@ final class AutocompleteControllerTests: SandboxedTestCase {
         XCTAssertEqual(c.selectedIndex, 0)
     }
 
-    func testSkillControllerLifecycle() {
+    func testSkillControllerLifecycle() throws {
+        // Home is sandboxed, so seed a skill for "/re" to match.
+        let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
+        try write(".cursor/skills/zz-review/SKILL.md", "---\nname: zz-review\ndescription: d\n---\n", under: home)
+        SkillCatalog.invalidate()
         let c = SkillAutocompleteController()
-        c.update(text: "hi /re")
+        c.update(text: "hi /zz-re")
         XCTAssertTrue(c.isActive)
         c.update(text: "hi there")
         XCTAssertFalse(c.isActive)

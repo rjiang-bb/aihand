@@ -50,6 +50,15 @@ When an action **reveals** a text field (inline path box, composer, rename field
 - After an **NSMenu** (or sheet) opens the field, SwiftUI `FocusState` is unreliable — use AppKit `window.makeFirstResponder(field)` (see `AutofocusPlainField` / annotate prompt), deferred until the menu tears down.
 - If the menu item was chosen with **↩**, swallow that leftover Return (and ignore the field’s submit action briefly) so focusing the field does not immediately confirm.
 
+## Keep tests current
+
+Any **new or changed behavior** must land with matching coverage in the same change. Do not ship a fix or feature and leave tests for “later.”
+
+- Prefer a headless `swift test` case when the logic can be exercised without a window (handlers, import/parse, persistence, CLI argv, pasteboard import, paste routing).
+- Prefer / extend a GUI harness (`scripts/*-probe.sh`) when the bug is layout, focus, real key events, or drawing.
+- Update an existing test when behavior changes; add a new case when covering a new path or regression.
+- Before finishing: run the relevant `swift test --filter …` and/or probe script(s) and confirm they pass.
+
 ## Composer harness
 
 Composer editing (lists, quotes, fences, inline code, height) has a real-keystroke regression harness in `Sources/AiHand/ComposerProbe.swift` (DEBUG-only).
@@ -59,7 +68,7 @@ Composer editing (lists, quotes, fences, inline code, height) has a real-keystro
 
 ## Test suites
 
-- `swift test` — headless unit/logic tests (`Tests/AiHandTests`): CLI args, transcript markdown, composer handlers, session persistence, autocomplete. Prefs/Application Support are sandboxed (`SandboxedTestCase`).
+- `swift test` — headless unit/logic tests (`Tests/AiHandTests`): CLI args, transcript markdown, composer handlers, chips/media paste import + paste routing, session persistence, autocomplete / skill roots (Cursor + `~/.codex` / `~/.claude` + installed plugins), and the agent send path (`FakeAgentTests`: a fake CLI via `AgentPathLookup.overrides` records argv/cwd and emits stream-json for cursor/claude/codex). Prefs/Application Support / skill-home are sandboxed (`SandboxedTestCase`).
 - `./scripts/composer-probe.sh` — composer real-keystroke harness (see above).
-- `./scripts/panel-probe.sh [placement height hints keys paging dismiss]` — sessions-panel harness (DEBUG-only, `SessionsPanelProbe.swift`): list/chat edge placement, list height, ⌘-hold hints, ⌘1–9 / ⌘↑↓ / ⌘W / ⌘/ / Esc. Needs a GUI session; run it after touching `SessionsSidePanel`.
+- `./scripts/panel-probe.sh [placement height hints keys paging dismiss]` — sessions-panel harness (DEBUG-only, `SessionsPanelProbe.swift`): list/chat edge placement, list height, ⌘-hold hints, ⌘1–9 / ⌘↑↓ / ⌘W / ⌘/ / Esc, plus the annotate comment box (⌘/ cycling, Return submits, Esc cancels). Needs a GUI session; run it after touching `SessionsSidePanel`.
 - `./scripts/overlay-probe.sh` — overlay/drawing end-to-end (`OverlayProbe.swift`): real HID mouse events → freehand/rectangle/arrow/text, undo/clear, toolbar click, click-swallowing, Esc. Needs Accessibility and **moves the real cursor** (hands off); prints SKIPPED if the event tap can't install.
