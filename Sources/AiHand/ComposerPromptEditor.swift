@@ -486,7 +486,8 @@ struct ComposerPromptEditor: NSViewRepresentable {
                 }
                 if commandSelector == #selector(NSResponder.deleteBackward(_:)) {
                     if ComposerMarkdownStyler.handleFenceDeleteBackward(in: textView)
-                        || ComposerMarkdownStyler.handleListBackspace(in: textView) {
+                        || ComposerMarkdownStyler.handleListBackspace(in: textView)
+                        || ComposerMarkdownStyler.handleQuoteBackspace(in: textView) {
                         restyleKeepingSelection()
                         recalculateHeightAfterLayout()
                         return true
@@ -878,46 +879,65 @@ final class ComposerPromptTextView: NSTextView {
     }
 
     private func drawQuoteBars(in dirtyRect: NSRect) {
-        guard let layoutManager, textContainer != nil else { return }
-        let ns = string as NSString
-        let quotes = ComposerMarkdownStyler.quoteLineRanges(in: ns)
-        guard !quotes.isEmpty else { return }
-
-        let origin = textContainerOrigin
+        let bars = quoteBarRects()
+        guard !bars.isEmpty else { return }
         let dark = parent?.parent.darkChrome ?? true
         let barColor = dark
             ? NSColor(white: 1, alpha: 0.42)
             : NSColor(white: 0, alpha: 0.35)
-        let width = ComposerMarkdownStyler.quoteBarWidth
-        let inset = ComposerMarkdownStyler.quoteBarInset
-        // Sit in the quote gutter, not at the (collapsed) marker glyph.
-        let barX = origin.x + textContainerInset.width + inset
-        let fallbackLine = ComposerMarkdownStyler.bodyLineHeight
         barColor.setFill()
-
-        for range in quotes {
-            let glyphRange = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
-            guard glyphRange.length > 0 else { continue }
-            let frag = layoutManager.lineFragmentRect(
-                forGlyphAt: glyphRange.location,
-                effectiveRange: nil
-            )
-            var rect = frag
-            rect.origin.x += origin.x
-            rect.origin.y += origin.y
-            // Bare `>` used to collapse to a speck — always paint at least one line.
-            let barHeight = max(rect.height - 2, fallbackLine - 2, 14)
-            guard rect.intersects(dirtyRect) || NSRect(
-                x: barX, y: rect.minY, width: width, height: barHeight
-            ).intersects(dirtyRect) else { continue }
-            let bar = NSRect(
-                x: barX,
-                y: rect.minY + 1,
-                width: width,
-                height: barHeight
-            )
+        for bar in bars where bar.intersects(dirtyRect) {
             NSBezierPath(roundedRect: bar, xRadius: 1, yRadius: 1).fill()
         }
+    }
+
+    /// One bar per run of consecutive quote lines, spanning every wrapped fragment —
+    /// per-line bars left 2pt gaps between lines and skipped wrapped continuations.
+    func quoteBarRects() -> [NSRect] {
+        guard let layoutManager, let textContainer else { return [] }
+        let ns = string as NSString
+        let quotes = ComposerMarkdownStyler.quoteLineRanges(in: ns)
+        guard !quotes.isEmpty else { return [] }
+        layoutManager.ensureLayout(for: textContainer)
+
+        let origin = textContainerOrigin
+        let width = ComposerMarkdownStyler.quoteBarWidth
+        // Sit in the quote gutter, not at the (collapsed) marker glyph.
+        let barX = origin.x + ComposerMarkdownStyler.quoteBarInset
+        var bars: [NSRect] = []
+        var runTop: CGFloat?
+        var runBottom: CGFloat = 0
+        var runEndChar = -1
+
+        func flush() {
+            if let top = runTop {
+                bars.append(NSRect(x: barX, y: origin.y + top + 1, width: width, height: max(2, runBottom - top - 2)))
+            }
+            runTop = nil
+        }
+
+        for range in quotes {
+            let line = ns.lineRange(for: NSRange(location: range.location, length: 0))
+            let glyphs = layoutManager.glyphRange(forCharacterRange: line, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { continue }
+            var top = CGFloat.greatestFiniteMagnitude
+            var bottom: CGFloat = 0
+            var gi = glyphs.location
+            while gi < NSMaxRange(glyphs) {
+                var fr = NSRange()
+                let frag = layoutManager.lineFragmentUsedRect(forGlyphAt: gi, effectiveRange: &fr)
+                top = min(top, frag.minY)
+                bottom = max(bottom, layoutManager.lineFragmentRect(forGlyphAt: gi, effectiveRange: nil).maxY)
+                gi = max(NSMaxRange(fr), gi + 1)
+            }
+            guard bottom > top else { continue }
+            if runTop != nil, line.location != runEndChar { flush() }
+            if runTop == nil { runTop = top }
+            runBottom = bottom
+            runEndChar = NSMaxRange(line)
+        }
+        flush()
+        return bars
     }
 
     private func drawListBullets(in dirtyRect: NSRect) {

@@ -1011,6 +1011,30 @@ enum ComposerMarkdownStyler {
         return true
     }
 
+    /// Backspace at (or inside) a quote prefix strips the whole `> ` so the line becomes
+    /// plain text; deleting the hidden space alone left a still-quoted `>body`.
+    @discardableResult
+    static func handleQuoteBackspace(in textView: NSTextView) -> Bool {
+        guard !caretIsInFence(in: textView) else { return false }
+        guard let storage = textView.textStorage else { return false }
+        let ns = storage.string as NSString
+        let sel = textView.selectedRange()
+        guard sel.length == 0, ns.length > 0 else { return false }
+        let caret = min(sel.location, ns.length)
+        let activeLine = caretLine(at: caret, in: ns)
+        let hasTrailingNewline = ns.substring(with: activeLine).hasSuffix("\n")
+        let contentLen = hasTrailingNewline ? activeLine.length - 1 : activeLine.length
+        guard contentLen > 0 else { return false }
+        let content = ns.substring(with: NSRange(location: activeLine.location, length: contentLen))
+        guard let re = try? NSRegularExpression(pattern: #"^\s*>+\s?"#),
+              let m = re.firstMatch(in: content, range: NSRange(location: 0, length: (content as NSString).length))
+        else { return false }
+        let prefixEnd = activeLine.location + m.range.length
+        guard caret > activeLine.location, caret <= prefixEnd else { return false }
+        removeLinePrefix(in: textView, line: activeLine, prefixLength: m.range.length)
+        return true
+    }
+
     /// Strip a leading marker run and park the caret at line start (empty-item exit).
     private static func removeLinePrefix(
         in textView: NSTextView,
@@ -1369,7 +1393,6 @@ enum ComposerMarkdownStyler {
         let codeBg = dark ? NSColor(white: 1, alpha: 0.14) : NSColor(white: 0, alpha: 0.08)
         let fenceBg = dark ? NSColor(white: 1, alpha: 0.11) : NSColor(white: 0, alpha: 0.06)
         let quoteFg = dark ? NSColor(white: 0.88, alpha: 1) : NSColor(white: 0.28, alpha: 1)
-        let quoteBg = dark ? NSColor(white: 1, alpha: 0.06) : NSColor(white: 0, alpha: 0.05)
         // Truly invisible — SoftChrome is a gradient and the code chip is lighter,
         // so matching a flat charcoal still left white/gray ``` ticks visible.
         let markerHide = NSColor.clear
@@ -1458,7 +1481,6 @@ enum ComposerMarkdownStyler {
             label: label,
             bullet: bullet,
             quoteFg: quoteFg,
-            quoteBg: quoteBg,
             caret: caret,
             selection: selection
         )
@@ -2015,7 +2037,6 @@ enum ComposerMarkdownStyler {
         label: NSColor,
         bullet: NSColor,
         quoteFg: NSColor,
-        quoteBg: NSColor,
         caret: Int?,
         selection: NSRange?
     ) {
@@ -2063,7 +2084,7 @@ enum ComposerMarkdownStyler {
                 )
                 continue
             }
-            if let match = content.range(of: #"^(\s*)>(\s?)"#, options: .regularExpression) {
+            if let match = content.range(of: #"^(\s*)>+(\s?)"#, options: .regularExpression) {
                 applyQuoteStyle(
                     in: textStorage,
                     paragraphRange: lineRange,
@@ -2072,7 +2093,9 @@ enum ComposerMarkdownStyler {
                     match: match,
                     bodyFont: bodyFont,
                     quoteFg: quoteFg,
-                    quoteBg: quoteBg
+                    markerColor: bullet,
+                    caret: caret,
+                    selection: selection
                 )
             }
         }
@@ -2251,36 +2274,38 @@ enum ComposerMarkdownStyler {
         match: Range<String.Index>,
         bodyFont: NSFont,
         quoteFg: NSColor,
-        quoteBg: NSColor
+        markerColor: NSColor,
+        caret: Int?,
+        selection: NSRange?
     ) {
         let markerRange = NSRange(match, in: line)
         let absMarker = NSRange(location: contentRange.location + markerRange.location, length: markerRange.length)
-        let lineHeight = ceil(bodyFont.ascender - bodyFont.descender + 2)
+        let revealed = listSyntaxRevealed(
+            syntax: absMarker, caret: caret, selection: selection, edgesReveal: false
+        )
         let para = NSMutableParagraphStyle()
         para.firstLineHeadIndent = quoteIndent
         para.headIndent = quoteIndent
         para.lineSpacing = 1
-        // Empty `>` must keep a full line so the painted bar isn't a speck.
-        para.minimumLineHeight = lineHeight
-        para.maximumLineHeight = lineHeight + 4
+        // Empty `>` must keep a full line so the painted bar and caret aren't specks.
+        para.minimumLineHeight = bodyNaturalLineHeight
         textStorage.addAttributes([.paragraphStyle: para], range: paragraphRange)
-        // Keep `>` in the string for markdown send; collapse its width so the body
-        // sits just after the painted bar (not a full character + indent away).
-        hideMarkdownMarkers(
-            in: textStorage,
-            range: absMarker,
-            font: bodyFont,
-            hideColor: NSColor.clear,
-            collapseToWidth: 0,
-            keepLineMetrics: true
-        )
+        if revealed {
+            textStorage.addAttributes([
+                .font: bodyFont,
+                .foregroundColor: markerColor,
+            ], range: absMarker)
+        } else {
+            // Keep `>` in the string for markdown send but give it no width, so the
+            // first line and wrapped lines both start at `quoteIndent`.
+            hideMarkdownMarkers(in: textStorage, range: absMarker, font: bodyFont)
+        }
         let bodyStart = NSMaxRange(absMarker)
         let bodyLen = NSMaxRange(contentRange) - bodyStart
         if bodyLen > 0 {
             textStorage.addAttributes([
                 .font: bodyFont,
                 .foregroundColor: quoteFg,
-                .backgroundColor: quoteBg,
             ], range: NSRange(location: bodyStart, length: bodyLen))
         }
     }

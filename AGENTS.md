@@ -49,3 +49,10 @@ When an action **reveals** a text field (inline path box, composer, rename field
 - Same rule for any new UI that is primarily for typing.
 - After an **NSMenu** (or sheet) opens the field, SwiftUI `FocusState` is unreliable — use AppKit `window.makeFirstResponder(field)` (see `AutofocusPlainField` / annotate prompt), deferred until the menu tears down.
 - If the menu item was chosen with **↩**, swallow that leftover Return (and ignore the field’s submit action briefly) so focusing the field does not immediately confirm.
+
+## Composer harness
+
+Composer editing (lists, quotes, fences, inline code, height) has a real-keystroke regression harness in `Sources/AiHand/ComposerProbe.swift` (DEBUG-only).
+
+- Run `./scripts/composer-probe.sh` (or pass sections: `quotes lists ordered fences inline height`). Exits non-zero on failure; renders land in `/tmp/probe-*.png`.
+- Run it after any change to `ComposerMarkdownStyler` / `ComposerPromptEditor`, and add checks for new behaviour or reported bugs.

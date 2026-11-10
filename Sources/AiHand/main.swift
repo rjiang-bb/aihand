@@ -87,6 +87,12 @@ if let idx = CommandLine.arguments.firstIndex(of: "--make-hand"), CommandLine.ar
     exit(0)
 }
 
+#if DEBUG
+if CommandLine.arguments.contains("--composer-probe") {
+    exit(ComposerProbe.run() ? 0 : 1)
+}
+#endif
+
 if CommandLine.arguments.contains("--e2e-test") {
     E2ETest.run()
     exit(0)
