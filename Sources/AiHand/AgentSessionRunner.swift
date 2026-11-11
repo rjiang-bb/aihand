@@ -769,6 +769,8 @@ final class AgentSessionRunner {
 final class AgentSessionManager {
     private let store: SessionStore
     private var runners: [UUID: AgentSessionRunner] = [:]
+    /// CLI kind the stored runner was built for — recreate when Settings switches agents.
+    private var runnerCLIKinds: [UUID: AgentCLIKind] = [:]
     /// Fired on the main queue when a turn finishes idle (`.finished`, no queued follow-ups).
     var onSessionCompleted: ((AgentSession) -> Void)?
 
@@ -784,7 +786,19 @@ final class AgentSessionManager {
             if let runner = runners.removeValue(forKey: session.id) {
                 runner.stop()
             }
+            runnerCLIKinds.removeValue(forKey: session.id)
         }
+    }
+
+    /// Reuse the live runner only while it still matches the session’s Settings CLI.
+    private func runner(for session: AgentSession) -> AgentSessionRunner {
+        if let existing = runners[session.id], runnerCLIKinds[session.id] == session.cliKind {
+            return existing
+        }
+        runners[session.id]?.stop()
+        let fresh = AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
+        wireRunner(fresh, sessionID: session.id, cliKind: session.cliKind)
+        return fresh
     }
 
     func startFromAnnotation(prompt: String, screenshotPath: String?) -> AgentSession? {
@@ -801,9 +815,7 @@ final class AgentSessionManager {
         }
         let target = Preferences.runtimeAgentTarget
         let cliKind = Preferences.agentCLI(for: target)
-        // Prefer the latest session that used this CLI (list is workspace-scoped, mixed CLIs).
-        let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
-        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI, target: target)
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, target: target)
         let session = AgentSession(
             title: title,
             prompt: prompt,
@@ -820,8 +832,7 @@ final class AgentSessionManager {
             effort: favorite.effort
         )
         store.prepend(session)
-        let runner = AgentSessionRunner(cli: AgentCLIFactory.make(cliKind))
-        wireRunner(runner, sessionID: session.id)
+        let runner = runner(for: session)
         runner.start(session: session, workspace: session.workspace, prompt: prompt, imagePath: screenshotPath)
         return session
     }
@@ -832,8 +843,7 @@ final class AgentSessionManager {
         guard !workspace.isEmpty else { return nil }
         let target = Preferences.runtimeAgentTarget
         let cliKind = Preferences.agentCLI(for: target)
-        let lastForCLI = store.sessions.first { $0.cliKind == cliKind }
-        let favorite = Preferences.favoriteForNewSession(cli: cliKind, lastSession: lastForCLI, target: target)
+        let favorite = Preferences.favoriteForNewSession(cli: cliKind, target: target)
         let session = AgentSession(
             title: "New session",
             prompt: "",
@@ -862,6 +872,8 @@ final class AgentSessionManager {
         imagePaths: [String] = []
     ) {
         guard let session = store.session(id: sessionID) else { return }
+        // Composer / Settings stay aligned — pull Current favorite before argv is built.
+        session.syncModelFromSettings()
         let workspace = session.workspace
         guard !workspace.isEmpty else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -874,8 +886,7 @@ final class AgentSessionManager {
         guard !trimmed.isEmpty || !paths.isEmpty else { return }
         let prompt = trimmed
 
-        let runner = runners[sessionID] ?? AgentSessionRunner(cli: AgentCLIFactory.make(session.cliKind))
-        wireRunner(runner, sessionID: sessionID)
+        let runner = runner(for: session)
 
         let busy = session.status == .working && runner.isRunning
         // Queue is text-only — media follow-ups always send now.
@@ -919,6 +930,36 @@ final class AgentSessionManager {
     func removeQueuedFollowUp(sessionID: UUID, followUpID: UUID) {
         guard let session = store.session(id: sessionID) else { return }
         session.queuedFollowUps.removeAll { $0.id == followUpID }
+        if session.editingFollowUpID == followUpID {
+            session.editingFollowUpID = nil
+        }
+        resumeQueueIfNeeded(sessionID: sessionID)
+    }
+
+    /// Write composer text back onto a queued item and resume draining.
+    func confirmQueuedFollowUpEdit(sessionID: UUID, followUpID: UUID, text: String) {
+        guard let session = store.session(id: sessionID) else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let idx = session.queuedFollowUps.firstIndex(where: { $0.id == followUpID }) else { return }
+        // Reassign the array so `@Published` + struct elements reliably update.
+        var items = session.queuedFollowUps
+        items[idx].text = trimmed
+        session.queuedFollowUps = items
+        session.editingFollowUpID = nil
+        resumeQueueIfNeeded(sessionID: sessionID)
+    }
+
+    /// Leave edit mode without changing the queue item, then resume draining.
+    func cancelQueuedFollowUpEdit(sessionID: UUID) {
+        guard let session = store.session(id: sessionID) else { return }
+        session.editingFollowUpID = nil
+        resumeQueueIfNeeded(sessionID: sessionID)
+    }
+
+    /// Attempt to dequeue the next runnable follow-up if the turn is idle.
+    func resumeQueueIfNeeded(sessionID: UUID) {
+        drainQueue(sessionID: sessionID)
     }
 
     func stop(sessionID: UUID) {
@@ -929,8 +970,9 @@ final class AgentSessionManager {
         runners[sessionID]
     }
 
-    private func wireRunner(_ runner: AgentSessionRunner, sessionID: UUID) {
+    private func wireRunner(_ runner: AgentSessionRunner, sessionID: UUID, cliKind: AgentCLIKind) {
         runners[sessionID] = runner
+        runnerCLIKinds[sessionID] = cliKind
         runner.onFinished = { [weak self] in
             guard let self else { return }
             self.drainQueue(sessionID: sessionID)
@@ -945,6 +987,22 @@ final class AgentSessionManager {
         guard let session = store.session(id: sessionID) else { return }
         guard session.status != .working else { return }
         guard !session.queuedFollowUps.isEmpty else { return }
+
+        if let editingID = session.editingFollowUpID {
+            if let editIdx = session.queuedFollowUps.firstIndex(where: { $0.id == editingID }) {
+                // Hold the edited item and everything after it; earlier items still run.
+                guard editIdx > 0 else { return }
+            } else {
+                // Stale edit target (removed / reordered away).
+                session.editingFollowUpID = nil
+            }
+        }
+
+        // Need a chat id before dequeuing — otherwise followUp bails and the item is lost.
+        if session.chatId == nil || session.chatId?.isEmpty == true {
+            return
+        }
+
         let next = session.queuedFollowUps.removeFirst()
         followUp(sessionID: sessionID, text: next.text, submit: .sendNow)
     }

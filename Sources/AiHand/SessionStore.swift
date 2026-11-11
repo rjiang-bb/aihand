@@ -127,7 +127,8 @@ final class AgentSession: ObservableObject, Identifiable {
     let createdAt: Date
     let screenshotPath: String?
     let initialPrompt: String
-    let cliKind: AgentCLIKind
+    /// Agent CLI for this session — kept in sync with Settings for this machine (see `syncModelFromSettings`).
+    @Published var cliKind: AgentCLIKind
     /// Working directory this session belongs to.
     let workspace: String
     /// Git branch (or worktree branch) when the session was created; empty for non-git folders.
@@ -137,7 +138,7 @@ final class AgentSession: ObservableObject, Identifiable {
     /// Denormalized host label for list badges (`user@host`).
     let connectionLabel: String?
 
-    /// Favorite used for this session (updated when the composer picker changes).
+    /// Favorite used for this session (mirrors Settings → Current for this CLI).
     @Published var favoriteId: UUID?
     /// CLI `--model` id when a favorite (or explicit pick) was set; nil = CLI default.
     @Published var modelId: String?
@@ -152,26 +153,59 @@ final class AgentSession: ObservableObject, Identifiable {
     @Published var errorMessage: String?
     /// Pending follow-ups; not persisted across relaunch.
     @Published var queuedFollowUps: [QueuedFollowUp] = []
+    /// Queue item loaded into the composer for edit; that item and everything after it are held.
+    @Published var editingFollowUpID: UUID?
 
     var executionTarget: AgentExecutionTarget {
         AgentExecutionTarget(connectionID: connectionID)
     }
 
-    /// Apply a favorite to this session and mark it Current for this CLI.
-    func applyFavorite(_ fav: AgentFavorite) {
-        guard fav.cliKind == cliKind else { return }
-        favoriteId = fav.id
-        modelId = fav.usesCLIDefaultModel ? nil : fav.modelId
-        effort = fav.effort.flatMap { $0.isEmpty ? nil : $0 }
-        Preferences.setCurrentAgentFavoriteID(fav.id, for: cliKind, target: executionTarget)
+    /// Settings Agent CLI for this session’s machine (local / SSH).
+    var settingsCLI: AgentCLIKind {
+        Preferences.agentCLI(for: executionTarget)
     }
 
-    /// Cycle to the next favorite for this session’s CLI (wraps).
+    /// Apply a favorite from Settings’ current CLI for this machine and mark it Current.
+    /// Switching CLI clears `chatId` — follow-ups can’t resume across agent binaries.
+    func applyFavorite(_ fav: AgentFavorite) {
+        let target = executionTarget
+        guard fav.cliKind == Preferences.agentCLI(for: target) else { return }
+        let newModel = fav.usesCLIDefaultModel ? nil : fav.modelId
+        let newEffort = fav.effort.flatMap { $0.isEmpty ? nil : $0 }
+        if favoriteId == fav.id, modelId == newModel, effort == newEffort, cliKind == fav.cliKind {
+            return
+        }
+        if fav.cliKind != cliKind {
+            cliKind = fav.cliKind
+            chatId = nil
+        }
+        favoriteId = fav.id
+        modelId = newModel
+        effort = newEffort
+        if Preferences.currentAgentFavoriteID(for: fav.cliKind, target: target) != fav.id {
+            Preferences.setCurrentAgentFavoriteID(fav.id, for: fav.cliKind, target: target)
+        }
+    }
+
+    /// Pull CLI + Current favorite from Settings so the composer matches Agent prefs.
+    func syncModelFromSettings() {
+        let kind = settingsCLI
+        let favs = Preferences.favorites(for: kind, target: executionTarget)
+        let id = Preferences.currentAgentFavoriteID(for: kind, target: executionTarget)
+        let fav = favs.first(where: { $0.id == id })
+            ?? favs.first(where: { $0.isBuiltIn })
+            ?? AgentFavorite.builtInDefault(for: kind)
+        applyFavorite(fav)
+    }
+
+    /// Cycle to the next Settings favorite for this machine’s Agent CLI (wraps).
     @discardableResult
     func cycleFavorite() -> AgentFavorite? {
-        let favs = Preferences.favorites(for: cliKind, target: executionTarget)
+        let kind = settingsCLI
+        let favs = Preferences.favorites(for: kind, target: executionTarget)
         guard !favs.isEmpty else { return nil }
-        let idx = favs.firstIndex(where: { $0.id == favoriteId }) ?? -1
+        let currentID = Preferences.currentAgentFavoriteID(for: kind, target: executionTarget) ?? favoriteId
+        let idx = favs.firstIndex(where: { $0.id == currentID }) ?? -1
         let next = favs[(idx + 1) % favs.count]
         applyFavorite(next)
         return next

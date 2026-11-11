@@ -109,6 +109,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         sessionsPanel.onStop = { [weak self] id in
             self?.sessionManager.stop(sessionID: id)
         }
+        sessionsPanel.onConfirmQueueEdit = { [weak self] sessionID, followUpID, text in
+            self?.sessionManager.confirmQueuedFollowUpEdit(
+                sessionID: sessionID,
+                followUpID: followUpID,
+                text: text
+            )
+        }
+        sessionsPanel.onCancelQueueEdit = { [weak self] sessionID in
+            self?.sessionManager.cancelQueuedFollowUpEdit(sessionID: sessionID)
+        }
+        sessionsPanel.onResumeQueue = { [weak self] sessionID in
+            self?.sessionManager.resumeQueueIfNeeded(sessionID: sessionID)
+        }
         sessionsPanel.onNew = { [weak self] in
             self?.startBlankSession()
         }
@@ -851,7 +864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
-        // ⌘W archives the selected AI session when that panel is key (see SessionsSidePanel).
+        // ⌘W follows key-window focus (preview / Settings / archive) — see CommandWRouter.
         appMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
         let archiveSession = appMenu.addItem(
             withTitle: "Archive Session",
@@ -938,8 +951,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func archiveSelectedSession() {
-        // ⌘W closes a focused chat image preview instead of archiving the session.
-        if ChatImageActions.closeKeyPreviewIfNeeded() { return }
-        sessionsPanel.archiveSelectedSession()
+        // ⌘W always follows key-window focus — never archive over a preview or Settings.
+        switch CommandWRouter.action(
+            previewIsKey: ChatImageActions.isPreviewKey,
+            settingsIsKey: settings.isKeyWindow,
+            sessionsIsKey: sessionsPanel.isKeyWindow
+        ) {
+        case .closePreview:
+            _ = ChatImageActions.closeKeyPreviewIfNeeded()
+        case .closeSettings:
+            _ = settings.closeIfKey()
+        case .archiveSession:
+            sessionsPanel.archiveSelectedSession()
+        case .closeKeyWindow:
+            NSApp.keyWindow?.performClose(nil)
+        }
     }
 }

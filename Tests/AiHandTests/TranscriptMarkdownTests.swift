@@ -86,4 +86,12 @@ final class TranscriptMarkdownTests: XCTestCase {
     func testCRLFNormalized() {
         XCTAssertEqual(md("- a\r\n- b").components(separatedBy: "<li>").count - 1, 2)
     }
+
+    func testSteeredMarkerIsIconBesideContent() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("steer-row"), "icon sits left of the first line")
+        XCTAssertTrue(html.contains("steer-icon"))
+        XCTAssertFalse(html.contains("steer-badge"))
+        XCTAssertFalse(html.contains("+ 'Steered</div>'"), "no visible Steered label")
+    }
 }

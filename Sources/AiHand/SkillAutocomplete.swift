@@ -253,7 +253,7 @@ struct SkillSuggestionList: View {
                                     .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
                             )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pointerPlain)
                         .id(index)
                     }
                 }

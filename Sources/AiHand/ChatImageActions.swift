@@ -2,7 +2,7 @@ import AppKit
 
 /// Open / copy screenshot files attached to chat messages.
 enum ChatImageActions {
-    /// Above the sessions panel (`floating + 2`) so previews stay on top.
+    /// Above the sessions panel (`floating + 2`); Settings is `floating + 4` so it stays higher.
     private static let windowLevel = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 3)
 
     private static var retainedWindows: [NSWindow] = []

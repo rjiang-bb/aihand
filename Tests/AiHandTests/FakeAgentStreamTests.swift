@@ -181,10 +181,20 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
         for (kind, expected) in cases {
             use(kind)
             resetCalls()
+            let fav = AgentFavorite(
+                title: "High",
+                cliKind: kind,
+                modelId: "gpt-5",
+                modelTitle: "GPT-5",
+                effort: "high",
+                isBuiltIn: false
+            )
+            Preferences.addAgentFavorite(fav)
             let s = try send("first")
             waitUntil("\(kind) first") { s.status == .finished }
             waitIdle(s)
-            s.modelId = "gpt-5"; s.effort = "high"
+            // Follow-ups take model/effort from Settings Current, not a frozen session field.
+            s.applyFavorite(fav)
             manager.followUp(sessionID: s.id, text: "again")
             waitUntil("\(kind) second") { self.calls == 2 && s.status == .finished }
             let a = args(2)

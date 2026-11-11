@@ -363,21 +363,22 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 10px 12px;
         color: var(--text);
       }
-      .msg.user .steer-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        margin: 6px 0 0;
-        font: 600 11px/1.2 var(--sans);
-        letter-spacing: 0.01em;
-        color: var(--text);
-        opacity: 0.62;
+      .msg.user .steer-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
       }
-      .msg.user .steer-badge svg {
-        width: 11px;
-        height: 11px;
+      .msg.user .steer-row > .steer-icon {
+        width: 12px;
+        height: 12px;
         flex: none;
-        opacity: 0.9;
+        margin-top: 0.28em;
+        opacity: 0.72;
+        color: var(--text);
+      }
+      .msg.user .steer-row > .steer-body {
+        flex: 1;
+        min-width: 0;
       }
       .msg.assistant { align-self: stretch; padding: 2px 0; color: var(--text); min-width: 0; }
       .msg.tool-group {
@@ -1065,14 +1066,14 @@ struct ChatTranscriptView: NSViewRepresentable {
           body += esc(m.text || '');
         }
         if (kind === 'user' && m.steered) {
-          body += '<div class="steer-badge">'
-            + '<svg viewBox="0 0 16 16" aria-hidden="true">'
+          const icon = '<svg class="steer-icon" viewBox="0 0 16 16" aria-hidden="true">'
             + '<circle cx="8" cy="8" r="6.1" fill="none" stroke="currentColor" stroke-width="1.5"/>'
             + '<circle cx="8" cy="8" r="1.55" fill="currentColor"/>'
             + '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" '
             + 'd="M8 2.7v2.9M4.05 10.35l2.45-1.45M11.95 10.35l-2.45-1.45"/>'
-            + '</svg>'
-            + 'Steered</div>';
+            + '</svg>';
+          body = '<div class="steer-row" title="Steered">' + icon
+            + '<div class="steer-body">' + body + '</div></div>';
         }
         return '<div class="msg ' + kind + '" data-id="' + esc(m.id) + '">' + body + '</div>';
       }).join('');

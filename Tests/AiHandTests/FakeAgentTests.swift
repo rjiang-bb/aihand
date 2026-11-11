@@ -306,6 +306,89 @@ final class FakeAgentFollowUpTests: FakeAgentTestCase {
         XCTAssertEqual(calls, 1)
     }
 
+    func testEditingQueueHoldsEditedAndLaterItems() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("first")
+        waitUntil("working") { self.calls == 1 && s.status == .working }
+        manager.followUp(sessionID: s.id, text: "A", submit: .queue)
+        manager.followUp(sessionID: s.id, text: "B", submit: .queue)
+        manager.followUp(sessionID: s.id, text: "C", submit: .queue)
+        let bID = try XCTUnwrap(s.queuedFollowUps.first(where: { $0.text == "B" })?.id)
+        s.editingFollowUpID = bID
+        setMode("ok")
+        // A drains; B+C stay held while B is being edited.
+        waitUntil("A drained") {
+            self.calls == 2 && s.queuedFollowUps.map(\.text) == ["B", "C"]
+        }
+        XCTAssertEqual(s.editingFollowUpID, bID)
+        XCTAssertEqual(args(2).last, "A")
+        // Still held — no further drain while editing B (now first).
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(s.queuedFollowUps.map(\.text), ["B", "C"])
+    }
+
+    func testConfirmQueueEditUpdatesTextAndResumes() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("first")
+        waitUntil("working") { self.calls == 1 && s.status == .working }
+        manager.followUp(sessionID: s.id, text: "A", submit: .queue)
+        manager.followUp(sessionID: s.id, text: "B", submit: .queue)
+        let bID = try XCTUnwrap(s.queuedFollowUps.first(where: { $0.text == "B" })?.id)
+        s.editingFollowUpID = bID
+        setMode("ok")
+        waitUntil("A drained") { self.calls == 2 && s.queuedFollowUps.map(\.text) == ["B"] }
+        manager.confirmQueuedFollowUpEdit(sessionID: s.id, followUpID: bID, text: "B-edited")
+        XCTAssertNil(s.editingFollowUpID)
+        waitUntil("edited B drained") { self.calls == 3 && s.queuedFollowUps.isEmpty && s.status == .finished }
+        XCTAssertEqual(args(3).last, "B-edited")
+    }
+
+    func testCancelQueueEditKeepsOriginalAndResumes() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("first")
+        waitUntil("working") { self.calls == 1 && s.status == .working }
+        manager.followUp(sessionID: s.id, text: "A", submit: .queue)
+        manager.followUp(sessionID: s.id, text: "B", submit: .queue)
+        let bID = try XCTUnwrap(s.queuedFollowUps.first(where: { $0.text == "B" })?.id)
+        s.editingFollowUpID = bID
+        setMode("ok")
+        waitUntil("A drained") { self.calls == 2 && s.queuedFollowUps.map(\.text) == ["B"] }
+        manager.cancelQueuedFollowUpEdit(sessionID: s.id)
+        XCTAssertNil(s.editingFollowUpID)
+        waitUntil("original B drained") { self.calls == 3 && s.queuedFollowUps.isEmpty && s.status == .finished }
+        XCTAssertEqual(args(3).last, "B")
+    }
+
+    func testEditingFirstQueueItemBlocksDrainUntilConfirm() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("first")
+        waitUntil("working") { self.calls == 1 && s.status == .working }
+        manager.followUp(sessionID: s.id, text: "held", submit: .queue)
+        manager.followUp(sessionID: s.id, text: "later", submit: .queue)
+        let heldID = try XCTUnwrap(s.queuedFollowUps.first?.id)
+        s.editingFollowUpID = heldID
+        setMode("ok")
+        // Wait until the process is gone — status flips to finished on the result JSON
+        // before termination/`onFinished`, and confirming too early races the drain.
+        waitUntil("turn idle") {
+            s.status == .finished
+                && s.chatId != nil
+                && self.manager.runner(for: s.id)?.isRunning != true
+        }
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.15))
+        XCTAssertEqual(calls, 1, "nothing drains while first queued item is edited")
+        XCTAssertEqual(s.editingFollowUpID, heldID)
+        XCTAssertEqual(s.queuedFollowUps.map(\.text), ["held", "later"])
+        manager.confirmQueuedFollowUpEdit(sessionID: s.id, followUpID: heldID, text: "held-now")
+        waitUntil("held-now launched") { self.calls >= 2 }
+        XCTAssertEqual(args(2).last, "held-now")
+        waitUntil("queue drained after confirm") {
+            self.calls == 3 && s.queuedFollowUps.isEmpty && s.status == .finished
+        }
+        XCTAssertEqual(args(3).last, "later")
+    }
+
     func testSendNowWhileBusySteersByInterrupting() throws {
         use(.cursor, mode: "slow")
         let s = try send("first")

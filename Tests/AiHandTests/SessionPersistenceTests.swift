@@ -121,6 +121,7 @@ final class FavoritesAndPreferencesTests: SandboxedTestCase {
 
     func testApplyFavoriteSetsModelAndEffort() {
         let kind = AgentCLIKind.claude
+        Preferences.setAgentCLI(kind, for: .local)
         let fav = AgentFavorite(title: "Deep", cliKind: kind, modelId: "opus", modelTitle: "Opus", effort: "max", isBuiltIn: false)
         Preferences.addAgentFavorite(fav)
         let s = AgentSession(title: "t", prompt: "p", screenshotPath: nil, workspace: "/tmp/ws",
@@ -132,12 +133,84 @@ final class FavoritesAndPreferencesTests: SandboxedTestCase {
     }
 
     func testFavoriteForOtherCLIIsIgnored() {
+        Preferences.setAgentCLI(.cursor, for: .local)
         let fav = AgentFavorite(title: "X", cliKind: .codex, modelId: "o3", modelTitle: "o3", effort: nil, isBuiltIn: false)
+        Preferences.addAgentFavorite(fav)
         let s = AgentSession(title: "t", prompt: "p", screenshotPath: nil, workspace: "/tmp/ws",
                              gitBranch: "", connectionID: nil, cliKind: .cursor, status: .finished)
         s.applyFavorite(fav)
         XCTAssertNil(s.modelId)
         XCTAssertNil(s.favoriteId)
+    }
+
+    func testApplyFavoriteFollowsSettingsCLIAndClearsChatId() {
+        Preferences.setAgentCLI(.claude, for: .local)
+        let fav = AgentFavorite(
+            title: "Sonnet",
+            cliKind: .claude,
+            modelId: "claude-sonnet-5",
+            modelTitle: "Sonnet",
+            effort: "medium",
+            isBuiltIn: false
+        )
+        Preferences.addAgentFavorite(fav)
+        let s = AgentSession(title: "t", prompt: "p", screenshotPath: nil, workspace: "/tmp/ws",
+                             gitBranch: "", connectionID: nil, cliKind: .cursor, status: .finished)
+        s.chatId = "cursor-chat"
+        s.applyFavorite(fav)
+        XCTAssertEqual(s.cliKind, .claude)
+        XCTAssertNil(s.chatId, "switching agent CLI cannot resume the prior chat id")
+        XCTAssertEqual(s.modelId, "claude-sonnet-5")
+        XCTAssertEqual(s.effort, "medium")
+        XCTAssertEqual(Preferences.currentAgentFavoriteID(for: .claude, target: .local), fav.id)
+    }
+
+    func testSyncModelFromSettingsMatchesAgentPrefs() {
+        Preferences.setAgentCLI(.claude, for: .local)
+        let fav = AgentFavorite(
+            title: "Deep",
+            cliKind: .claude,
+            modelId: "opus",
+            modelTitle: "Opus",
+            effort: "max",
+            isBuiltIn: false
+        )
+        Preferences.addAgentFavorite(fav)
+        Preferences.setCurrentAgentFavoriteID(fav.id, for: .claude, target: .local)
+        let s = AgentSession(title: "t", prompt: "p", screenshotPath: nil, workspace: "/tmp/ws",
+                             gitBranch: "", connectionID: nil, cliKind: .cursor, status: .finished)
+        s.syncModelFromSettings()
+        XCTAssertEqual(s.cliKind, .claude)
+        XCTAssertEqual(s.favoriteId, fav.id)
+        XCTAssertEqual(s.modelId, "opus")
+    }
+
+    func testFavoriteForNewSessionIgnoresLastSessionModel() {
+        Preferences.setAgentCLI(.cursor, for: .local)
+        let kept = AgentFavorite(
+            title: "Keep",
+            cliKind: .cursor,
+            modelId: "keep-me",
+            modelTitle: "Keep",
+            effort: nil,
+            isBuiltIn: false
+        )
+        let other = AgentFavorite(
+            title: "Other",
+            cliKind: .cursor,
+            modelId: "other-me",
+            modelTitle: "Other",
+            effort: nil,
+            isBuiltIn: false
+        )
+        Preferences.addAgentFavorite(kept)
+        Preferences.addAgentFavorite(other)
+        Preferences.setCurrentAgentFavoriteID(kept.id, for: .cursor, target: .local)
+        let last = AgentSession(title: "t", prompt: "p", screenshotPath: nil, workspace: "/tmp/ws",
+                                gitBranch: "", connectionID: nil, cliKind: .cursor,
+                                favoriteId: other.id, modelId: "other-me", status: .finished)
+        let picked = Preferences.favoriteForNewSession(cli: .cursor, lastSession: last, target: .local)
+        XCTAssertEqual(picked.id, kept.id, "new sessions use Settings Current, not the previous chat")
     }
 
     func testPreferencesWriteToTheSandboxSuiteNotStandard() {

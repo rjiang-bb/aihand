@@ -6,6 +6,12 @@ import SwiftUI
 final class SessionsSidePanel: NSObject, NSWindowDelegate {
     var onFollowUp: ((UUID, String, FollowUpSubmit, [String]) -> Void)?
     var onStop: ((UUID) -> Void)?
+    /// Confirm an in-composer edit of a queued follow-up (`sessionID`, `followUpID`, text).
+    var onConfirmQueueEdit: ((UUID, UUID, String) -> Void)?
+    /// Cancel queue-item edit mode for a session.
+    var onCancelQueueEdit: ((UUID) -> Void)?
+    /// Resume draining after a local queue mutation (e.g. delete while editing).
+    var onResumeQueue: ((UUID) -> Void)?
     var onNew: (() -> Void)?
     /// New blank session with the composer prefilled (selection → new session).
     var onNewWithDraft: ((String) -> Void)?
@@ -34,9 +40,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var lastLaidOutListHeight: CGFloat = 0
     private var hintHideWork: DispatchWorkItem?
-    /// Last open chat per workspace so switching folders can restore it.
+    /// Last open chat per workspace so switching folders (and force-quit relaunches) restore it.
     private var openChatByWorkspace: [String: UUID] = [:]
-    /// Workspace key last applied to selection memory (normalized path).
+    /// Workspace key last applied to selection memory (`connection|normalizedPath`).
     private var trackedWorkspaceKey: String = ""
 
     /// Must equal the SwiftUI content width (`listColumnWidth` + 14pt padding each side).
@@ -71,9 +77,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     var isVisible: Bool { panel.isVisible }
+    var isKeyWindow: Bool { panel.isKeyWindow }
     var selectedSessionID: UUID? { selection.selectedID }
 
-    /// Archive the open session and select the next one (⌘W).
+    /// Archive the open session and select the next one (⌘W when this panel is key).
     func archiveSelectedSession() {
         guard isVisible, let id = selection.selectedID else { return }
         archive(id)
@@ -118,6 +125,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             if let nextID, store.session(id: nextID) != nil {
                 openChat(for: nextID)
             } else {
+                rememberOpenChatForCurrentWorkspace()
                 layout()
             }
         }
@@ -160,12 +168,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         if let selectingNext, store.session(id: selectingNext) != nil {
             openChat(for: selectingNext)
         } else if removingSelected {
+            rememberOpenChatForCurrentWorkspace()
             layout()
         }
     }
 
     init(store: SessionStore) {
         self.store = store
+        openChatByWorkspace = Self.loadOpenChatsFromPreferences()
         // Scrub (0,0) placements left by older builds that re-persisted after orderOut.
         Self.scrubDeferredZeroOriginsFromPreferences()
         hasCustomPlacement = Preferences.sessionsPanelOrigin != nil
@@ -188,6 +198,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
         panel.isMovable = false
+        // Needed for SwiftUI `onHover` + pointing-hand cursor while the panel is nonactivating.
+        panel.acceptsMouseMovedEvents = true
         panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
@@ -241,6 +253,15 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onStop: { [weak self] id in
                 self?.onStop?(id)
             },
+            onConfirmQueueEdit: { [weak self] sessionID, followUpID, text in
+                self?.onConfirmQueueEdit?(sessionID, followUpID, text)
+            },
+            onCancelQueueEdit: { [weak self] sessionID in
+                self?.onCancelQueueEdit?(sessionID)
+            },
+            onResumeQueue: { [weak self] sessionID in
+                self?.onResumeQueue?(sessionID)
+            },
             onChatResizeBegan: { [weak self] in
                 self?.chatResizeBegan()
             },
@@ -283,7 +304,8 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             self.relayoutForSessionCountIfNeeded(animateFrame: false)
         }
         .store(in: &cancellables)
-        trackedWorkspaceKey = SessionStore.normalizedWorkspace(store.currentWorkspace)
+        trackedWorkspaceKey = workspaceKey(store.currentWorkspace, connectionID: store.currentConnectionID)
+        restoreOpenChatForCurrentWorkspaceIfNeeded()
         store.$currentWorkspace
             .receive(on: RunLoop.main)
             .sink { [weak self] next in
@@ -300,6 +322,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             }
             .store(in: &cancellables)
         lastLaidOutListHeight = listHeight
+    }
+
+    private static func loadOpenChatsFromPreferences() -> [String: UUID] {
+        SessionsOpenChatPersistence.decode(Preferences.openChatByWorkspace)
+    }
+
+    private func persistOpenChatsToPreferences() {
+        Preferences.openChatByWorkspace = SessionsOpenChatPersistence.encode(openChatByWorkspace)
     }
 
     /// Grow / shrink the list-only panel as sessions are added or archived.
@@ -423,6 +453,25 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         } else {
             openChatByWorkspace.removeValue(forKey: key)
         }
+        persistOpenChatsToPreferences()
+    }
+
+    /// After launch / prefs load — reselect the last open chat for this workspace if it still exists.
+    private func restoreOpenChatForCurrentWorkspaceIfNeeded() {
+        let key = workspaceKey(store.currentWorkspace, connectionID: store.currentConnectionID)
+        guard let id = openChatByWorkspace[key],
+              store.allSessions.contains(where: {
+                  $0.id == id && workspaceKey($0.workspace, connectionID: $0.connectionID) == key
+              }) else {
+            // Drop stale ids that no longer resolve.
+            if openChatByWorkspace[key] != nil {
+                openChatByWorkspace.removeValue(forKey: key)
+                persistOpenChatsToPreferences()
+            }
+            return
+        }
+        selection.selectedID = id
+        selection.revealSessionInList(id, sessions: store.sessions)
     }
 
     /// Re-select a remembered chat after a workspace switch without forcing the panel on-screen.
@@ -461,6 +510,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             } else if selection.selectedID == nil {
                 openChatByWorkspace.removeValue(forKey: previousKey)
             }
+            persistOpenChatsToPreferences()
         }
         trackedWorkspaceKey = nextKey
 
@@ -972,21 +1022,32 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         guard isVisible else { return event }
 
         if Int(event.keyCode) == kVK_Escape, panel.isKeyWindow {
-            if selection.workspacePickerExpanded {
+            let editingQueued: Bool = {
+                guard let id = selection.selectedID,
+                      let session = store.session(id: id) else { return false }
+                return session.editingFollowUpID != nil
+            }()
+            switch SessionsPanelEscape.action(
+                workspacePickerExpanded: selection.workspacePickerExpanded,
+                gitPickerExpanded: selection.gitPickerExpanded,
+                editingQueued: editingQueued,
+                chatOpen: selection.selectedID != nil
+            ) {
+            case .dismissWorkspacePicker:
                 selection.closeWorkspacePicker(suppressUntilAltUp: selection.showWorkspacePicker)
                 lastLaidOutListHeight = -1
                 relayoutForSessionCountIfNeeded(animateFrame: false)
-                return nil
-            }
-            if selection.gitPickerExpanded {
+            case .dismissGitPicker:
                 selection.closeGitPicker(suppressUntilCtrlUp: selection.showGitPicker)
                 lastLaidOutListHeight = -1
                 relayoutForSessionCountIfNeeded(animateFrame: false)
-                return nil
-            }
-            if selection.selectedID != nil {
+            case .cancelQueueEdit:
+                if let id = selection.selectedID {
+                    onCancelQueueEdit?(id)
+                }
+            case .closeChat:
                 closeChat()
-            } else {
+            case .hidePanel:
                 hide()
             }
             return nil
@@ -1071,15 +1132,25 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return nil
         }
 
-        // ⌘W → close a focused image preview, else archive the selected session.
+        // ⌘W → focused window only (preview close / archive). Settings is handled by the app menu.
         if Int(event.keyCode) == kVK_ANSI_W, panel.isKeyWindow || ChatImageActions.isPreviewKey {
-            if ChatImageActions.closeKeyPreviewIfNeeded() {
-                focus()
+            switch CommandWRouter.action(
+                previewIsKey: ChatImageActions.isPreviewKey,
+                settingsIsKey: false,
+                sessionsIsKey: panel.isKeyWindow
+            ) {
+            case .closePreview:
+                if ChatImageActions.closeKeyPreviewIfNeeded() {
+                    focus()
+                }
                 return nil
-            }
-            if panel.isKeyWindow, let id = selection.selectedID {
-                archive(id)
+            case .archiveSession:
+                if let id = selection.selectedID {
+                    archive(id)
+                }
                 return nil
+            case .closeSettings, .closeKeyWindow:
+                break
             }
         }
 
@@ -1132,6 +1203,46 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         if Int(event.keyCode) == kVK_ANSI_Slash { return true }
         if event.charactersIgnoringModifiers == "/" { return true }
         return false
+    }
+}
+
+/// Persist / restore the last-open chat id per workspace (survives force-quit).
+enum SessionsOpenChatPersistence {
+    static func decode(_ raw: [String: String]) -> [String: UUID] {
+        var loaded: [String: UUID] = [:]
+        for (key, value) in raw {
+            guard let id = UUID(uuidString: value) else { continue }
+            loaded[key] = id
+        }
+        return loaded
+    }
+
+    static func encode(_ map: [String: UUID]) -> [String: String] {
+        Dictionary(uniqueKeysWithValues: map.map { ($0.key, $0.value.uuidString) })
+    }
+}
+
+/// Priority for Esc when the sessions panel is key.
+enum SessionsPanelEscape {
+    enum Action: Equatable {
+        case dismissWorkspacePicker
+        case dismissGitPicker
+        case cancelQueueEdit
+        case closeChat
+        case hidePanel
+    }
+
+    static func action(
+        workspacePickerExpanded: Bool,
+        gitPickerExpanded: Bool,
+        editingQueued: Bool,
+        chatOpen: Bool
+    ) -> Action {
+        if workspacePickerExpanded { return .dismissWorkspacePicker }
+        if gitPickerExpanded { return .dismissGitPicker }
+        if editingQueued { return .cancelQueueEdit }
+        if chatOpen { return .closeChat }
+        return .hidePanel
     }
 }
 
@@ -1343,6 +1454,9 @@ private struct SessionsSidePanelView: View {
     var onArchiveAll: () -> Void
     var onSend: (UUID, String, FollowUpSubmit, [String]) -> Void
     var onStop: (UUID) -> Void
+    var onConfirmQueueEdit: (UUID, UUID, String) -> Void
+    var onCancelQueueEdit: (UUID) -> Void
+    var onResumeQueue: (UUID) -> Void
     var onChatResizeBegan: () -> Void
     var onChatResizeChanged: (CGSize, SessionsSidePanel.ChatResizeEdges) -> Void
     var onChatResizeEnded: () -> Void
@@ -1352,8 +1466,15 @@ private struct SessionsSidePanelView: View {
     private var listColumnWidth: CGFloat { Self.listColumnWidth }
 
     @Environment(\.colorScheme) private var colorScheme
+    /// Bumped on `Preferences.changed` so header shortcut tooltips stay current.
+    @State private var prefsTick = 0
 
     private var headerFG: Color { colorScheme == .dark ? .white : .black }
+
+    private var sessionsToggleShortcutLabel: String {
+        _ = prefsTick
+        return Preferences.sessionsShortcut.display
+    }
 
     /// Same cursor mark as the menu-bar icon, templated for the black title pill.
     private static let headerLogoImage: NSImage = {
@@ -1398,6 +1519,9 @@ private struct SessionsSidePanelView: View {
                     session: session,
                     onSend: { text, submit, imagePaths in onSend(id, text, submit, imagePaths) },
                     onStop: { onStop(id) },
+                    onConfirmQueueEdit: { followUpID, text in onConfirmQueueEdit(id, followUpID, text) },
+                    onCancelQueueEdit: { onCancelQueueEdit(id) },
+                    onResumeQueue: { onResumeQueue(id) },
                     onDraw: { onDrawForSession(id) },
                     onClose: onCloseChat,
                     compact: true,
@@ -1429,6 +1553,9 @@ private struct SessionsSidePanelView: View {
         .overlay(alignment: .top) {
             floatingHeader
         }
+        .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
+            prefsTick &+= 1
+        }
         .onChange(of: store.sessions.map(\.id)) { ids in
             selection.clampListPage(total: ids.count)
             if let id = selection.selectedID, !ids.contains(id) {
@@ -1442,20 +1569,23 @@ private struct SessionsSidePanelView: View {
         }
     }
 
+    /// Shared height for the “Ai Sessions” title pill and New / Settings / ✕ controls.
+    private var headerControlHeight: CGFloat { 34 }
+
     private var floatingHeader: some View {
-        HStack(alignment: .center) {
+        HStack(alignment: .center, spacing: 8) {
             HStack(spacing: 7) {
                 Image(nsImage: Self.headerLogoImage)
                     .resizable()
                     .renderingMode(.template)
-                    .frame(width: 14, height: 14)
+                    .frame(width: 15, height: 15)
                 Text("Ai Sessions")
                     .font(.system(size: 16, weight: .semibold))
             }
             .foregroundStyle(.white)
-            .padding(.leading, 10)
-            .padding(.trailing, 14)
-            .padding(.vertical, 5)
+            .padding(.leading, 11)
+            .padding(.trailing, 15)
+            .frame(height: headerControlHeight)
             .background(
                 Capsule(style: .continuous)
                     .fill(Color.black)
@@ -1468,10 +1598,10 @@ private struct SessionsSidePanelView: View {
             Spacer(minLength: 8)
             Button(action: onNew) {
                 Text("New")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(headerFG)
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
+                    .padding(.horizontal, 12)
+                    .frame(height: headerControlHeight)
                     .background(
                         Capsule(style: .continuous)
                             .fill(headerBG)
@@ -1479,13 +1609,15 @@ private struct SessionsSidePanelView: View {
                     )
                     .softHoverInnerBorder(Capsule(style: .continuous), inset: 2)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
+            // Floating nonactivating panel — SwiftUI `.help` never appears; draw our own.
+            .hoverTooltip("⌘N")
             Button(action: onOpenSettings) {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(headerFG)
-                    .frame(width: 28, height: 28)
+                    .frame(width: headerControlHeight, height: headerControlHeight)
                     .background(
                         Circle()
                             .fill(headerBG)
@@ -1493,13 +1625,14 @@ private struct SessionsSidePanelView: View {
                     )
                     .softHoverInnerBorder(Circle(), inset: 2)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
+            .hoverTooltip(HoverTooltipLabel.icon("Settings", shortcut: "⌘,"))
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(headerFG)
-                    .frame(width: 28, height: 28)
+                    .frame(width: headerControlHeight, height: headerControlHeight)
                     .background(
                         Circle()
                             .fill(headerBG)
@@ -1507,8 +1640,9 @@ private struct SessionsSidePanelView: View {
                     )
                     .softHoverInnerBorder(Circle(), inset: 2)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
+            .hoverTooltip(HoverTooltipLabel.icon("Hide sessions", shortcut: sessionsToggleShortcutLabel))
         }
         // Match the list column’s leading inset (content HStack uses 14).
         .padding(.horizontal, 14)
@@ -1656,7 +1790,7 @@ private struct SessionsSidePanelView: View {
         .animation(.easeOut(duration: 0.14), value: selection.showShortcutBadges)
     }
 
-    /// Shown while ⌘ is held — pairs with the ⌘1…9 badges.
+    /// Shown while ⌘ is held — pairs with the per-row ⌘1…9 labels.
     private var sessionsShortcutHintsFooter: some View {
         HStack(spacing: 14) {
             shortcutHint(key: "⌘1–9", label: "select")
@@ -1708,7 +1842,7 @@ private struct SessionsSidePanelView: View {
                         enabled: page > 0
                     )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .disabled(page <= 0)
             .opacity(page <= 0 ? 0.35 : 1)
 
@@ -1733,7 +1867,7 @@ private struct SessionsSidePanelView: View {
                         enabled: page < pages - 1
                     )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .disabled(page >= pages - 1)
             .opacity(page >= pages - 1 ? 0.35 : 1)
         }
@@ -1808,7 +1942,7 @@ private struct SessionsEmptyStateCard: View {
             )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
     }
 }
@@ -1891,7 +2025,7 @@ private struct WorkspacePicker: View {
                     inset: 3
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
 
             if isOpen {
@@ -1969,7 +2103,7 @@ private struct WorkspacePickerActionRow: View {
                 }
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .onHover { hovering = $0 }
     }
 }
@@ -2052,7 +2186,7 @@ private struct GitWorktreePicker: View {
                     inset: 3
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
 
             if isOpen {
@@ -2194,7 +2328,7 @@ private struct GitWorktreeAddRow: View {
                         )
                         .softHoverInnerBorder(Capsule(), inset: 2)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .disabled(!enabled)
             }
             if let errorMessage, !errorMessage.isEmpty {
@@ -2283,7 +2417,7 @@ private struct GitWorktreeRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .contextMenu {
             if !entry.isPrimary {
                 // Disabled items keep the row from offering a delete that `git worktree remove` would refuse.
@@ -2379,7 +2513,7 @@ private struct WorkspacePickerRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .onHover { hovering = $0 }
     }
 
@@ -2676,16 +2810,9 @@ private struct SessionCardView: View {
     var body: some View {
         ZStack(alignment: .trailing) {
             Button(action: onTap) {
-                HStack(alignment: .top, spacing: 12) {
-                    ZStack {
-                        statusIcon
-                            .frame(width: 30, height: 30)
-                        if showShortcutBadge, let shortcutNumber {
-                            ShortcutBadge(number: shortcutNumber)
-                                .transition(.opacity)
-                        }
-                    }
-                    .frame(width: 30, height: 30)
+                HStack(alignment: .center, spacing: 12) {
+                    statusIcon
+                        .frame(width: 30, height: 30)
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(session.title)
@@ -2695,11 +2822,17 @@ private struct SessionCardView: View {
                             Spacer(minLength: 4)
                             Text(relativeTime(session.createdAt))
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(fg.opacity(hovering ? 0 : 0.55))
+                                .foregroundStyle(fg.opacity(showShortcutBadge || hovering ? 0 : 0.55))
                         }
                         Text(session.preview.isEmpty ? "Type a message to start" : session.preview)
                             .font(.system(size: 13))
-                            .foregroundStyle(fg.opacity(session.preview.isEmpty ? 0.45 : 0.82))
+                            .foregroundStyle(
+                                fg.opacity(
+                                    showShortcutBadge
+                                        ? 0
+                                        : (session.preview.isEmpty ? 0.45 : 0.82)
+                                )
+                            )
                             // Single line keeps list row height stable so the panel can hug content.
                             .lineLimit(embedded ? 1 : 2)
                             .multilineTextAlignment(.leading)
@@ -2710,11 +2843,20 @@ private struct SessionCardView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(cardBackground)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
 
-            // Float over the card — do not pad/reflow text when it appears.
-            if hovering {
+            // Plain ⌘N on the trailing edge — covers timestamp + preview, no badge chrome.
+            if showShortcutBadge, let shortcutNumber {
+                Text("⌘\(shortcutNumber)")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(fg.opacity(0.55))
+                    .monospacedDigit()
+                    .padding(.trailing, embedded ? 12 : 14)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            } else if hovering {
+                // Float over the card — do not pad/reflow text when it appears.
                 Button(action: onArchive) {
                     Image(systemName: "archivebox")
                         .font(.system(size: 12, weight: .semibold))
@@ -2728,7 +2870,7 @@ private struct SessionCardView: View {
                         }
                         .softHoverInnerBorder(Circle(), inset: 2)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .padding(.trailing, 10)
                 .transition(.opacity)
             }
@@ -2784,59 +2926,35 @@ private struct SessionCardView: View {
 
     @ViewBuilder
     private var statusIcon: some View {
-        let icon = Group {
-            if session.messages.isEmpty, session.status == .waiting {
-                Image(systemName: "plus.circle.fill")
-                    .foregroundStyle(Color.accentColor)
+        if session.messages.isEmpty, session.status == .waiting {
+            Image(systemName: "plus.circle.fill")
+                .foregroundStyle(Color.accentColor)
+                .font(.system(size: 20))
+        } else {
+            switch session.status {
+            case .working:
+                ProgressView()
+                    .controlSize(.small)
+            case .finished:
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
                     .font(.system(size: 20))
-            } else {
-                switch session.status {
-                case .working:
-                    ProgressView()
-                        .controlSize(.small)
-                case .finished:
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 20))
-                case .waiting, .failed:
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.system(size: 20))
-                case .stopped:
-                    Image(systemName: "stop.circle.fill")
-                        .foregroundStyle(.secondary)
-                        .font(.system(size: 20))
-                }
+            case .waiting, .failed:
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.system(size: 20))
+            case .stopped:
+                Image(systemName: "stop.circle.fill")
+                    .foregroundStyle(.secondary)
+                    .font(.system(size: 20))
             }
         }
-        icon.opacity(showShortcutBadge ? 0 : 1)
     }
 
     private func relativeTime(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
-    }
-}
-
-private struct ShortcutBadge: View {
-    let number: Int
-
-    var body: some View {
-        HStack(spacing: 2) {
-            Text("⌘")
-                .font(.system(size: 10, weight: .semibold))
-            Text("\(number)")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.accentColor)
-        )
-        .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
     }
 }
 

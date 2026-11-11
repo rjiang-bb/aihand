@@ -108,6 +108,25 @@ final class ChipCodecTests: XCTestCase {
     }
 }
 
+final class ComposerDropChromeShapeTests: XCTestCase {
+    func testBottomCornersRoundAndTopStaysSquare() {
+        let shape = ComposerDropChromeShape(bottomRadius: 22)
+        let path = shape.path(in: CGRect(x: 0, y: 0, width: 200, height: 100))
+        let bounds = path.boundingRect
+        XCTAssertEqual(bounds.minX, 0, accuracy: 0.01)
+        XCTAssertEqual(bounds.maxX, 200, accuracy: 0.01)
+        XCTAssertEqual(bounds.minY, 0, accuracy: 0.01)
+        XCTAssertEqual(bounds.maxY, 100, accuracy: 0.01)
+        // Top edge is a straight line across the full width (square corners).
+        XCTAssertTrue(path.contains(CGPoint(x: 1, y: 1)))
+        XCTAssertTrue(path.contains(CGPoint(x: 199, y: 1)))
+        // Outside the bottom rounded corners should miss.
+        XCTAssertFalse(path.contains(CGPoint(x: 1, y: 99)))
+        XCTAssertFalse(path.contains(CGPoint(x: 199, y: 99)))
+        XCTAssertTrue(path.contains(CGPoint(x: 100, y: 99)))
+    }
+}
+
 final class MediaImportTests: SandboxedTestCase {
     private func pasteboard() -> NSPasteboard {
         NSPasteboard(name: NSPasteboard.Name("aihand.tests.\(UUID().uuidString)"))

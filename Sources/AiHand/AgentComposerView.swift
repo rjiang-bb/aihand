@@ -32,10 +32,18 @@ struct AgentComposerView: View {
     var onSend: () -> Void
     var onQueue: (() -> Void)? = nil
     var onStop: (() -> Void)? = nil
+    /// Composer is editing a queued follow-up (Cursor-style).
+    var isEditingQueued: Bool = false
+    var onConfirmEdit: (() -> Void)? = nil
+    var onCancelEdit: (() -> Void)? = nil
     /// Follow-up only: enter drawing mode and send the capture back to this session.
     var onDraw: (() -> Void)? = nil
     /// Called when the composer height may have changed (newline, skills list).
     var onLayoutNeeded: (() -> Void)? = nil
+    /// Insets so SoftChrome / drop chrome can sit flush with the chat card edges.
+    var contentInsets: EdgeInsets = EdgeInsets()
+    /// Bottom corners of the drop/SoftChrome chrome (0 top; matches the sessions chat card).
+    var bottomCornerRadius: CGFloat = 0
     @FocusState.Binding var focused: Bool
 
     @Environment(\.colorScheme) private var colorScheme
@@ -50,6 +58,11 @@ struct AgentComposerView: View {
     @State private var shortcutButtonHovered = false
     @State private var shortcutPopoverHovered = false
     @State private var shortcutDismissWork: DispatchWorkItem?
+    /// ⌘ held while the prompt is focused → send button shows the steer glyph.
+    @State private var commandHeld = false
+    /// Local key monitor closes over a class so Esc sees live edit / + menu state.
+    @State private var keyBridge = ComposerKeyBridge()
+    @State private var flagsMonitor: Any?
 
     private var resolvedConnectionID: UUID? {
         connectionID ?? Preferences.agentWorkspaceConnectionID
@@ -110,10 +123,12 @@ struct AgentComposerView: View {
             }
 
             promptField
-                .help("Type @ for files · / for skills · Enter send · ⇧↩ add newline · Tab / ⇧Tab indent · ⌘↩ send · ⌘V / drop to attach")
 
             HStack(alignment: .center, spacing: 6) {
                 composerPlusButton
+                if isEditingQueued {
+                    editingQueuedBadge
+                }
                 shortcutsButton
                 Spacer(minLength: 8)
                 favoritePicker
@@ -122,10 +137,39 @@ struct AgentComposerView: View {
             .padding(.horizontal, 2)
             .padding(.bottom, 2)
         }
+        .padding(contentInsets)
+        // Empty SoftChrome (not buttons / menus / the NSTextView) focuses the prompt.
+        .contentShape(ComposerDropChromeShape(bottomRadius: bottomCornerRadius))
+        .onTapGesture { focusPrompt() }
         .background(SoftChrome.cardFill(dark: colorScheme == .dark))
+        .clipShape(ComposerDropChromeShape(bottomRadius: bottomCornerRadius))
+        // Window-wide drag monitor: highlight as soon as a file drag enters the window;
+        // only the SoftChrome band accepts the drop.
+        .background {
+            if attachments != nil {
+                ComposerMediaDragCatcher(
+                    isTargeted: $dropTargeted,
+                    onDrop: { handleFileDrop() }
+                )
+            }
+        }
+        .overlay {
+            if dropTargeted {
+                dropFilesHighlight
+                    .allowsHitTesting(false)
+            }
+        }
         .onAppear {
+            syncKeyBridge()
             configureAutocomplete()
             installKeyMonitor()
+            installFlagsMonitor()
+        }
+        .onChange(of: isEditingQueued) { _ in syncKeyBridge() }
+        .onChange(of: plusMenuOpen) { _ in syncKeyBridge() }
+        .onChange(of: focused) { _ in
+            syncKeyBridge()
+            refreshCommandHeld()
         }
         .onChange(of: workspace) { _ in
             configureAutocomplete()
@@ -174,10 +218,24 @@ struct AgentComposerView: View {
         }
         .onDisappear {
             removeKeyMonitor()
+            removeFlagsMonitor()
             removePlusMenuMouseMonitor()
             skillAC.teardown()
             fileAC.teardown()
         }
+    }
+
+    private var promptIsFocused: Bool {
+        focused || (ComposerFieldEditor.editableTextView() as? ComposerPromptTextView) != nil
+    }
+
+    /// Follow-up send glyph: steer while ⌘ is held in the prompt.
+    private var sendButtonSymbol: String {
+        ComposerSendButtonIcon.systemName(
+            isFollowUp: kind == .followUp,
+            commandHeld: commandHeld,
+            promptFocused: promptIsFocused
+        )
     }
 
     private func configureAutocomplete() {
@@ -214,7 +272,7 @@ struct AgentComposerView: View {
         }
     }
 
-    /// Cursor-style field: attachments above the text, shared chrome.
+    /// Cursor-style field: attachments above the text (chrome + drop zone live on the outer composer).
     private var promptField: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let attachments, !attachments.wrappedValue.isEmpty {
@@ -243,37 +301,6 @@ struct AgentComposerView: View {
         .padding(.top, 6)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // No inset field chrome — share the panel’s SoftChrome card fill.
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(SoftChrome.cardFill(dark: colorScheme == .dark))
-        )
-        .overlay {
-            if dropTargeted {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(red: 0.2, green: 0.55, blue: 0.98).opacity(0.16))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(Color(red: 0.2, green: 0.55, blue: 0.98), lineWidth: 1.5)
-                    )
-                    .overlay(
-                        Text("Drop files")
-                            .font(.system(size: 13.5, weight: .semibold))
-                            .foregroundStyle(Color(red: 0.2, green: 0.55, blue: 0.98))
-                    )
-                    .allowsHitTesting(false)
-            }
-        }
-        // Lifecycle hook: installs a window-wide drag monitor (overlay on the prompt
-        // alone can't see drags over the transcript / session list).
-        .background {
-            if attachments != nil {
-                ComposerMediaDragCatcher(
-                    isTargeted: $dropTargeted,
-                    onDrop: { handleFileDrop() }
-                )
-            }
-        }
     }
 
     private var composerPlusButton: some View {
@@ -287,13 +314,17 @@ struct AgentComposerView: View {
                 .frame(width: 24, height: 24)
                 .softHoverInnerBorder(Circle(), inset: 1.25)
         }
-        .buttonStyle(.plain)
-        .help("Plan or attach files")
+        .buttonStyle(.pointerPlain)
+        .hoverTooltip(HoverTooltipLabel.icon("Plan or attach"))
+    }
+
+    private var editingQueuedBadge: some View {
+        EditingQueuedBadge(onCancel: { onCancelEdit?() })
     }
 
     @ViewBuilder
     private var composerActionButtons: some View {
-        if kind == .followUp, let onDraw {
+        if kind == .followUp, let onDraw, !isEditingQueued {
             Button(action: onDraw) {
                 Image(systemName: "pencil.tip.crop.circle.fill")
                     .font(.system(size: 26))
@@ -301,29 +332,17 @@ struct AgentComposerView: View {
                     .foregroundStyle(Color.primary.opacity(0.85))
                     .softHoverInnerBorder(Circle(), inset: 2.5)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .keyboardShortcut("d", modifiers: .command)
-            .help("Draw (⌘D)")
+            .hoverTooltip(HoverTooltipLabel.icon("Draw", shortcut: "⌘D"))
         }
 
-        if isWorking, let onStop {
-            // Gray stop replaces Send while a turn runs; Enter still queues, ⌘↩ steers.
-            Button(action: onStop) {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(Color.secondary.opacity(0.9))
-                    .softHoverInnerBorder(Circle(), inset: 2.5)
-            }
-            .buttonStyle(.plain)
-            .help("Stop (⌃C)")
-            .background(steerKeyboardShortcut)
-        } else {
+        if isEditingQueued {
             Button(action: {
                 guard canSend else { return }
-                onSend()
+                onConfirmEdit?()
             }) {
-                Image(systemName: "arrow.up.circle.fill")
+                Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 26))
                     .symbolRenderingMode(.palette)
                     .foregroundStyle(
@@ -332,10 +351,47 @@ struct AgentComposerView: View {
                     )
                     .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .disabled(!canSend)
             .keyboardShortcut(.return, modifiers: .command)
-            .help(kind == .followUp ? "Send / Steer (⌘↩)" : "Send (⌘↩)")
+            .hoverTooltip(HoverTooltipLabel.icon("Confirm edit", shortcut: "↩"))
+        } else if isWorking, let onStop {
+            // Gray stop replaces Send while a turn runs; Enter still queues, ⌘↩ steers.
+            Button(action: onStop) {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: 26))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(Color.secondary.opacity(0.9))
+                    .softHoverInnerBorder(Circle(), inset: 2.5)
+            }
+            .buttonStyle(.pointerPlain)
+            .hoverTooltip(HoverTooltipLabel.icon("Stop", shortcut: "⌃C"))
+            .background(steerKeyboardShortcut)
+        } else {
+            Button(action: {
+                guard canSend else { return }
+                onSend()
+            }) {
+                Image(systemName: sendButtonSymbol)
+                    .font(.system(size: 26))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(
+                        canSend ? Color.white : Color.secondary.opacity(0.55),
+                        canSend ? Color.accentColor : Color.secondary.opacity(0.25)
+                    )
+                    .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
+            }
+            .buttonStyle(.pointerPlain)
+            .disabled(!canSend)
+            .keyboardShortcut(.return, modifiers: .command)
+            .hoverTooltip(
+                kind == .followUp
+                    ? "Send (↩) / Steer (⌘↩)"
+                    : HoverTooltipLabel.icon("Send", shortcut: "⌘↩")
+            )
+            .accessibilityLabel(
+                kind == .followUp && commandHeld && promptIsFocused ? "Steer" : "Send"
+            )
         }
     }
 
@@ -426,7 +482,27 @@ struct AgentComposerView: View {
             .contentShape(shape)
             .softHoverInnerBorder(shape, inset: 1.5)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
+    }
+
+    /// Put the caret in the prompt (AppKit first responder — FocusState alone is flaky).
+    private func focusPrompt() {
+        focused = true
+        ComposerFieldEditor.focus()
+    }
+
+    /// Square top, rounded bottom — matches the sessions chat card’s lower corners.
+    private var dropFilesHighlight: some View {
+        let tint = Color(red: 0.2, green: 0.55, blue: 0.98)
+        let shape = ComposerDropChromeShape(bottomRadius: bottomCornerRadius)
+        return shape
+            .fill(tint.opacity(0.16))
+            .overlay(shape.strokeBorder(tint, lineWidth: 1.5))
+            .overlay(
+                Text("Drop files")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(tint)
+            )
     }
 
     private func insertPlanCommand() {
@@ -438,7 +514,7 @@ struct AgentComposerView: View {
         } else {
             text = "/plan " + trimmed
         }
-        focused = true
+        focusPrompt()
         DispatchQueue.main.async {
             ComposerFieldEditor.setStringPlacingCaretAtEnd(text)
         }
@@ -528,6 +604,9 @@ struct AgentComposerView: View {
             .softHoverInnerBorder(Capsule(style: .continuous), inset: 2)
         }
         .menuStyle(.borderlessButton)
+        // Menu chrome doesn't always inherit the label's cursor tracking — assert on the Menu itself.
+        .pointerCursor()
+        .hoverTooltip(HoverTooltipLabel.icon("Cycle model", shortcut: "⌘/"))
         .fixedSize()
     }
 
@@ -537,6 +616,14 @@ struct AgentComposerView: View {
 
     private var shortcutHints: [(key: String, label: String)] {
         if kind == .followUp {
+            if isEditingQueued {
+                return [
+                    ("Enter", "confirm edit"),
+                    ("Esc", "cancel edit"),
+                    ("⇧↩", "add newline"),
+                    ("⌘/", "switch model"),
+                ]
+            }
             if isWorking {
                 return [
                     ("Enter", "queue"),
@@ -579,6 +666,7 @@ struct AgentComposerView: View {
         .padding(.vertical, 2)
         .contentShape(Rectangle())
         .accessibilityLabel("Shortcuts")
+        .pointerCursor()
         .onHover { hovering in
             shortcutDismissWork?.cancel()
             if hovering {
@@ -653,6 +741,11 @@ struct AgentComposerView: View {
         }
         if skillAC.isActive {
             applySelectedSkill()
+            return
+        }
+        if isEditingQueued {
+            guard canSend else { return }
+            onConfirmEdit?()
             return
         }
         if isWorking, let onQueue, !hasAttachments {
@@ -786,23 +879,44 @@ struct AgentComposerView: View {
         return true
     }
 
+    private func syncKeyBridge() {
+        keyBridge.isEditingQueued = isEditingQueued
+        keyBridge.plusMenuOpen = plusMenuOpen
+        keyBridge.focused = focused
+        keyBridge.onCancelEdit = onCancelEdit
+        keyBridge.onDismissPlusMenu = { plusMenuOpen = false }
+        keyBridge.pasteMedia = { [self] in pasteMediaFromClipboard() }
+        keyBridge.onCommandHeld = { held in
+            if commandHeld != held {
+                commandHeld = held
+            }
+        }
+    }
+
     /// ⌘V media paste (backup when the prompt isn't first responder) + Esc dismiss
-    /// for the + menu (Return owned by the prompt editor).
+    /// for the + menu / queue edit (Return owned by the prompt editor).
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
+        let bridge = keyBridge
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let code = Int(event.keyCode)
 
-            if plusMenuOpen, code == kVK_Escape,
+            if code == kVK_Escape,
                flags.isEmpty || flags == .function {
-                plusMenuOpen = false
-                return nil
+                if bridge.plusMenuOpen {
+                    bridge.onDismissPlusMenu?()
+                    return nil
+                }
+                if bridge.isEditingQueued {
+                    bridge.onCancelEdit?()
+                    return nil
+                }
             }
 
             // Prompt first-responder paste: is handled in ComposerPromptTextView.paste.
             // This path covers ⌘V while the SoftChrome chrome / strip has focus.
-            let promptActive = focused
+            let promptActive = bridge.focused
                 || (ComposerFieldEditor.editableTextView() as? ComposerPromptTextView) != nil
             if promptActive,
                code == kVK_ANSI_V,
@@ -810,7 +924,7 @@ struct AgentComposerView: View {
                !flags.contains(.shift),
                !flags.contains(.option),
                !flags.contains(.control),
-               pasteMediaFromClipboard() {
+               bridge.pasteMedia?() == true {
                 return nil
             }
 
@@ -825,6 +939,30 @@ struct AgentComposerView: View {
             NSEvent.removeMonitor(keyMonitor)
         }
         keyMonitor = nil
+    }
+
+    private func installFlagsMonitor() {
+        guard flagsMonitor == nil else { return }
+        let bridge = keyBridge
+        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            let cmd = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+            bridge.onCommandHeld?(cmd)
+            return event
+        }
+        refreshCommandHeld()
+    }
+
+    private func removeFlagsMonitor() {
+        if let flagsMonitor {
+            NSEvent.removeMonitor(flagsMonitor)
+        }
+        flagsMonitor = nil
+        commandHeld = false
+    }
+
+    private func refreshCommandHeld() {
+        let cmd = NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+        commandHeld = cmd
     }
 
     private func installPlusMenuMouseMonitor() {
@@ -998,9 +1136,127 @@ enum ComposerFieldEditor {
     }
 }
 
-/// Lifecycle hook that installs a window-wide file-drag monitor so the prompt’s
-/// “Drop files” chrome lights up for drags anywhere over the window (transcript,
-/// session list, etc.), not only when the pointer is over the field.
+/// Send vs steer glyph for the follow-up composer action button.
+enum ComposerSendButtonIcon {
+    static func systemName(isFollowUp: Bool, commandHeld: Bool, promptFocused: Bool) -> String {
+        if isFollowUp, commandHeld, promptFocused {
+            return "steeringwheel.circle.fill"
+        }
+        return "arrow.up.circle.fill"
+    }
+}
+
+/// Mutable bag for the composer’s local key monitor (View structs capture stale values).
+private final class ComposerKeyBridge {
+    var isEditingQueued = false
+    var plusMenuOpen = false
+    var focused = false
+    var onCancelEdit: (() -> Void)?
+    var onDismissPlusMenu: (() -> Void)?
+    var pasteMedia: (() -> Bool)?
+    var onCommandHeld: ((Bool) -> Void)?
+}
+
+/// Cursor-style secondary “Editing” chip: slate fill, blue label, grey ✕ that lightens on hover.
+private struct EditingQueuedBadge: View {
+    var onCancel: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var xHovered = false
+
+    private var labelBlue: Color {
+        colorScheme == .dark
+            ? Color(red: 0.35, green: 0.62, blue: 0.95)
+            : Color(red: 0.15, green: 0.45, blue: 0.85)
+    }
+
+    private var slateFill: Color {
+        colorScheme == .dark
+            ? Color(red: 0.16, green: 0.20, blue: 0.27)
+            : Color(red: 0.88, green: 0.91, blue: 0.96)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "pencil")
+                .font(.system(size: 10, weight: .semibold))
+            Text("Editing")
+                .font(.system(size: 12, weight: .semibold))
+            Button(action: onCancel) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(
+                        xHovered
+                            ? Color.primary.opacity(0.92)
+                            : Color.primary.opacity(0.42)
+                    )
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.pointerPlain)
+            .hoverTooltip(HoverTooltipLabel.icon("Cancel edit", shortcut: "Esc"))
+            .onHover { xHovered = $0 }
+        }
+        .foregroundStyle(labelBlue)
+        .padding(.leading, 9)
+        .padding(.trailing, 7)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(slateFill)
+        )
+        .fixedSize()
+    }
+}
+
+/// Square top + rounded bottom — matches the sessions chat card’s lower corners.
+struct ComposerDropChromeShape: Shape, InsettableShape {
+    var bottomRadius: CGFloat
+    var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        let radius = max(0, min(bottomRadius - insetAmount, r.width / 2, r.height / 2))
+        var path = Path()
+        path.move(to: CGPoint(x: r.minX, y: r.minY))
+        path.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+        path.addLine(to: CGPoint(x: r.maxX, y: r.maxY - radius))
+        if radius > 0 {
+            path.addArc(
+                center: CGPoint(x: r.maxX - radius, y: r.maxY - radius),
+                radius: radius,
+                startAngle: .degrees(0),
+                endAngle: .degrees(90),
+                clockwise: false
+            )
+        } else {
+            path.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+        }
+        path.addLine(to: CGPoint(x: r.minX + radius, y: r.maxY))
+        if radius > 0 {
+            path.addArc(
+                center: CGPoint(x: r.minX + radius, y: r.maxY - radius),
+                radius: radius,
+                startAngle: .degrees(90),
+                endAngle: .degrees(180),
+                clockwise: false
+            )
+        } else {
+            path.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+        }
+        path.closeSubpath()
+        return path
+    }
+
+    func inset(by amount: CGFloat) -> some InsettableShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+}
+
+/// Lifecycle hook that installs a window-wide file-drag monitor so “Drop files” lights up
+/// as soon as a drag enters the window — not only when the pointer is over the composer.
+/// Drops still only attach when released over the SoftChrome band (the anchor’s frame).
 private struct ComposerMediaDragCatcher: NSViewRepresentable {
     @Binding var isTargeted: Bool
     var onDrop: () -> Bool
@@ -1025,6 +1281,8 @@ private struct ComposerMediaDragCatcher: NSViewRepresentable {
     final class Coordinator {
         var isTargeted: Binding<Bool>
         var onDrop: () -> Bool
+        /// SoftChrome band — drops outside this view are ignored.
+        weak var dropZone: NSView?
 
         init(isTargeted: Binding<Bool>, onDrop: @escaping () -> Bool) {
             self.isTargeted = isTargeted
@@ -1041,6 +1299,18 @@ private struct ComposerMediaDragCatcher: NSViewRepresentable {
                     self.isTargeted.wrappedValue = value
                 }
             }
+        }
+
+        /// `draggingLocation` is in the base window’s coordinate space.
+        func isDropInsideComposer(_ sender: NSDraggingInfo) -> Bool {
+            guard let zone = dropZone else { return false }
+            // Use the SoftChrome host only when the representable collapsed to ~zero;
+            // otherwise hit-test the anchor so transcript drops above the band miss.
+            let target: NSView = (zone.bounds.width > 1 && zone.bounds.height > 1)
+                ? zone
+                : (zone.superview ?? zone)
+            let point = target.convert(sender.draggingLocation, from: nil)
+            return target.bounds.insetBy(dx: -2, dy: -2).contains(point)
         }
     }
 }
@@ -1084,13 +1354,13 @@ private final class ComposerMediaDragCatcherAnchor: NSView {
     }
 
     func ensureWindowMonitor() {
+        coordinator?.dropZone = self
         guard let content = window?.contentView else {
             tearDownMonitor()
             return
         }
         if let monitor, monitor.superview === content {
             monitor.coordinator = coordinator
-            // Stay above SwiftUI hosts so live-drag hit-testing sees us first.
             content.addSubview(monitor, positioned: .above, relativeTo: nil)
             monitor.frame = content.bounds
             return
@@ -1112,7 +1382,7 @@ private final class ComposerMediaDragCatcherAnchor: NSView {
 }
 
 /// Covers the window content view; claims hits only during a live file drag so
-/// normal clicks still reach SwiftUI / the TextField.
+/// normal clicks still reach SwiftUI. Highlights the composer for any in-window file drag.
 private final class ComposerWindowFileDragMonitor: NSView {
     weak var coordinator: ComposerMediaDragCatcher.Coordinator?
 
@@ -1170,11 +1440,14 @@ private final class ComposerWindowFileDragMonitor: NSView {
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        coordinator?.supportsDrag == true
+        guard coordinator?.supportsDrag == true else { return false }
+        // Highlight is window-wide; accept only over the SoftChrome band.
+        return coordinator?.isDropInsideComposer(sender) == true
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         coordinator?.setTargeted(false)
+        guard coordinator?.isDropInsideComposer(sender) == true else { return false }
         return coordinator?.onDrop() ?? false
     }
 
@@ -1273,8 +1546,8 @@ private struct ComposerFileChip: View {
                         .frame(width: 14, height: 14)
                         .background(Circle().fill(Color.primary.opacity(0.10)))
                 }
-                .buttonStyle(.plain)
-                .help("Remove")
+                .buttonStyle(.pointerPlain)
+                .hoverTooltip(HoverTooltipLabel.icon("Remove"))
             }
         }
         .foregroundStyle(chipBlue)
@@ -1289,7 +1562,7 @@ private struct ComposerFileChip: View {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .strokeBorder(chipBlue.opacity(0.22), lineWidth: 1)
         )
-        .help(attachment.path)
+        .hoverTooltip(attachment.path)
         .onHover { hovering = $0 }
     }
 }
@@ -1307,33 +1580,39 @@ private struct ComposerAttachmentThumb: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Group {
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                } else {
-                    Color.primary.opacity(0.08)
-                    Image(systemName: attachment.isVideo ? "video.fill" : "photo")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(Color.primary.opacity(0.45))
+            Button(action: openPreview) {
+                ZStack {
+                    Group {
+                        if let image {
+                            Image(nsImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                        } else {
+                            Color.primary.opacity(0.08)
+                            Image(systemName: attachment.isVideo ? "video.fill" : "photo")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(Color.primary.opacity(0.45))
+                        }
+                    }
+                    .frame(width: size, height: size)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
+                    )
+
+                    if attachment.isVideo {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 18))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color.black.opacity(0.45))
+                    }
                 }
             }
-            .frame(width: size, height: size)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.14), lineWidth: 1)
-            )
-
-            if attachment.isVideo {
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 18))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, Color.black.opacity(0.45))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(false)
-            }
+            // Not `.pointerPlain` — that installs a hand cursor that fights the magnifier.
+            .buttonStyle(.plain)
+            .previewCursor()
+            .hoverTooltip(HoverTooltipLabel.icon(attachment.isVideo ? "Play" : "Preview"))
 
             if hovering {
                 Button(action: onRemove) {
@@ -1344,9 +1623,9 @@ private struct ComposerAttachmentThumb: View {
                         .background(Circle().fill(Color.black.opacity(0.72)))
                         .overlay(Circle().strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .offset(x: 5, y: -5)
-                .help("Remove")
+                .hoverTooltip(HoverTooltipLabel.icon("Remove"))
             }
         }
         .frame(width: size, height: size)
@@ -1355,6 +1634,10 @@ private struct ComposerAttachmentThumb: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onAppear { loadPreview() }
+    }
+
+    private func openPreview() {
+        ChatImageActions.open(path: attachment.path)
     }
 
     private func loadPreview() {

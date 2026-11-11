@@ -13,6 +13,10 @@ final class Toolbar {
 
     private final class Button: NSButton {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
     }
 
     private let panel: Panel
