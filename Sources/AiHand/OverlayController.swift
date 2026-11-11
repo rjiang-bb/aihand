@@ -64,6 +64,7 @@ final class OverlayController {
     private let annotationHints = AnnotationHintPanel()
     private let drawingTools = DrawingToolsPanel()
     private let videoToolbar = VideoToolbarPanel()
+    private let videoDestinationPicker = VideoDestinationPicker()
     private let textEditor = InkTextEditor()
     private let savePreview = ScreenshotSavePreview()
     private var lastPermissionCheck = Date.distantPast
@@ -175,6 +176,9 @@ final class OverlayController {
         }
         videoToolbar.onStop = { [weak self] in
             self?.stopVideoRecordingKeep()
+        }
+        videoDestinationPicker.onPick = { [weak self] destination in
+            self?.handleVideoDestination(destination)
         }
         regionRecorder.onElapsed = { [weak self] seconds in
             guard let self else { return }
@@ -430,6 +434,7 @@ final class OverlayController {
             annotationHints.hide()
             drawingTools.hide()
             videoToolbar.hide()
+            videoDestinationPicker.hide()
             return
         }
         showChrome(on: screen)
@@ -439,22 +444,27 @@ final class OverlayController {
         switch videoPhase {
         case .off:
             videoToolbar.hide()
+            videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.drawingParts)
             drawingTools.show(on: screen, above: annotationHints.frame)
         case .selecting:
             drawingTools.hide()
             videoToolbar.hide()
+            videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.videoSelectingParts)
         case .recording:
             drawingTools.hide()
+            videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts)
             videoToolbar.show(on: screen, above: annotationHints.frame, recording: true)
             videoToolbar.setElapsed(videoElapsedFrozen)
         case .ready:
             drawingTools.hide()
-            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts)
-            videoToolbar.show(on: screen, above: annotationHints.frame, recording: false)
+            // Picker lists destinations + shortcuts; drop the recording hint strip.
+            annotationHints.hide()
+            videoToolbar.show(on: screen, above: .zero, recording: false)
             videoToolbar.setElapsed(videoElapsedFrozen)
+            videoDestinationPicker.show(on: screen, above: videoToolbar.frame)
         }
     }
 
@@ -568,16 +578,8 @@ final class OverlayController {
                 let url = try await self.regionRecorder.stop()
                 self.readyVideoURL = url
                 self.videoPhase = .ready
-                // Keep the frame, stop the flash.
-                if let frame = self.currentFrame, let region = self.videoScreenRect {
-                    let local = CGRect(
-                        x: region.minX - frame.minX,
-                        y: region.minY - frame.minY,
-                        width: region.width,
-                        height: region.height
-                    )
-                    self.armView.setVideoRecordingIndicator(localRect: local, flashing: false)
-                }
+                // Drop the dashed recording frame — destination picker owns the next step.
+                self.armView.clearVideoRecordingIndicator()
                 if let screen = self.videoScreen ?? self.currentScreen() {
                     self.showChrome(on: screen)
                 }
@@ -588,7 +590,23 @@ final class OverlayController {
         }
     }
 
+    private func handleVideoDestination(_ destination: VideoDestination) {
+        switch destination {
+        case .comment:
+            handleVideoSaveAnnotate()
+        case .save:
+            handleVideoSaveOnly()
+        case .send:
+            handleVideoSend()
+        case .discard:
+            Task { @MainActor in
+                await abandonVideoSession(restoreDrawing: true)
+            }
+        }
+    }
+
     private func handleVideoSaveAnnotate() {
+        videoDestinationPicker.hide()
         Task { @MainActor in
             let region = self.videoScreenRect ?? .zero
             guard let url = await self.finalizeVideoFile() else { return }
@@ -598,6 +616,7 @@ final class OverlayController {
     }
 
     private func handleVideoSaveOnly() {
+        videoDestinationPicker.hide()
         Task { @MainActor in
             guard let url = await self.finalizeVideoFile() else { return }
             self.clearVideoUIState()
@@ -606,6 +625,7 @@ final class OverlayController {
     }
 
     private func handleVideoSend() {
+        videoDestinationPicker.hide()
         Task { @MainActor in
             guard let url = await self.finalizeVideoFile() else { return }
             self.clearVideoUIState()
@@ -664,6 +684,7 @@ final class OverlayController {
         videoPhase = .off
         setVideoHotKeysEnabled(false)
         videoToolbar.hide()
+        videoDestinationPicker.hide()
 
         guard restoreDrawing, isActive else {
             videoScreen = nil
@@ -703,6 +724,7 @@ final class OverlayController {
         videoPhase = .off
         setVideoHotKeysEnabled(false)
         videoToolbar.hide()
+        videoDestinationPicker.hide()
         annotationHints.hide()
     }
 
@@ -1291,6 +1313,7 @@ final class OverlayController {
             annotationHints.reposition(on: screen)
             drawingTools.reposition(on: screen, above: annotationHints.frame)
             videoToolbar.reposition(on: screen, above: annotationHints.frame)
+            videoDestinationPicker.reposition(on: screen, above: videoToolbar.frame)
             updateCaptureOutline()
             if let link = displayLink,
                let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {

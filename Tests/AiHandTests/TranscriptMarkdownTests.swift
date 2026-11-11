@@ -94,4 +94,13 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertFalse(html.contains("steer-badge"))
         XCTAssertFalse(html.contains("+ 'Steered</div>'"), "no visible Steered label")
     }
+
+    func testSelectionToolbarButtonsHaveNoNativeTooltips() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("data-action=\"chat\""))
+        XCTAssertTrue(html.contains("data-action=\"new\""))
+        // Labels already show shortcuts — native `title` tooltips are redundant.
+        XCTAssertFalse(html.contains("title=\"Add to chat"))
+        XCTAssertFalse(html.contains("title=\"Add to new session"))
+    }
 }

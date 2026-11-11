@@ -121,12 +121,20 @@ final class ComposerFileChipAttachment: NSTextAttachment {
 final class ComposerSkillChipAttachment: NSTextAttachment {
     let name: String
     let darkChrome: Bool
+    let symbolName: String
 
-    init(name: String, darkChrome: Bool) {
+    init(name: String, darkChrome: Bool, symbolName: String? = nil) {
         self.name = name
         self.darkChrome = darkChrome
+        self.symbolName = symbolName
+            ?? BuiltInSkills.symbolName(forSkillNamed: name)
+            ?? "sparkles"
         super.init(data: nil, ofType: nil)
-        let cell = ComposerSkillChipAttachmentCell(name: name, darkChrome: darkChrome)
+        let cell = ComposerSkillChipAttachmentCell(
+            name: name,
+            darkChrome: darkChrome,
+            symbolName: self.symbolName
+        )
         attachmentCell = cell
         let size = cell.cellSize()
         bounds = NSRect(x: 0, y: -4, width: size.width, height: size.height)
@@ -135,6 +143,7 @@ final class ComposerSkillChipAttachment: NSTextAttachment {
     required init?(coder: NSCoder) {
         self.name = ""
         self.darkChrome = true
+        self.symbolName = "sparkles"
         super.init(coder: coder)
     }
 
@@ -258,6 +267,7 @@ final class ComposerFileChipAttachmentCell: NSTextAttachmentCell {
 final class ComposerSkillChipAttachmentCell: NSTextAttachmentCell {
     private let name: String
     private let darkChrome: Bool
+    private let symbolName: String
     private let label: String
 
     private let chipFont = NSFont.systemFont(ofSize: 12.5, weight: .medium)
@@ -266,9 +276,10 @@ final class ComposerSkillChipAttachmentCell: NSTextAttachmentCell {
     private let paddingY: CGFloat = 3
     private let gap: CGFloat = 5
 
-    init(name: String, darkChrome: Bool) {
+    init(name: String, darkChrome: Bool, symbolName: String = "sparkles") {
         self.name = name
         self.darkChrome = darkChrome
+        self.symbolName = symbolName
         self.label = "/\(name)"
         super.init()
     }
@@ -276,6 +287,7 @@ final class ComposerSkillChipAttachmentCell: NSTextAttachmentCell {
     required init(coder: NSCoder) {
         self.name = ""
         self.darkChrome = true
+        self.symbolName = "sparkles"
         self.label = ""
         super.init(coder: coder)
     }
@@ -327,7 +339,7 @@ final class ComposerSkillChipAttachmentCell: NSTextAttachmentCell {
         path.stroke()
 
         let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .medium)
-        if let base = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)?
+        if let base = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config) {
             let iconRect = NSRect(
                 x: frame.minX + paddingX,

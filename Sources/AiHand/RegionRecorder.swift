@@ -280,10 +280,17 @@ final class RegionRecorder: NSObject {
 
     private func startElapsedTimer() {
         stopElapsedTimer()
+        // Fire on the main run loop (.common) so the toolbar clock keeps ticking
+        // while other tracking / modal run-loop modes are active.
         let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             guard let self else { return }
-            DispatchQueue.main.async {
-                self.onElapsed?(self.elapsed)
+            let seconds = self.elapsed
+            if Thread.isMainThread {
+                self.onElapsed?(seconds)
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onElapsed?(seconds)
+                }
             }
         }
         RunLoop.main.add(t, forMode: .common)

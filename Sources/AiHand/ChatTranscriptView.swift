@@ -847,12 +847,12 @@ struct ChatTranscriptView: NSViewRepresentable {
     <body>
     <div id="root"></div>
     <div id="sel-toolbar" role="toolbar" aria-label="Selection actions">
-      <button type="button" data-action="chat" title="Add to chat (⌘L)">
+      <button type="button" data-action="chat">
         <span>Add to chat</span>
         <span class="keys" aria-hidden="true"><kbd>⌘</kbd><kbd>L</kbd></span>
       </button>
       <span class="sep" aria-hidden="true"></span>
-      <button type="button" data-action="new" title="Add to new session (⇧⌘L)">
+      <button type="button" data-action="new">
         <span>Add to new session</span>
         <span class="keys" aria-hidden="true"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>L</kbd></span>
       </button>

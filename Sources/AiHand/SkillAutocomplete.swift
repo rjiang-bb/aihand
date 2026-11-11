@@ -228,7 +228,8 @@ struct SkillSuggestionList: View {
                             onSelect(skill)
                         } label: {
                             HStack(alignment: .top, spacing: 10) {
-                                Image(systemName: "hexagon.fill")
+                                Image(systemName: skill.symbolName
+                                      ?? (skill.isBuiltIn ? "list.bullet.clipboard" : "hexagon.fill"))
                                     .font(.system(size: 13, weight: .semibold))
                                     .foregroundStyle(.secondary)
                                     .frame(width: 18, height: 18)

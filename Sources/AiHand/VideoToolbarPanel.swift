@@ -7,26 +7,85 @@ final class VideoToolbarPanel {
         override var canBecomeMain: Bool { false }
     }
 
-    private final class Button: NSButton {
-        override func resetCursorRects() {
-            addCursorRect(bounds, cursor: .pointingHand)
+    /// Stop control for the nonactivating recording panel — cursor rects don’t stick
+    /// unless the window is key, so we re-assert the hand via an `activeAlways` area.
+    private final class StopButton: NSButton {
+        private var tracking: NSTrackingArea?
+        private var hovering = false {
+            didSet { refreshBackground() }
         }
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let tracking { removeTrackingArea(tracking) }
+            let area = NSTrackingArea(
+                rect: .zero,
+                options: [
+                    .activeAlways,
+                    .inVisibleRect,
+                    .mouseEnteredAndExited,
+                    .mouseMoved,
+                    .cursorUpdate,
+                ],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            tracking = area
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            hovering = true
+            NSCursor.pointingHand.set()
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            NSCursor.pointingHand.set()
+        }
+
+        override func cursorUpdate(with event: NSEvent) {
+            NSCursor.pointingHand.set()
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            hovering = false
+            NSCursor.arrow.set()
+        }
+
+        func refreshBackground() {
+            layer?.backgroundColor = (hovering
+                ? VideoToolbarChrome.stopHoverFill
+                : VideoToolbarChrome.stopFill).cgColor
+        }
     }
 
     private var panel: Panel?
     private var timerLabel: NSTextField?
     private var dotView: NSView?
-    private var stopButton: Button?
+    private var stopButton: StopButton?
     private var blinkTimer: Timer?
+    /// UI-side tick so the clock advances even if the recorder callback is late/missing.
+    private var displayTimer: Timer?
+    private var displayStartedAt: Date?
+    private var showingRecording = false
 
     var onStop: (() -> Void)?
     var frame: CGRect { panel?.frame ?? .zero }
 
     func show(on screen: NSScreen, above hintFrame: CGRect, recording: Bool) {
+        // Reuse the live panel when chrome is re-shown in the same mode (avoids
+        // resetting the timer label / tearing down the Stop button).
+        if panel != nil, showingRecording == recording {
+            reposition(on: screen, above: hintFrame)
+            return
+        }
+
         hide()
+        showingRecording = recording
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let inset = VideoToolbarChrome.rowInsets
         let p = Panel(
             contentRect: NSRect(x: 0, y: 0, width: 220, height: 52),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -37,6 +96,7 @@ final class VideoToolbarPanel {
         p.backgroundColor = .clear
         p.hasShadow = true
         p.ignoresMouseEvents = false
+        p.acceptsMouseMovedEvents = true
         p.level = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue + 1)
         p.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
         p.isReleasedWhenClosed = false
@@ -59,7 +119,6 @@ final class VideoToolbarPanel {
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
-        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 10)
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let dot = NSView()
@@ -82,39 +141,34 @@ final class VideoToolbarPanel {
         row.addArrangedSubview(label)
 
         if recording {
-            let stop = Button()
-            stop.isBordered = false
-            stop.bezelStyle = .regularSquare
-            stop.wantsLayer = true
-            stop.layer?.cornerRadius = 10
-            stop.layer?.backgroundColor = (dark ? NSColor.white : NSColor.black).withAlphaComponent(dark ? 0.14 : 0.08).cgColor
-            stop.title = "Stop"
-            stop.font = .systemFont(ofSize: 13, weight: .semibold)
-            stop.contentTintColor = dark ? .white : .black
+            let stop = StopButton()
+            Self.styleStopButton(stop)
             stop.target = self
             stop.action = #selector(stopTapped)
-            stop.setButtonType(.momentaryChange)
-            stop.widthAnchor.constraint(equalToConstant: 64).isActive = true
-            stop.heightAnchor.constraint(equalToConstant: 32).isActive = true
             stopButton = stop
             row.addArrangedSubview(stop)
         } else {
-            let ready = NSTextField(labelWithString: "Ready")
-            ready.font = .systemFont(ofSize: 12, weight: .medium)
-            ready.textColor = (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.55)
-            row.addArrangedSubview(ready)
+            let stopped = NSTextField(labelWithString: VideoToolbarChrome.stoppedTitle)
+            stopped.font = .systemFont(ofSize: 12, weight: .medium)
+            stopped.textColor = (dark ? NSColor.white : NSColor.black).withAlphaComponent(0.55)
+            row.addArrangedSubview(stopped)
             stopButton = nil
         }
 
         card.addSubview(row)
+        // Explicit card insets — NSStackView.edgeInsets is unreliable with Auto Layout here.
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            row.topAnchor.constraint(equalTo: card.topAnchor),
-            row.bottomAnchor.constraint(equalTo: card.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset.left),
+            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -inset.right),
+            row.topAnchor.constraint(equalTo: card.topAnchor, constant: inset.top),
+            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -inset.bottom),
         ])
         row.layoutSubtreeIfNeeded()
-        p.setContentSize(row.fittingSize)
+        let fitted = row.fittingSize
+        p.setContentSize(NSSize(
+            width: fitted.width + inset.left + inset.right,
+            height: fitted.height + inset.top + inset.bottom
+        ))
 
         place(p, on: screen, above: hintFrame)
         p.orderFrontRegardless()
@@ -126,22 +180,26 @@ final class VideoToolbarPanel {
 
         if recording {
             startBlink()
+            startDisplayTimer(from: 0)
         } else {
             stopBlink()
+            stopDisplayTimer()
             dotView?.layer?.opacity = 1
             dotView?.layer?.backgroundColor = NSColor.systemOrange.cgColor
         }
     }
 
     func setElapsed(_ seconds: TimeInterval) {
-        let total = max(0, Int(seconds.rounded(.down)))
-        let m = total / 60
-        let s = total % 60
-        timerLabel?.stringValue = String(format: "%02d:%02d", m, s)
+        let total = max(0, seconds)
+        // Keep the local clock aligned with the recorder when callbacks arrive.
+        displayStartedAt = Date().addingTimeInterval(-total)
+        applyElapsed(total)
     }
 
     func hide() {
         stopBlink()
+        stopDisplayTimer()
+        showingRecording = false
         guard let p = panel else { return }
         panel = nil
         timerLabel = nil
@@ -194,7 +252,71 @@ final class VideoToolbarPanel {
         blinkTimer = nil
     }
 
+    private func startDisplayTimer(from seconds: TimeInterval) {
+        stopDisplayTimer()
+        displayStartedAt = Date().addingTimeInterval(-max(0, seconds))
+        applyElapsed(seconds)
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self, let started = self.displayStartedAt else { return }
+            self.applyElapsed(Date().timeIntervalSince(started))
+        }
+        RunLoop.main.add(t, forMode: .common)
+        displayTimer = t
+    }
+
+    private func stopDisplayTimer() {
+        displayTimer?.invalidate()
+        displayTimer = nil
+        displayStartedAt = nil
+    }
+
+    private func applyElapsed(_ seconds: TimeInterval) {
+        let total = max(0, Int(seconds.rounded(.down)))
+        let m = total / 60
+        let s = total % 60
+        timerLabel?.stringValue = String(format: "%02d:%02d", m, s)
+    }
+
     @objc private func stopTapped() {
         onStop?()
     }
+
+    /// Red “[stop] Stop” control used while recording (compact; card insets provide margin).
+    static func styleStopButton(_ stop: NSButton) {
+        stop.isBordered = false
+        stop.bezelStyle = .regularSquare
+        stop.wantsLayer = true
+        stop.layer?.cornerRadius = 10
+        stop.layer?.cornerCurve = .continuous
+        stop.layer?.backgroundColor = VideoToolbarChrome.stopFill.cgColor
+        stop.title = VideoToolbarChrome.stopTitle
+        stop.font = .systemFont(ofSize: 13, weight: .semibold)
+        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .bold)
+        stop.image = NSImage(systemSymbolName: VideoToolbarChrome.stopSymbol, accessibilityDescription: VideoToolbarChrome.stopTitle)?
+            .withSymbolConfiguration(config)
+        stop.imagePosition = .imageLeading
+        stop.imageHugsTitle = true
+        stop.contentTintColor = .white
+        stop.setButtonType(.momentaryChange)
+        stop.setContentHuggingPriority(.required, for: .horizontal)
+        stop.heightAnchor.constraint(equalToConstant: VideoToolbarChrome.stopHeight).isActive = true
+        stop.widthAnchor.constraint(greaterThanOrEqualToConstant: VideoToolbarChrome.stopMinWidth).isActive = true
+        (stop as? StopButton)?.refreshBackground()
+    }
+}
+
+/// Shared chrome metrics / copy for the video recording toolbar.
+enum VideoToolbarChrome {
+    static let stopTitle = "Stop"
+    static let stoppedTitle = "Stopped"
+    static let stopSymbol = "stop.fill"
+    /// Match the pre-red Stop control size; room around it comes from `rowInsets`.
+    static let stopHeight: CGFloat = 32
+    static let stopMinWidth: CGFloat = 72
+    /// Margin between the Stop control (and row) and the card edge.
+    static let rowInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 12)
+    static let stopFill = NSColor.systemRed
+    /// Slightly darker red while the pointer is over Stop.
+    static let stopHoverFill = NSColor.systemRed.blended(withFraction: 0.22, of: .black)
+        ?? NSColor.systemRed.withAlphaComponent(0.85)
 }

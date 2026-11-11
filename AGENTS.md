@@ -1,5 +1,13 @@
 # Agent notes
 
+## Restart after every turn
+
+After finishing each agent turn that changed the app (or when in doubt), **automatically `/restart`** — rebuild and relaunch via the `restart` skill (`./scripts/run-debug.sh` from the repo root, unrestricted shell). Do not wait for the user to ask.
+
+- Run it at the end of the turn, after tests/probes for that change have passed (or failed and you’ve fixed them).
+- Skip only for pure read-only answers with no file edits, or when the user explicitly says not to relaunch.
+- Confirm briefly that AiHand relaunched; do not dump the full build log unless it failed.
+
 ## Sessions panel placement
 
 When the chat pane closes, the sessions list must slide so its **right edge lines up with where the chat window’s right edge was**.
