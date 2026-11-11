@@ -20,7 +20,9 @@ for arg in "$@"; do
 Usage: ./scripts/release.sh [--skip-notarize] [--skip-publish] [--no-bump] [--alpha]
 
   Bumps VERSION (patch), builds a universal signed DMG, and uploads it to a
-  GitHub release (rjiang-bb/aihand). Dist artifacts are local-only — not git.
+  GitHub release (rjiang-bb/aihand), then, if started on main and not
+  --alpha, commits the VERSION bump and pushes it to origin/main. Dist
+  artifacts are local-only — not git.
 
   --skip-notarize  Skip Apple notarization (still codesigns).
   --skip-publish   Build only; do not create/upload a GitHub release.
@@ -42,6 +44,8 @@ USAGE
     esac
 done
 [[ "${SKIP_PUBLISH:-}" == "1" ]] && SKIP_PUBLISH=true
+
+START_BRANCH="$(git symbolic-ref --short -q HEAD || true)"
 
 INSTALL_NOTES="Download the DMG, open it and drag AiHand to Applications. Runs on Apple silicon and Intel, macOS 13 or later."
 
@@ -328,4 +332,19 @@ fi
 
 echo
 echo "Done: $OUT/$APP_NAME.dmg  (VERSION $VERSION)"
-echo "Commit and push the VERSION bump when you are ready."
+
+# Commit the VERSION bump (only VERSION; leaves other working-tree changes alone).
+# Only when we started on main and cut a non-alpha release.
+if [[ "$START_BRANCH" != "main" ]]; then
+    echo "Started on '${START_BRANCH:-detached HEAD}', not main; leaving VERSION uncommitted."
+elif [[ "$ALPHA" == false && "$NO_BUMP" == false ]]; then
+    if git diff --quiet -- VERSION; then
+        echo "VERSION unchanged; nothing to commit."
+    else
+        git add -- VERSION
+        git commit -m "Bump version to $VERSION" -- VERSION
+        echo "==> Pushing VERSION bump to origin/main"
+        git push origin HEAD:main
+        echo "Committed and pushed VERSION bump."
+    fi
+fi
