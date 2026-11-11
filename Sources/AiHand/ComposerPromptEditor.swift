@@ -497,8 +497,12 @@ struct ComposerPromptEditor: NSViewRepresentable {
                     }
                 }
             }
-            if commandSelector == #selector(NSResponder.moveDown(_:)) {
-                if ComposerMarkdownStyler.handleFenceMoveDown(in: textView) {
+            if commandSelector == #selector(NSResponder.moveDown(_:))
+                || commandSelector == #selector(NSResponder.moveUp(_:)) {
+                let handled = commandSelector == #selector(NSResponder.moveDown(_:))
+                    ? ComposerMarkdownStyler.handleFenceMoveDown(in: textView)
+                    : ComposerMarkdownStyler.handleFenceMoveUp(in: textView)
+                if handled {
                     // Sync draft without clobbering the exit caret (applyText preserves selection).
                     applying = true
                     if let storage = textView.textStorage {
@@ -524,7 +528,7 @@ struct ComposerPromptEditor: NSViewRepresentable {
                     recalculateHeightAfterLayout()
                     // Height growth can leave the exit line clipped, so re-assert the caret
                     // on the next runloop turn — but only if the user hasn't moved it since
-                    // (a later ↓/click/⇧↩ must win; a stale re-assert used to yank the
+                    // (a later ↓/↑/click/⇧↩ must win; a stale re-assert used to yank the
                     // caret back into the code body mid-edit).
                     let generation = selectionGeneration
                     DispatchQueue.main.async { [weak self] in
@@ -760,7 +764,14 @@ final class ComposerPromptTextView: NSTextView {
         let lineH = ComposerMarkdownStyler.codeLineHeight
         var rects: [NSRect] = []
 
-        func fragUnion(_ chars: NSRange, top: inout CGFloat, bottom: inout CGFloat) {
+        /// `frag` = full line rect (includes paragraph spacing); `used` = glyph ink.
+        /// Sizing the chip from `frag` left a tall empty bottom because TextKit parks
+        /// paragraphSpacing under the used rect — use `used` + equal pad instead.
+        func fragUnion(
+            _ chars: NSRange,
+            fragTop: inout CGFloat, fragBottom: inout CGFloat,
+            usedTop: inout CGFloat, usedBottom: inout CGFloat
+        ) {
             let glyphRange = layoutManager.glyphRange(forCharacterRange: chars, actualCharacterRange: nil)
             guard glyphRange.length > 0 else { return }
             var fragIndex = glyphRange.location
@@ -770,8 +781,15 @@ final class ComposerPromptTextView: NSTextView {
                 let frag = layoutManager.lineFragmentRect(forGlyphAt: fragIndex, effectiveRange: &fragRange)
                 // Collapsed (hidden) fence lines are ~0 tall; revealed ones are real rows.
                 if frag.height > 4 {
-                    top = min(top, frag.minY)
-                    bottom = max(bottom, frag.maxY)
+                    fragTop = min(fragTop, frag.minY)
+                    fragBottom = max(fragBottom, frag.maxY)
+                    let used = layoutManager.lineFragmentUsedRect(
+                        forGlyphAt: fragIndex, effectiveRange: nil
+                    )
+                    if used.height > 0.5 {
+                        usedTop = min(usedTop, used.minY)
+                        usedBottom = max(usedBottom, used.maxY)
+                    }
                 }
                 var next = NSMaxRange(fragRange)
                 if next <= fragIndex { next = fragIndex + 1 }
@@ -781,32 +799,38 @@ final class ComposerPromptTextView: NSTextView {
 
         for range in ranges {
             // Union visible body line fragments — never abort on not-shown fence glyphs.
-            var top = CGFloat.greatestFiniteMagnitude
-            var bottom: CGFloat = 0
-            fragUnion(range, top: &top, bottom: &bottom)
-            let hasBody = bottom > top
+            var fragTop = CGFloat.greatestFiniteMagnitude
+            var fragBottom: CGFloat = 0
+            var usedTop = CGFloat.greatestFiniteMagnitude
+            var usedBottom: CGFloat = 0
+            fragUnion(range, fragTop: &fragTop, fragBottom: &fragBottom, usedTop: &usedTop, usedBottom: &usedBottom)
             // A caret-revealed opener/closer is a full-height row drawn inside the chip.
             if range.location > 0 {
                 let opener = ns.lineRange(for: NSRange(location: range.location - 1, length: 0))
-                fragUnion(opener, top: &top, bottom: &bottom)
+                fragUnion(opener, fragTop: &fragTop, fragBottom: &fragBottom, usedTop: &usedTop, usedBottom: &usedBottom)
             }
             if NSMaxRange(range) < ns.length {
                 let closer = ns.lineRange(for: NSRange(location: NSMaxRange(range), length: 0))
-                fragUnion(closer, top: &top, bottom: &bottom)
+                fragUnion(closer, fragTop: &fragTop, fragBottom: &fragBottom, usedTop: &usedTop, usedBottom: &usedBottom)
             }
+            // `textContainerOrigin` already includes `textContainerInset` — don't add it again
+            // or the chip shifts down and reads as uneven bottom padding.
             var rect: NSRect
-            if bottom > top {
-                // Line fragments include the block's outer paragraph spacing; give part
-                // of it back as a gap so prose above/below doesn't touch the chip.
+            if fragBottom > fragTop {
+                // Equal inner pad around the ink. Cap to the fragment inset by `margin` so
+                // the chip keeps a gap to neighbouring prose (spacing lives in the frag).
+                let innerPad = max(padY, 6)
+                let inkTop = usedBottom > usedTop ? usedTop : fragTop
+                let inkBottom = usedBottom > usedTop ? usedBottom : fragBottom
+                let chipTop = max(inkTop - innerPad, fragTop + margin)
+                let chipBottom = min(inkBottom + innerPad, fragBottom - margin)
                 rect = NSRect(
-                    x: origin.x + textContainerInset.width + padX,
-                    y: origin.y + textContainerInset.height + top + margin,
+                    x: origin.x + padX,
+                    y: origin.y + chipTop,
                     width: max(containerWidth - padX * 2, 1),
-                    height: max(bottom - top - margin * 2, lineH)
+                    height: max(chipBottom - chipTop, lineH)
                 )
-                _ = hasBody
             } else {
-                let union: NSRect
                 // Empty body — one-line chip just after the opener.
                 let y: CGFloat
                 if range.location > 0 {
@@ -826,12 +850,12 @@ final class ComposerPromptTextView: NSTextView {
                 } else {
                     y = 0
                 }
-                union = NSRect(x: 0, y: y, width: max(containerWidth, 1), height: lineH)
-                rect = union
-                rect.origin.x = origin.x + textContainerInset.width + padX
-                rect.origin.y += origin.y + textContainerInset.height - padY
-                rect.size.width = max(containerWidth - padX * 2, 1)
-                rect.size.height = lineH + padY * 2
+                rect = NSRect(
+                    x: origin.x + padX,
+                    y: origin.y + y - padY,
+                    width: max(containerWidth - padX * 2, 1),
+                    height: lineH + padY * 2
+                )
             }
 
             // Clamp so the chip never paints over the previous *visible prose* line.
@@ -868,7 +892,7 @@ final class ComposerPromptTextView: NSTextView {
                     }
                 }
                 if prevBottom > 0 {
-                    let minY = origin.y + textContainerInset.height + prevBottom + 2
+                    let minY = origin.y + prevBottom + 2
                     if rect.minY < minY {
                         let bottom = rect.maxY
                         rect.origin.y = minY

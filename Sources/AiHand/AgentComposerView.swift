@@ -545,21 +545,21 @@ struct AgentComposerView: View {
                     ("Tab", "indent list"),
                     ("⇧Tab", "outdent / unlist"),
                     ("⌃C", "stop"),
-                    ("⌘/", "model"),
+                    ("⌘/", "switch model"),
                 ]
             }
             return [
                 ("@", "files"),
                 ("/", "skills"),
                 ("Enter", "send"),
-                ("⌘↩", "send"),
+                ("⌘↩", "send (steer)"),
                 ("⇧↩", "list / code newline"),
                 ("Tab", "indent list"),
                 ("⇧Tab", "outdent / unlist"),
                 ("⌘V", "paste file"),
                 ("⌘L", "add selection"),
                 ("⇧⌘L", "selection → new"),
-                ("⌘/", "model"),
+                ("⌘/", "switch model"),
             ]
         }
         return [

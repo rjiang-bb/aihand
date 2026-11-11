@@ -220,43 +220,49 @@ struct SkillSuggestionList: View {
     var onSelect: (AgentSkill) -> Void
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Array(controller.matches.enumerated()), id: \.element.id) { index, skill in
-                    Button {
-                        onSelect(skill)
-                    } label: {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "hexagon.fill")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .frame(width: 18, height: 18)
-                                .padding(.top, 1)
-                            VStack(alignment: .leading, spacing: 2) {
-                                highlightedName(skill.name, query: query)
-                                    .font(.system(size: 14, weight: .semibold))
-                                if !skill.description.isEmpty {
-                                    Text(skill.description)
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(controller.matches.enumerated()), id: \.element.id) { index, skill in
+                        Button {
+                            onSelect(skill)
+                        } label: {
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "hexagon.fill")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 18, height: 18)
+                                    .padding(.top, 1)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    highlightedName(skill.name, query: query)
+                                        .font(.system(size: 14, weight: .semibold))
+                                    if !skill.description.isEmpty {
+                                        Text(skill.description)
+                                            .font(.system(size: 12))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
                                 }
+                                Spacer(minLength: 0)
                             }
-                            Spacer(minLength: 0)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
+                            )
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
-                        )
+                        .buttonStyle(.plain)
+                        .id(index)
                     }
-                    .buttonStyle(.plain)
                 }
             }
+            .frame(maxHeight: 240)
+            .onChange(of: controller.selectedIndex) { index in
+                proxy.scrollTo(index, anchor: nil)
+            }
         }
-        .frame(maxHeight: 240)
         .padding(4)
         .frame(minWidth: 280, maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
