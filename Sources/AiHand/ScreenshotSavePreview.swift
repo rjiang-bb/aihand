@@ -249,7 +249,7 @@ final class ScreenshotSavePreview {
     }
 
     private func makeCloseButton(dark: Bool) -> NSButton {
-        let b = NSButton(frame: .zero)
+        let b = PointerCursorButton(frame: .zero)
         b.isBordered = false
         b.bezelStyle = .regularSquare
         b.wantsLayer = true

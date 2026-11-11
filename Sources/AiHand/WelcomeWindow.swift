@@ -17,7 +17,7 @@ final class WelcomeWindow: NSObject {
     private var askedAt: Date?
     private let title = NSTextField(labelWithString: "")
     private let subtitle = NSTextField(labelWithString: "")
-    private let button = NSButton(title: "", target: nil, action: nil)
+    private let button = PointerCursorButton(title: "", target: nil, action: nil)
     private let tip = NSTextField(labelWithString: "Still blocked? Remove old AiHand rows, enable the Applications one, relaunch.")
 
     static let shownKey = "welcomeShown"
@@ -127,8 +127,11 @@ final class WelcomeWindow: NSObject {
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
 
-        let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")!,
-                                   target: self, action: #selector(close))
+        let closeButton = PointerCursorButton(
+            image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close")!,
+            target: self,
+            action: #selector(close)
+        )
         closeButton.isBordered = false
         closeButton.contentTintColor = .tertiaryLabelColor
         closeButton.translatesAutoresizingMaskIntoConstraints = false

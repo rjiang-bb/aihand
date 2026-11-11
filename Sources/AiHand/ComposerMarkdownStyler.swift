@@ -49,7 +49,8 @@ enum ComposerMarkdownStyler {
     static let codeBlockParagraphPad: CGFloat = 10
     /// Gap kept between the chip and prose above/below it. The block's paragraph
     /// spacing (`codeBlockParagraphPad + codeBlockInsetY`) is split into this margin
-    /// plus the chip's inner padding.
+    /// plus the chip's inner padding. Before/after use the same pad so chip↔prose
+    /// air matches in both directions.
     static let codeBlockOuterMargin: CGFloat = 6
 
     /// True when the caret sits inside a fenced code body (or on a fence marker line).
@@ -91,6 +92,73 @@ enum ComposerMarkdownStyler {
             textView.setSelectedRange(NSRange(location: region.contentStart, length: 0))
         }
         textView.insertNewlineIgnoringFieldEditor(nil)
+        return true
+    }
+
+    /// ↑ skips collapsed fence markers. From the first body line / opener → the line
+    /// above the chip (never park on ```). At the top of the prompt, stay on the
+    /// first body character instead of revealing the opener ticks.
+    @discardableResult
+    static func handleFenceMoveUp(in textView: NSTextView) -> Bool {
+        guard let storage = textView.textStorage else { return false }
+        let ns = storage.string as NSString
+        let sel = textView.selectedRange()
+        guard sel.length == 0 else { return false }
+        let caret = min(sel.location, ns.length)
+        guard let region = fenceRegion(containing: caret, in: ns) else { return false }
+
+        let onOpener = caret >= region.openLine.location && caret < region.contentStart
+        var onFirstBodyLine = false
+        if caret >= region.contentStart && caret <= region.contentEnd {
+            if region.contentEnd <= region.contentStart {
+                onFirstBodyLine = true
+            } else {
+                let probe = min(caret, max(region.contentStart, region.contentEnd - 1))
+                let lineRange = ns.lineRange(for: NSRange(location: probe, length: 0))
+                onFirstBodyLine = lineRange.location <= region.contentStart
+            }
+        }
+        guard onOpener || onFirstBodyLine else { return false }
+
+        let openStart = region.openLine.location
+        // No prose above the fence — keep the caret in the body so ↑ can't reveal ```.
+        guard openStart > 0 else {
+            let dest = min(region.contentStart, storage.length)
+            textView.setSelectedRange(NSRange(location: dest, length: 0))
+            textView.scrollRangeToVisible(NSRange(location: dest, length: 0))
+            return true
+        }
+
+        let bodyAttrs = typingAttributes(darkChrome: nil)
+        let prevLine = ns.lineRange(for: NSRange(location: openStart - 1, length: 0))
+        let column: Int = {
+            if onOpener { return max(0, caret - region.openLine.location) }
+            let probe = min(caret, max(0, ns.length - 1))
+            let line = ns.lineRange(for: NSRange(location: probe, length: 0))
+            return max(0, caret - line.location)
+        }()
+        let prevHasNL = ns.substring(with: prevLine).hasSuffix("\n")
+        let prevContentLen = max(0, prevLine.length - (prevHasNL ? 1 : 0))
+        let dest = prevLine.location + min(column, prevContentLen)
+
+        if storage.length > 0 {
+            let para = NSMutableParagraphStyle()
+            para.lineSpacing = 1
+            para.paragraphSpacing = 1
+            para.minimumLineHeight = ceil(bodySize + 2)
+            para.maximumLineHeight = ceil(bodySize + 6)
+            storage.addAttributes(
+                bodyAttrs.merging([.paragraphStyle: para]) { _, new in new },
+                range: prevLine
+            )
+        }
+        if let layoutManager = textView.layoutManager, let container = textView.textContainer {
+            layoutManager.ensureLayout(for: container)
+        }
+        textView.typingAttributes = bodyAttrs
+        let caretOut = min(dest, storage.length)
+        textView.setSelectedRange(NSRange(location: caretOut, length: 0))
+        textView.scrollRangeToVisible(NSRange(location: caretOut, length: 0))
         return true
     }
 
@@ -1932,7 +2000,23 @@ enum ComposerMarkdownStyler {
 
     // MARK: - URLs
 
+    /// Custom attr for composer autolinks — not AppKit `.link`, so plain click still
+    /// places the caret; ⌘-click / ⌘-hover are handled in `ComposerPromptTextView`.
+    static let linkURLAttribute = NSAttributedString.Key("aihand.composerLinkURL")
+
+    /// Resolve a styled autolink token (`https://…` / `http://…` / `www.…`) to a URL.
+    static func url(fromAutolinkToken token: String) -> URL? {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let raw = trimmed.lowercased().hasPrefix("www.") ? "https://\(trimmed)" : trimmed
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        return url
+    }
+
     /// Paint bare `https://…` / `http://…` / `www.…` links blue (skip code / chips).
+    /// No underline — ⌘ + pointer / ⌘-click is the affordance.
     private static func styleURLs(
         in textStorage: NSTextStorage,
         string: NSString,
@@ -1972,10 +2056,12 @@ enum ComposerMarkdownStyler {
                 }
             }
             guard range.length > 0 else { return }
+            let token = string.substring(with: range)
+            guard let url = url(fromAutolinkToken: token) else { return }
             textStorage.addAttributes([
                 .foregroundColor: linkBlue,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-                .underlineColor: linkBlue.withAlphaComponent(0.55),
+                .underlineStyle: 0,
+                linkURLAttribute: url.absoluteString,
             ], range: range)
         }
     }

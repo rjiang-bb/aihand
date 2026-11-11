@@ -372,7 +372,7 @@ struct SettingsView: View {
                         }
                         .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pointerPlain)
                     .focusable(false)
                     .padding(.bottom, -14)
                 }
@@ -679,7 +679,7 @@ private struct SSHPage: View {
                             ) {
                                 addConnection()
                             }
-                            .help("Add connection (⌘↩)")
+                            .hoverTooltip(HoverTooltipLabel.icon("Add connection", shortcut: "⌘↩"))
                         }
                         if let statusMessage {
                             SSHStatusBanner(message: statusMessage, isError: statusIsError)
@@ -830,9 +830,9 @@ private struct SSHConnectionRow: View {
                     .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
                     .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
-            .help("Remove")
+            .hoverTooltip(HoverTooltipLabel.icon("Remove"))
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -957,7 +957,7 @@ private struct CLIMissingBanner: View {
                             .frame(width: 22, height: 22)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pointerPlain)
                     .focusable(false)
                     .padding(6)
                 }
@@ -1263,7 +1263,7 @@ private struct AgentFavoriteRow: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
 
             if canRemove, hovering || !isCurrent {
@@ -1275,7 +1275,7 @@ private struct AgentFavoriteRow: View {
                         .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
                         .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .focusable(false)
             }
         }
@@ -1518,7 +1518,7 @@ private struct RightAlignedMenuButton: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSButton {
-        let button = NSButton(title: title, target: context.coordinator, action: #selector(Coordinator.showMenu(_:)))
+        let button = PointerCursorButton(title: title, target: context.coordinator, action: #selector(Coordinator.showMenu(_:)))
         button.bezelStyle = .inline
         button.isBordered = false
         button.font = .systemFont(ofSize: 12, weight: .medium)
@@ -1793,7 +1793,7 @@ private struct WorkspaceWorktreeRow: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
 
             if !entry.isPrimary, hovering || canRemove {
@@ -1806,7 +1806,7 @@ private struct WorkspaceWorktreeRow: View {
                             .background(Circle().fill(Color.primary.opacity(hovering && canRemove ? 0.12 : 0.06)))
                             .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1, enabled: canRemove)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.pointerPlain)
                     .focusable(false)
                     .disabled(!canRemove)
 
@@ -1814,7 +1814,7 @@ private struct WorkspaceWorktreeRow: View {
                     if !canRemove {
                         Color.clear
                             .frame(width: 20, height: 20)
-                            .help("There are still uncommitted changes")
+                            .hoverTooltip("There are still uncommitted changes")
                     }
                 }
             }
@@ -1875,7 +1875,7 @@ private struct WorkspaceFolderRow: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
 
             if hovering || !isCurrent {
@@ -1887,7 +1887,7 @@ private struct WorkspaceFolderRow: View {
                         .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0.06)))
                         .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .focusable(false)
             }
         }
@@ -2093,7 +2093,7 @@ private struct AddSlot: View {
                 )
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2132,7 +2132,7 @@ private struct PointerPicker: View {
                 .padding(.vertical, 10)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
         }
         .frame(width: 400)
@@ -2179,7 +2179,7 @@ private struct PickerCell: View {
             .opacity(added ? 0.35 : 1)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2242,7 +2242,7 @@ private struct CustomHandChip: View {
                     .background(Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0)))
                     .softHoverInnerBorder(Circle(), inset: 1.25, lineWidth: 1)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.pointerPlain)
             .focusable(false)
             .opacity(hovering ? 1 : 0)
         }
@@ -2306,7 +2306,7 @@ private struct SwapCell: View {
             .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.primary.opacity(hovering ? 0.1 : 0.04)))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2374,7 +2374,7 @@ private struct ToolbarSlot: View {
                         .frame(width: 16, height: 16)
                         .background(Circle().fill(Color.black.opacity(0.55)))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .focusable(false)
                 .offset(x: 5, y: -5)
             }
@@ -2530,7 +2530,7 @@ private struct InkSwatch: View {
             .scaleEffect(hovering && !selected ? 1.08 : 1)
             .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2567,7 +2567,7 @@ private struct SoundTile: View {
             )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2630,7 +2630,7 @@ private struct SidebarRow: View {
             )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2739,7 +2739,7 @@ private struct LinkRow: View {
             .background(Color.primary.opacity(hovering ? 0.04 : 0))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2756,7 +2756,7 @@ private struct TextButton: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(hovering ? .primary : .secondary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }
@@ -2789,7 +2789,7 @@ private struct PillButton: View {
                 }
                 .foregroundColor(enabled ? .primary : .secondary)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .disabled(!enabled)
         .onHover { hovering = $0 }
@@ -2856,7 +2856,7 @@ private struct MakeHandPage: View {
             )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onDrop(of: [.fileURL], isTargeted: $dropping) { providers in
             guard let provider = providers.first else {
@@ -3163,7 +3163,7 @@ private struct PrimaryButton: View {
             }
             .contentShape(Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pointerPlain)
         .focusable(false)
         .onHover { hovering = $0 }
     }

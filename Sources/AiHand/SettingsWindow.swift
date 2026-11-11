@@ -3,6 +3,10 @@ import Carbon.HIToolbox
 import SwiftUI
 
 final class SettingsWindow: NSObject, NSWindowDelegate {
+    /// Sessions panel is `floating + 2`; chat image previews are `floating + 3`.
+    /// Stay above both so Settings never hides under chat.
+    static let windowLevel = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 4)
+
     var applyToggleShortcut: ((Shortcut) -> Bool)? {
         didSet { model.applyToggleShortcut = applyToggleShortcut }
     }
@@ -22,6 +26,16 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private var window: NSWindow?
     private let model = SettingsModel()
 
+    var isKeyWindow: Bool { window?.isKeyWindow == true }
+
+    /// Close Settings when it is the key window. Returns true when it handled the event.
+    @discardableResult
+    func closeIfKey() -> Bool {
+        guard let window, window.isKeyWindow, window.isVisible else { return false }
+        window.performClose(nil)
+        return true
+    }
+
     func show(_ section: SettingsSection? = nil) {
         if window == nil {
             build()
@@ -35,6 +49,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         if window?.isVisible != true {
             window?.center()
         }
+        window?.level = Self.windowLevel
         window?.makeKeyAndOrderFront(nil)
         window?.makeFirstResponder(nil)
     }
@@ -75,6 +90,9 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         w.titleVisibility = .hidden
         w.titlebarAppearsTransparent = true
         w.isReleasedWhenClosed = false
+        w.level = Self.windowLevel
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        w.hidesOnDeactivate = false
         w.delegate = self
         let host = NSHostingView(rootView: SettingsView(model: model))
         host.focusRingType = .none

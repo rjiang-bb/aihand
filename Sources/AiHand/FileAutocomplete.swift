@@ -180,48 +180,54 @@ struct FileSuggestionList: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(controller.matches.enumerated()), id: \.element.id) { index, entry in
-                            Button {
-                                onSelect(entry)
-                            } label: {
-                                HStack(alignment: .center, spacing: 10) {
-                                    Image(systemName: entry.isDirectory ? "folder.fill" : "doc.text")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 18, height: 18)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        highlightedName(entry.name, query: query)
-                                            .font(.system(size: 14, weight: .semibold))
-                                        if !entry.parentPath.isEmpty {
-                                            Text(entry.parentPath)
-                                                .font(.system(size: 11, design: .monospaced))
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(controller.matches.enumerated()), id: \.element.id) { index, entry in
+                                Button {
+                                    onSelect(entry)
+                                } label: {
+                                    HStack(alignment: .center, spacing: 10) {
+                                        Image(systemName: entry.isDirectory ? "folder.fill" : "doc.text")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 18, height: 18)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            highlightedName(entry.name, query: query)
+                                                .font(.system(size: 14, weight: .semibold))
+                                            if !entry.parentPath.isEmpty {
+                                                Text(entry.parentPath)
+                                                    .font(.system(size: 11, design: .monospaced))
+                                                    .foregroundStyle(.secondary)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                            }
+                                        }
+                                        Spacer(minLength: 0)
+                                        if entry.isDirectory {
+                                            Text("Folder")
+                                                .font(.system(size: 10, weight: .medium))
                                                 .foregroundStyle(.secondary)
-                                                .lineLimit(1)
-                                                .truncationMode(.middle)
                                         }
                                     }
-                                    Spacer(minLength: 0)
-                                    if entry.isDirectory {
-                                        Text("Folder")
-                                            .font(.system(size: 10, weight: .medium))
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
+                                    )
                                 }
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .fill(index == controller.selectedIndex ? Color.accentColor.opacity(0.16) : Color.clear)
-                                )
+                                .buttonStyle(.pointerPlain)
+                                .id(index)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
+                    .frame(maxHeight: 240)
+                    .onChange(of: controller.selectedIndex) { index in
+                        proxy.scrollTo(index, anchor: nil)
+                    }
                 }
-                .frame(maxHeight: 240)
             }
         }
         .padding(4)

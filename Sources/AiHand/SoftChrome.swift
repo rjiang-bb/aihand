@@ -69,5 +69,7 @@ private struct SoftHoverInnerBorderModifier<S: InsettableShape>: ViewModifier {
                 }
                 hovering = value
             }
+            // Hand cursor via AppKit cursor rects (onHover `set` alone loses to cursorUpdate).
+            .pointerCursor(enabled: enabled)
     }
 }

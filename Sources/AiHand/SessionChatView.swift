@@ -6,6 +6,9 @@ struct SessionChatView: View {
     @ObservedObject var session: AgentSession
     var onSend: (String, FollowUpSubmit, [String]) -> Void
     var onStop: () -> Void
+    var onConfirmQueueEdit: ((UUID, String) -> Void)? = nil
+    var onCancelQueueEdit: (() -> Void)? = nil
+    var onResumeQueue: (() -> Void)? = nil
     var onDraw: (() -> Void)? = nil
     var onClose: (() -> Void)? = nil
     var compact: Bool = false
@@ -26,13 +29,18 @@ struct SessionChatView: View {
     private var isWorking: Bool { session.status == .working }
     private var workspace: String { session.workspace }
 
+    private var settingsCLI: AgentCLIKind {
+        Preferences.agentCLI(for: session.executionTarget)
+    }
+
+    /// Always match Settings → Favorites for this machine’s Agent CLI.
     private var favorites: [AgentFavorite] {
         _ = prefsTick
-        return Preferences.favorites(for: session.cliKind, target: session.executionTarget)
+        return Preferences.favorites(for: settingsCLI, target: session.executionTarget)
     }
 
     private var currentFavorite: AgentFavorite? {
-        if let id = session.favoriteId,
+        if let id = Preferences.currentAgentFavoriteID(for: settingsCLI, target: session.executionTarget),
            let match = favorites.first(where: { $0.id == id }) {
             return match
         }
@@ -59,39 +67,52 @@ struct SessionChatView: View {
                 kind: .followUp,
                 isWorking: isWorking,
                 requireNonEmpty: true,
-                placeholder: "Follow up…",
+                placeholder: session.editingFollowUpID == nil ? "Follow up…" : "Edit queued message…",
                 text: $draft,
                 attachments: $attachments,
                 workspace: workspace,
                 connectionID: session.connectionID,
-                cliKind: session.cliKind,
+                cliKind: settingsCLI,
                 favorites: favorites,
                 selectedFavoriteID: currentFavorite?.id,
                 onSelectFavorite: { session.applyFavorite($0) },
                 onSend: { submit(.sendNow) },
                 onQueue: { submit(.queue) },
                 onStop: onStop,
+                isEditingQueued: session.editingFollowUpID != nil,
+                onConfirmEdit: { confirmQueueEdit() },
+                onCancelEdit: { cancelQueueEdit() },
                 onDraw: onDraw,
+                // SoftChrome / drop chrome flush with the chat card (square top, rounded bottom).
+                contentInsets: EdgeInsets(top: 6, leading: 12, bottom: 8, trailing: 12),
+                bottomCornerRadius: compact ? 22 : 0,
                 focused: $composerFocused
             )
-            .padding(.horizontal, 12)
-            .padding(.top, 6)
-            .padding(.bottom, 8)
         }
         .background(compact ? solidBG : Color(nsColor: .windowBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: compact ? 22 : 0, style: .continuous))
         .onAppear {
+            session.syncModelFromSettings()
             wireSelectionHotkeys()
             let seeded = consumeComposerSeedIfNeeded()
             focusComposer(placeCaretAtEnd: seeded)
         }
         .onChange(of: session.id) { _ in
+            session.syncModelFromSettings()
+            session.editingFollowUpID = nil
             clearAttachments()
             let seeded = consumeComposerSeedIfNeeded()
             if !seeded {
                 draft = ""
             }
             focusComposer(placeCaretAtEnd: seeded)
+        }
+        .onChange(of: session.editingFollowUpID) { id in
+            // Panel Esc / manager cancel clears the id without going through cancelQueueEdit.
+            if id == nil {
+                draft = ""
+                clearAttachments()
+            }
         }
         .onDisappear {
             ChatSelectionHotkeys.onAddToChat = nil
@@ -110,6 +131,7 @@ struct SessionChatView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: Preferences.changed)) { _ in
             prefsTick &+= 1
+            session.syncModelFromSettings()
         }
     }
 
@@ -200,7 +222,7 @@ struct SessionChatView: View {
                         .background(Circle().fill(solidFG.opacity(0.1)))
                         .softHoverInnerBorder(Circle(), inset: 2)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pointerPlain)
                 .focusable(false)
             }
         }
@@ -248,9 +270,6 @@ struct SessionChatView: View {
                 Text("Queued · \(session.queuedFollowUps.count)")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
-                Text("Drag to reorder")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 4)
@@ -258,11 +277,6 @@ struct SessionChatView: View {
             VStack(spacing: 4) {
                 ForEach(session.queuedFollowUps) { item in
                     queueRow(item)
-                        .opacity(draggingQueueID == item.id ? 0.45 : 1)
-                        .onDrag {
-                            draggingQueueID = item.id
-                            return NSItemProvider(object: item.id.uuidString as NSString)
-                        }
                         .onDrop(
                             of: [UTType.text],
                             delegate: QueueReorderDropDelegate(
@@ -283,42 +297,74 @@ struct SessionChatView: View {
     }
 
     private func queueRow(_ item: QueuedFollowUp) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 14)
-            Text(item.text)
-                .font(.system(size: 13.5))
-                .foregroundStyle(.primary)
-                .lineLimit(2)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button {
-                steerQueued(item)
-            } label: {
-                Text("Steer")
+        let isEditing = session.editingFollowUpID == item.id
+        return HStack(alignment: .center, spacing: 8) {
+            // Handle + label + empty space: open-hand cursor and drag-to-reorder.
+            HStack(alignment: .center, spacing: 8) {
+                Image(systemName: "line.3.horizontal")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(Color.accentColor)
-                    )
-                    .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 14)
+                Text(item.text)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(isEditing ? Color.secondary : Color.primary)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .buttonStyle(.plain)
-            Button {
-                session.queuedFollowUps.removeAll { $0.id == item.id }
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .openHandCursor()
+            // Empty preview — no floating ghost label; the live row moves via dropEntered.
+            .onDrag {
+                draggingQueueID = item.id
+                return NSItemProvider(object: item.id.uuidString as NSString)
+            } preview: {
+                Color.clear.frame(width: 1, height: 1)
+            }
+
+            if isEditing {
+                Text("Editing")
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 18, height: 18)
-                    .background(Circle().fill(Color.primary.opacity(0.08)))
-                    .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
+            } else {
+                Button {
+                    steerQueued(item)
+                } label: {
+                    Text("Steer")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.accentColor)
+                        )
+                        .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
+                }
+                .buttonStyle(.pointerPlain)
+                Button {
+                    startEditingQueued(item)
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                        .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
+                }
+                .buttonStyle(.pointerPlain)
+                Button {
+                    removeQueued(item)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(Color.primary.opacity(0.08)))
+                        .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
+                }
+                .buttonStyle(.pointerPlain)
             }
-            .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -327,10 +373,64 @@ struct SessionChatView: View {
                 .fill(Color.primary.opacity(compact ? 0.10 : 0.06))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+                        .strokeBorder(
+                            isEditing || draggingQueueID == item.id
+                                ? Color.accentColor.opacity(0.55)
+                                : Color.primary.opacity(0.12),
+                            lineWidth: isEditing || draggingQueueID == item.id ? 1 : 0.5
+                        )
                 )
         )
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func startEditingQueued(_ item: QueuedFollowUp) {
+        session.editingFollowUpID = item.id
+        clearAttachments()
+        draft = item.text
+        focusComposer(placeCaretAtEnd: true)
+    }
+
+    private func confirmQueueEdit() {
+        guard let id = session.editingFollowUpID else { return }
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        draft = ""
+        clearAttachments()
+        DispatchQueue.main.async { draft = "" }
+        if let onConfirmQueueEdit {
+            onConfirmQueueEdit(id, trimmed)
+        } else {
+            if let idx = session.queuedFollowUps.firstIndex(where: { $0.id == id }) {
+                session.queuedFollowUps[idx].text = trimmed
+            }
+            session.editingFollowUpID = nil
+            onResumeQueue?()
+        }
+    }
+
+    private func cancelQueueEdit() {
+        draft = ""
+        clearAttachments()
+        DispatchQueue.main.async { draft = "" }
+        if let onCancelQueueEdit {
+            onCancelQueueEdit()
+        } else {
+            session.editingFollowUpID = nil
+            onResumeQueue?()
+        }
+    }
+
+    private func removeQueued(_ item: QueuedFollowUp) {
+        let wasEditing = session.editingFollowUpID == item.id
+        session.queuedFollowUps.removeAll { $0.id == item.id }
+        if wasEditing {
+            draft = ""
+            clearAttachments()
+            session.editingFollowUpID = nil
+            DispatchQueue.main.async { draft = "" }
+        }
+        onResumeQueue?()
     }
 
     private func submit(_ mode: FollowUpSubmit) {
@@ -380,6 +480,12 @@ struct SessionChatView: View {
     }
 
     private func steerQueued(_ item: QueuedFollowUp) {
+        if session.editingFollowUpID == item.id {
+            draft = ""
+            clearAttachments()
+            session.editingFollowUpID = nil
+            DispatchQueue.main.async { draft = "" }
+        }
         session.queuedFollowUps.removeAll { $0.id == item.id }
         onSend(item.text, .sendNow, [])
     }

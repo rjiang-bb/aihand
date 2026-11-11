@@ -229,7 +229,7 @@ enum SessionsPanelProbe {
         pump(0.4)
     }
 
-    /// ⌘ held: badges + hints footer grow out of the bottom; top edge and row positions stay.
+    /// ⌘ held: row labels + hints footer grow out of the bottom; top edge and row positions stay.
     static func hints() {
         freshPanel(sessions: 4)
         let base = panel.probeFrame

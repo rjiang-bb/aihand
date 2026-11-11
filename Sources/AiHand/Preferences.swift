@@ -773,27 +773,11 @@ enum Preferences {
         setCurrentAgentFavoriteID(id, for: fav.cliKind, target: t)
     }
 
-    static func favoriteForNewSession(cli: AgentCLIKind, lastSession: AgentSession?, target: AgentExecutionTarget? = nil) -> AgentFavorite {
+    /// Current Settings favorite for this CLI — sessions do not inherit a prior chat’s model.
+    static func favoriteForNewSession(cli: AgentCLIKind, lastSession: AgentSession? = nil, target: AgentExecutionTarget? = nil) -> AgentFavorite {
         let t = target ?? runtimeAgentTarget
         ensureAgentFavorites(for: t)
         let available = favorites(for: cli, target: t)
-
-        if let last = lastSession, last.cliKind == cli {
-            if let id = last.favoriteId,
-               let match = available.first(where: { $0.id == id }) {
-                setCurrentAgentFavoriteID(match.id, for: cli, target: t)
-                return match
-            }
-            let lastModel = last.modelId ?? ""
-            let lastEffort = last.effort
-            if let match = available.first(where: {
-                $0.modelId == lastModel && ($0.effort ?? nil) == lastEffort
-            }) {
-                setCurrentAgentFavoriteID(match.id, for: cli, target: t)
-                return match
-            }
-        }
-
         let currentID = currentAgentFavoriteID(for: cli, target: t)
         let current = available.first(where: { $0.id == currentID })
             ?? available.first(where: { $0.isBuiltIn })
@@ -1139,6 +1123,19 @@ enum Preferences {
         }
     }
 
+    /// Last open chat per workspace key (`connection|normalizedPath` → session UUID string).
+    /// Written on every select/close so force-quit still restores the open session.
+    static var openChatByWorkspace: [String: String] {
+        get { defaults.dictionary(forKey: "sessionsOpenChatByWorkspace") as? [String: String] ?? [:] }
+        set {
+            if newValue.isEmpty {
+                defaults.removeObject(forKey: "sessionsOpenChatByWorkspace")
+            } else {
+                defaults.set(newValue, forKey: "sessionsOpenChatByWorkspace")
+            }
+        }
+    }
+
     @discardableResult
     static func ensureScreenshotsFolder() -> String {
         let path = screenshotsFolder
@@ -1189,7 +1186,8 @@ enum Preferences {
                     "agentWorkspaceRefs", "agentWorkspaceRootID", "agentWorktreeByRootID",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY",
-                    "sessionsPanelExpandedOriginX", "sessionsPanelExpandedOriginY"] {
+                    "sessionsPanelExpandedOriginX", "sessionsPanelExpandedOriginY",
+                    "sessionsOpenChatByWorkspace"] {
             defaults.removeObject(forKey: key)
         }
         didMigrateAgentSettings = false

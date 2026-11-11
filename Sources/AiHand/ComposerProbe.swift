@@ -424,6 +424,8 @@ enum ComposerProbe {
             print("  chip=\(chip) above=\(above.maxY) first=\(first) last=\(last) below=\(below.minY)")
             expectTrue("fence: gap above chip ≥ 4", gapAbove >= 4, "gap=\(gapAbove)")
             expectTrue("fence: gap below chip ≥ 4", gapBelow >= 4, "gap=\(gapBelow)")
+            expectTrue("fence: gap below ≈ gap above", abs(gapBelow - gapAbove) <= 3,
+                       "above=\(gapAbove) below=\(gapBelow)")
             expectTrue("fence: inner pad top ≥ 6", first.minY - chip.minY >= 6, "pad=\(first.minY - chip.minY)")
             expectTrue("fence: inner pad bottom ≥ 6", chip.maxY - last.maxY >= 6, "pad=\(chip.maxY - last.maxY)")
         }
@@ -481,6 +483,36 @@ enum ComposerProbe {
         let xFont = tv.textStorage!.attribute(.font, at: (tv.string as NSString).length - 1, effectiveRange: nil) as? NSFont
         expectTrue("fence: prose after block is not mono", !(xFont?.isFixedPitch ?? true))
         render("fence-down-at-end")
+
+        // ↑ out of the first body line: opener stays hidden, caret lands on prose above.
+        reset("before\n```\nlet x = 1\n```\nafter")
+        tv.setSelectedRange(NSRange(location: idx("let x"), length: 0))
+        pump(0.1)
+        up()
+        pump(0.1)
+        let upCaret = tv.selectedRange().location
+        let openLoc = (tv.string as NSString).range(of: "```").location
+        print("  ↑ from body: src=\(esc(source)) caret=\(upCaret) open=\(openLoc)")
+        expectTrue("fence: ↑ leaves the block above the opener", upCaret < openLoc,
+                   "caret=\(upCaret) open=\(openLoc)")
+        expectTrue("fence: caret after ↑ is not in fence", !ComposerMarkdownStyler.caretIsInFence(in: tv))
+        let openTicks = (tv.textStorage!.attribute(.font, at: openLoc, effectiveRange: nil) as? NSFont)?.pointSize ?? 99
+        expectTrue("fence: opener ticks hidden after ↑ out", openTicks < 1, "size=\(openTicks)")
+        render("fence-up-out")
+
+        // Fence at the top of the prompt: ↑ must not reveal the opener.
+        reset("```\nonly\n```")
+        tv.setSelectedRange(NSRange(location: idx("only"), length: 0))
+        pump(0.1)
+        up()
+        pump(0.1)
+        let topOpen = (tv.string as NSString).range(of: "```").location
+        let topCaret = tv.selectedRange().location
+        expectTrue("fence: ↑ at doc start stays in body", topCaret >= topOpen + 3,
+                   "caret=\(topCaret) open=\(topOpen)")
+        let topTicks = (tv.textStorage!.attribute(.font, at: topOpen, effectiveRange: nil) as? NSFont)?.pointSize ?? 99
+        expectTrue("fence: opener stays hidden at doc start ↑", topTicks < 1, "size=\(topTicks)")
+        render("fence-up-at-start")
 
         // Caret at the start of the prose line right after a closer isn't "in the fence".
         reset("```\na\n```\nafter", caret: 10)

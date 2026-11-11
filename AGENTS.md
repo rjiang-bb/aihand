@@ -21,10 +21,11 @@ The sessions **list card hugs its content** — only as tall as the workspace pi
 
 ## ⌘-hold shortcut hints
 
-Holding **⌘** shows shortcut badges and a hints footer (`⌘1–9` / `⌘↑↓` / `⌘W`).
+Holding **⌘** shows per-row `⌘1`…`⌘9` labels and a hints footer (`⌘1–9` / `⌘↑↓` / `⌘W`).
 
-- Grow the hints **out of the bottom** of the list card. Keep the session rows’ screen position fixed (panel top edge stays put; height extends downward).
-- Do **not** overlay hints on top of the last rows, and do **not** reflow/jump the list upward when hints appear.
+- Per-row numbers sit on the **right** of each session card as plain text (no badge fill/outline), vertically centered, covering the timestamp + preview while held. Status icons stay on the left.
+- Grow the footer hints **out of the bottom** of the list card. Keep the session rows’ screen position fixed (panel top edge stays put; height extends downward).
+- Do **not** overlay the footer on top of the last rows, and do **not** reflow/jump the list upward when hints appear.
 - List-only: include the hints footer in `SessionsListMetrics` and relayout with the top edge anchored. Paginated lists reuse the existing footer slot.
 
 ## ⌘/ model cycling
@@ -36,11 +37,62 @@ Holding **⌘** shows shortcut badges and a hints footer (`⌘1–9` / `⌘↑�
 - Do **not** also consume ⌘/ in `SessionChatView` (double-cycle skips favorites).
 - Do **not** call `closeChat()` from `windowDidResignKey`. Menu key equivalents and the favorite picker resign key briefly; collapsing clears `selectedID` and makes ⌘/ a no-op. Use Esc / the chat close control to dismiss chat.
 
+## Agent favorites vs sessions
+
+The composer model picker always mirrors **Settings → Agent** for that session’s machine (local / SSH): same CLI favorites list and Current selection.
+
+- Do **not** freeze the picker to the CLI/favorite captured when the session was created.
+- `AgentSession.syncModelFromSettings()` / `applyFavorite` keep the session aligned; switching Agent CLI clears `chatId` (can’t resume across binaries).
+- New sessions take Settings’ Current favorite — they do **not** inherit the previous chat’s model.
+
 ## ⌘, settings
 
 **⌘,** opens AiHand Settings whenever the app has focus (sessions panel, annotate prompt, etc.).
 
 - Put “Settings…” with key equivalent `,` on the **main** app menu (`editingMenu` in `AppDelegate`), not only the status-item menu — status-item key equivalents do not fire unless that menu is open.
+- Settings window level must stay **above** the sessions/chat panel (`floating + 2`) and chat image previews (`floating + 3`) — use `SettingsWindow.windowLevel` (`floating + 4`). Do not leave Settings at `.normal` or chat will cover it.
+
+## ⌘W focus
+
+**⌘W** always follows the key window (`CommandWRouter`):
+
+1. Chat image preview → close preview (not archive)
+2. Settings → close Settings (not archive)
+3. Sessions panel → archive the selected session
+4. Anything else → `performClose` on the key window
+
+Do **not** let the Archive Session menu key equivalent archive while a preview or Settings is key.
+
+## Esc while editing a queued follow-up
+
+**Esc** in the open chat cancels queue-item edit mode before it closes the chat (`SessionsPanelEscape` / composer key bridge). The composer “Editing” chip matches Cursor’s secondary slate style; its ✕ lightens on hover.
+
+## Open session survives relaunch
+
+The last open chat per workspace is written to `Preferences.openChatByWorkspace` on every select/close (not only on clean quit). On launch, `SessionsSidePanel` restores `selectedID` when that session still exists so force-quit doesn’t leave the list with nothing selected.
+
+## Hover tooltips
+
+Use `hoverTooltip(_:)` (floating tip window in `HoverTooltip.swift`) for all control tips — including sessions header, composer actions, queue chips, and Settings. Do **not** use SwiftUI `.help` on floating / nonactivating panels; it often never appears.
+
+- **Icon-only buttons** must name the action: `HoverTooltipLabel.icon("Settings", shortcut: "⌘,")` → `Settings (⌘,)`. Include a shortcut when one exists.
+- **Labeled controls** (e.g. header **New**) may show the shortcut alone (`⌘N`).
+
+## Queue row drag reorder
+
+Queued follow-up rows: the **handle + label + empty space** (not Steer / Edit / Remove) show the open-hand cursor (`openHandCursor`) and own `.onDrag`. Action buttons keep the pointing hand. Use an empty `onDrag` preview so there is no floating ghost label — the live row moves in place via `dropEntered`.
+
+## Composer attachment previews
+
+Media thumbs in the composer strip use a magnifying-glass cursor on hover (`previewCursor` — not `.pointerPlain`, which steals the hand); click opens `ChatImageActions` preview (videos open in the default app). The remove (✕) control must not also trigger preview.
+
+## Composer file drop zone
+
+In the sessions chat card, SoftChrome + “Drop files” cover the **full composer band** flush with the card edges: square top (under the divider), rounded bottom matching the card (`bottomCornerRadius` 22 when `compact`).
+
+- A **window-wide** drag monitor lights “Drop files” as soon as a file drag enters the window — do not wait until the pointer is over the composer.
+- Only a drop **over the SoftChrome band** attaches; transcript / session-list drops are ignored.
+- Chrome shape is `ComposerDropChromeShape` (0 top radii, rounded bottom).
 
 ## Focus newly shown text fields
 
@@ -49,6 +101,7 @@ When an action **reveals** a text field (inline path box, composer, rename field
 - Same rule for any new UI that is primarily for typing.
 - After an **NSMenu** (or sheet) opens the field, SwiftUI `FocusState` is unreliable — use AppKit `window.makeFirstResponder(field)` (see `AutofocusPlainField` / annotate prompt), deferred until the menu tears down.
 - If the menu item was chosen with **↩**, swallow that leftover Return (and ignore the field’s submit action briefly) so focusing the field does not immediately confirm.
+- Clicking empty SoftChrome in `AgentComposerView` (not a button, menu, chip, or the text view itself) must focus the prompt via `ComposerFieldEditor.focus()`.
 
 ## Keep tests current
 

@@ -8,6 +8,10 @@ final class VideoToolbarPanel {
     }
 
     private final class Button: NSButton {
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .pointingHand)
+        }
+
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 

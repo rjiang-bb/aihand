@@ -101,4 +101,48 @@ final class ComposerMarkdownTests: XCTestCase {
         _ = ComposerMarkdownStyler.handleFenceEnter(in: tv)
         XCTAssertTrue(tv.string.hasPrefix("```swift\n"))
     }
+
+    // MARK: URLs
+
+    func testAutolinkURLResolution() {
+        XCTAssertEqual(
+            ComposerMarkdownStyler.url(fromAutolinkToken: "https://example.com/a")?.absoluteString,
+            "https://example.com/a"
+        )
+        XCTAssertEqual(
+            ComposerMarkdownStyler.url(fromAutolinkToken: "www.example.com")?.absoluteString,
+            "https://www.example.com"
+        )
+        XCTAssertNil(ComposerMarkdownStyler.url(fromAutolinkToken: "not a url"))
+    }
+
+    func testAutolinksAreBlueWithoutUnderline() {
+        let storage = NSTextStorage(string: "see https://example.com/x and www.foo.com done")
+        ComposerMarkdownStyler.apply(to: storage, darkChrome: true, caret: nil, selection: nil)
+        let ns = storage.string as NSString
+        let httpsLoc = ns.range(of: "https://example.com/x").location
+        let wwwLoc = ns.range(of: "www.foo.com").location
+        XCTAssertNotEqual(httpsLoc, NSNotFound)
+        XCTAssertNotEqual(wwwLoc, NSNotFound)
+
+        let httpsUnderline = storage.attribute(.underlineStyle, at: httpsLoc, effectiveRange: nil) as? Int ?? 0
+        XCTAssertEqual(httpsUnderline, 0, "composer links must not underline")
+        let httpsURL = storage.attribute(
+            ComposerMarkdownStyler.linkURLAttribute, at: httpsLoc, effectiveRange: nil
+        ) as? String
+        XCTAssertEqual(httpsURL, "https://example.com/x")
+
+        let wwwURL = storage.attribute(
+            ComposerMarkdownStyler.linkURLAttribute, at: wwwLoc, effectiveRange: nil
+        ) as? String
+        XCTAssertEqual(wwwURL, "https://www.foo.com")
+
+        // Inside a fence, URLs stay plain code — no link attr.
+        let fenced = NSTextStorage(string: "```\nhttps://nope.com\n```")
+        ComposerMarkdownStyler.apply(to: fenced, darkChrome: true, caret: nil, selection: nil)
+        let nope = (fenced.string as NSString).range(of: "https://nope.com").location
+        XCTAssertNil(
+            fenced.attribute(ComposerMarkdownStyler.linkURLAttribute, at: nope, effectiveRange: nil)
+        )
+    }
 }
