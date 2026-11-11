@@ -1,26 +1,94 @@
 import AppKit
+import Carbon.HIToolbox
 import SwiftUI
 import WebKit
 
-/// Live chat-selection state for ⌘L / ⌘⇧L (panel key monitor + menu).
+/// WKWebView that owns `copy:` so context-menu Copy / Edit→Copy hit rich clipboard.
+final class ChatTranscriptWebView: WKWebView {
+    override var acceptsFirstResponder: Bool { true }
+
+    /// Context-menu / Edit→Copy land here via the responder chain (WKWebView has no open `copy:`).
+    @objc func copy(_ sender: Any?) {
+        if ChatSelectionHotkeys.copyPendingToPasteboard() { return }
+        evaluateJavaScript("window.selectionClipboardPayload && selectionClipboardPayload()") { result, _ in
+            guard let dict = result as? [String: Any],
+                  let text = dict["text"] as? String,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+            let html = dict["html"] as? String
+            let plain = dict["plain"] as? String ?? text
+            ChatSelectionHotkeys.pendingText = text
+            ChatSelectionHotkeys.pendingPlain = plain
+            ChatSelectionHotkeys.pendingHTML = html ?? ""
+            ChatClipboard.write(plain: plain, html: html)
+        }
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.type == .keyDown,
+           Int(event.keyCode) == kVK_ANSI_C,
+           flags.contains(.command),
+           !flags.contains(.shift),
+           !flags.contains(.option),
+           !flags.contains(.control),
+           ChatSelectionHotkeys.hasPendingSelection {
+            copy(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// Live chat-selection state for ⌘L / ⌘⇧L / ⌘C (panel key monitor + menu).
 enum ChatSelectionHotkeys {
     static let addToChatNotification = Notification.Name("AiHandChatSelectionAddToChat")
     static let addToNewSessionNotification = Notification.Name("AiHandChatSelectionAddToNewSession")
 
     static var pendingText: String = ""
+    /// List-aware plain (`- ` / `1. `) for plain-text paste targets.
+    static var pendingPlain: String = ""
+    /// HTML fragment for the current transcript selection (rich ⌘C).
+    static var pendingHTML: String = ""
     static var onAddToChat: ((String) -> Void)?
     static var onAddToNewSession: ((String) -> Void)?
+
+    static var hasPendingSelection: Bool {
+        !pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !pendingPlain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func clearPending() {
+        pendingText = ""
+        pendingPlain = ""
+        pendingHTML = ""
+    }
 
     @discardableResult
     static func perform(addToNewSession: Bool) -> Bool {
         let text = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return false }
-        pendingText = ""
+        clearPending()
         if addToNewSession {
             onAddToNewSession?(text)
         } else {
             onAddToChat?(text)
         }
+        return true
+    }
+
+    /// Copy the live transcript selection (plain + HTML/RTF). Keeps the selection.
+    @discardableResult
+    static func copyPendingToPasteboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        let plain = (pendingPlain.isEmpty ? pendingText : pendingPlain)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !plain.isEmpty else { return false }
+        ChatClipboard.write(
+            plain: pendingPlain.isEmpty ? pendingText : pendingPlain,
+            html: pendingHTML,
+            to: pasteboard
+        )
         return true
     }
 }
@@ -44,7 +112,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         uc.add(context.coordinator, name: "selectionAction")
         uc.add(context.coordinator, name: "selectionChanged")
         uc.add(context.coordinator, name: "copyText")
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = ChatTranscriptWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -74,9 +142,9 @@ struct ChatTranscriptView: NSViewRepresentable {
         uc.removeScriptMessageHandler(forName: "selectionAction")
         uc.removeScriptMessageHandler(forName: "selectionChanged")
         uc.removeScriptMessageHandler(forName: "copyText")
-        if ChatSelectionHotkeys.pendingText.isEmpty == false {
+        if ChatSelectionHotkeys.hasPendingSelection {
             // Selection dies with the web view.
-            ChatSelectionHotkeys.pendingText = ""
+            ChatSelectionHotkeys.clearPending()
         }
     }
 
@@ -162,15 +230,30 @@ struct ChatTranscriptView: NSViewRepresentable {
                 let point = NSPoint(x: clientX, y: y)
                 ChatImageActions.showMenu(path: key, at: point, in: webView)
             case "selectionChanged":
-                let text = (body["text"] as? String)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                ChatSelectionHotkeys.pendingText = text
+                let text = (body["text"] as? String) ?? ""
+                let html = (body["html"] as? String) ?? ""
+                let plain = (body["plain"] as? String) ?? ""
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    // ⌘-hold re-lays out the panel and collapses the DOM selection —
+                    // keep the sticky copy buffer so ⌘C still works.
+                    if NSEvent.modifierFlags
+                        .intersection(.deviceIndependentFlagsMask)
+                        .contains(.command) {
+                        return
+                    }
+                    ChatSelectionHotkeys.clearPending()
+                } else {
+                    ChatSelectionHotkeys.pendingText = text
+                    ChatSelectionHotkeys.pendingPlain = plain.isEmpty ? text : plain
+                    ChatSelectionHotkeys.pendingHTML = html
+                }
             case "selectionAction":
                 guard let action = body["action"] as? String,
                       let text = body["text"] as? String else { return }
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { return }
-                ChatSelectionHotkeys.pendingText = ""
+                ChatSelectionHotkeys.clearPending()
                 switch action {
                 case "chat":
                     onAddSelectionToChat?(trimmed)
@@ -181,8 +264,14 @@ struct ChatTranscriptView: NSViewRepresentable {
                 }
             case "copyText":
                 guard let text = body["text"] as? String else { return }
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                let html = body["html"] as? String
+                // `text` is already list-aware plain when sent from selection copy.
+                ChatClipboard.write(plain: text, html: html)
+                if let html, !html.isEmpty {
+                    ChatSelectionHotkeys.pendingText = text
+                    ChatSelectionHotkeys.pendingPlain = text
+                    ChatSelectionHotkeys.pendingHTML = html
+                }
             default:
                 break
             }
@@ -1145,24 +1234,172 @@ struct ChatTranscriptView: NSViewRepresentable {
     };
 
     var pendingSelectionText = '';
+    var pendingSelectionHTML = '';
+    var pendingSelectionPlain = '';
     var selToolbar = document.getElementById('sel-toolbar');
 
-    function postSelectionChanged(text) {
+    function postSelectionChanged(text, html, plain) {
       if (window.webkit && window.webkit.messageHandlers.selectionChanged) {
-        window.webkit.messageHandlers.selectionChanged.postMessage({ text: text || '' });
+        window.webkit.messageHandlers.selectionChanged.postMessage({
+          text: text || '',
+          html: html || '',
+          plain: plain || ''
+        });
       }
     }
 
-    function hideSelectionToolbar() {
-      pendingSelectionText = '';
-      postSelectionChanged('');
+    function hideSelectionToolbar(clearPending) {
+      if (clearPending !== false) {
+        pendingSelectionText = '';
+        pendingSelectionHTML = '';
+        pendingSelectionPlain = '';
+        postSelectionChanged('', '', '');
+      }
       if (selToolbar) selToolbar.style.display = 'none';
     }
 
     function currentSelectionText() {
       var sel = window.getSelection();
-      if (!sel || sel.rangeCount === 0) return '';
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return '';
       return String(sel.toString() || '').trim();
+    }
+
+    // Walk a DOM subtree into markdown-ish plain text (bullets / numbers / indent).
+    function nodeToPlain(root) {
+      var parts = [];
+      function endsWithNewline() {
+        return parts.length > 0 && /\\n$/.test(parts[parts.length - 1]);
+      }
+      function walk(n, listStack) {
+        if (!n) return;
+        if (n.nodeType === 3) {
+          parts.push(String(n.nodeValue || '').replace(/\\u00a0/g, ' '));
+          return;
+        }
+        if (n.nodeType !== 1) return;
+        var tag = String(n.tagName || '').toLowerCase();
+        if (tag === 'script' || tag === 'style' || tag === 'button' || tag === 'svg') return;
+        if (tag === 'br') { parts.push('\\n'); return; }
+        if (tag === 'ul' || tag === 'ol') {
+          var next = listStack.concat([{ kind: tag, index: 0 }]);
+          for (var i = 0; i < n.childNodes.length; i++) walk(n.childNodes[i], next);
+          if (!listStack.length && !endsWithNewline()) parts.push('\\n');
+          return;
+        }
+        if (tag === 'li') {
+          var depth = listStack.length;
+          var top = listStack[listStack.length - 1];
+          var marker = '- ';
+          if (top && top.kind === 'ol') {
+            top.index += 1;
+            marker = String(top.index) + '. ';
+          }
+          var indent = '';
+          for (var d = 1; d < depth; d++) indent += '  ';
+          if (parts.length && !endsWithNewline()) parts.push('\\n');
+          parts.push(indent + marker);
+          for (var j = 0; j < n.childNodes.length; j++) {
+            var child = n.childNodes[j];
+            if (child.nodeType === 1) {
+              var ct = String(child.tagName || '').toLowerCase();
+              if (ct === 'ul' || ct === 'ol') {
+                if (!endsWithNewline()) parts.push('\\n');
+                walk(child, listStack);
+                continue;
+              }
+            }
+            walk(child, listStack);
+          }
+          return;
+        }
+        if (tag === 'p' || tag === 'div' || tag === 'h1' || tag === 'h2' || tag === 'h3'
+            || tag === 'h4' || tag === 'blockquote' || tag === 'pre' || tag === 'tr') {
+          if (parts.length && !endsWithNewline()) parts.push('\\n');
+          for (var k = 0; k < n.childNodes.length; k++) walk(n.childNodes[k], listStack);
+          if (!endsWithNewline()) parts.push('\\n');
+          return;
+        }
+        if (tag === 'td' || tag === 'th') {
+          if (parts.length && !endsWithNewline() && parts[parts.length - 1] !== '') {
+            var last = parts[parts.length - 1];
+            if (last !== '\\n' && !/\\t$/.test(last)) parts.push('\\t');
+          }
+          for (var c = 0; c < n.childNodes.length; c++) walk(n.childNodes[c], listStack);
+          return;
+        }
+        for (var m = 0; m < n.childNodes.length; m++) walk(n.childNodes[m], listStack);
+      }
+      walk(root, []);
+      return parts.join('')
+        .replace(/[ \\t]+\\n/g, '\\n')
+        .replace(/\\n{3,}/g, '\\n\\n')
+        .replace(/^\\n+|\\n+$/g, '');
+    }
+
+    // Wrap consecutive top-level <li> nodes in <ul> (cloneContents drops the parent list).
+    function wrapOrphanListItems(root) {
+      var nodes = Array.prototype.slice.call(root.childNodes);
+      var run = [];
+      function flush() {
+        if (!run.length) return;
+        var ul = document.createElement('ul');
+        root.insertBefore(ul, run[0]);
+        run.forEach(function(li) { ul.appendChild(li); });
+        run = [];
+      }
+      nodes.forEach(function(n) {
+        if (n.nodeType === 1 && String(n.tagName || '').toLowerCase() === 'li') {
+          run.push(n);
+        } else {
+          flush();
+        }
+      });
+      flush();
+    }
+
+    // Clone the live selection as { text, html, plain } for ⌘C / selectionChanged / copy.
+    function selectionClipboardPayload() {
+      var sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) {
+        return { text: '', html: '', plain: '' };
+      }
+      var container = document.createElement('div');
+      for (var i = 0; i < sel.rangeCount; i++) {
+        container.appendChild(sel.getRangeAt(i).cloneContents());
+      }
+      container.querySelectorAll('.code-copy, #sel-toolbar, .steer-icon, .play').forEach(function(el) {
+        el.remove();
+      });
+      wrapOrphanListItems(container);
+      var html = container.innerHTML;
+      var text = String(sel.toString() || '');
+      var plain = nodeToPlain(container) || text;
+      return { text: text, html: html, plain: plain };
+    }
+    window.selectionClipboardPayload = selectionClipboardPayload;
+
+    function rememberSelectionPayload(payload) {
+      pendingSelectionText = payload && payload.text ? payload.text : '';
+      pendingSelectionHTML = payload && payload.html ? payload.html : '';
+      pendingSelectionPlain = payload && payload.plain ? payload.plain : '';
+      postSelectionChanged(pendingSelectionText, pendingSelectionHTML, pendingSelectionPlain);
+    }
+
+    function copySelectionToApp() {
+      var payload = selectionClipboardPayload();
+      var live = String(payload.text || '').trim();
+      if (live) {
+        rememberSelectionPayload(payload);
+      } else if (!String(pendingSelectionText || '').trim()) {
+        return false;
+      }
+      if (window.webkit && window.webkit.messageHandlers.copyText) {
+        window.webkit.messageHandlers.copyText.postMessage({
+          text: pendingSelectionPlain || pendingSelectionText,
+          html: pendingSelectionHTML
+        });
+      }
+      return true;
     }
 
     function runSelectionAction(action) {
@@ -1182,7 +1419,8 @@ struct ChatTranscriptView: NSViewRepresentable {
 
     function updateSelectionToolbar() {
       if (!selToolbar) return;
-      var text = currentSelectionText();
+      var payload = selectionClipboardPayload();
+      var text = String(payload.text || '').trim();
       if (!text) {
         hideSelectionToolbar();
         return;
@@ -1198,8 +1436,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         hideSelectionToolbar();
         return;
       }
-      pendingSelectionText = text;
-      postSelectionChanged(text);
+      rememberSelectionPayload(payload);
       selToolbar.style.display = 'flex';
       var tb = selToolbar.getBoundingClientRect();
       var left = rect.left + (rect.width / 2) - (tb.width / 2);
@@ -1210,14 +1447,63 @@ struct ChatTranscriptView: NSViewRepresentable {
       selToolbar.style.top = top + 'px';
     }
 
+    // Update sticky buffer when selection is non-empty. Do NOT clear on empty —
+    // ⌘-hold layout churn collapses the DOM selection before ⌘C arrives.
+    function syncPendingFromSelection() {
+      var payload = selectionClipboardPayload();
+      var text = String(payload.text || '').trim();
+      if (!text) {
+        if (selToolbar) selToolbar.style.display = 'none';
+        return;
+      }
+      rememberSelectionPayload(payload);
+    }
+
     document.addEventListener('mouseup', function(e) {
       if (selToolbar && selToolbar.contains(e.target)) return;
-      requestAnimationFrame(updateSelectionToolbar);
+      requestAnimationFrame(function() {
+        // User click with nothing selected → drop the sticky buffer.
+        if (!currentSelectionText()) {
+          hideSelectionToolbar(true);
+          return;
+        }
+        updateSelectionToolbar();
+      });
+    });
+    // Context-menu Copy + ⌘C when WebKit owns the event: put rich + list plain on the clipboard.
+    document.addEventListener('copy', function(e) {
+      var payload = selectionClipboardPayload();
+      var live = String(payload.text || '').trim();
+      if (live) rememberSelectionPayload(payload);
+      var plain = live ? (payload.plain || live) : (pendingSelectionPlain || pendingSelectionText);
+      var html = live ? (payload.html || '') : pendingSelectionHTML;
+      if (!String(plain || '').trim()) return;
+      var htmlDoc = '<!DOCTYPE html><html><body>' + (html || '') + '</body></html>';
+      if (e.clipboardData) {
+        try {
+          e.clipboardData.setData('text/plain', plain);
+          e.clipboardData.setData('text/html', htmlDoc);
+          e.preventDefault();
+        } catch (err) {}
+      }
+      if (window.webkit && window.webkit.messageHandlers.copyText) {
+        window.webkit.messageHandlers.copyText.postMessage({
+          text: plain,
+          html: html || ''
+        });
+      }
     });
     document.addEventListener('keydown', function(e) {
-      if (!(e.metaKey || e.ctrlKey)) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      // ⌘C / Ctrl+C — force rich copy (also covered by the `copy` event when WebKit delivers it).
+      if ((e.key === 'c' || e.key === 'C') && !e.shiftKey) {
+        if (copySelectionToApp()) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
       if (e.key !== 'l' && e.key !== 'L') return;
-      if (e.altKey) return;
       var text = pendingSelectionText || currentSelectionText();
       if (!text) return;
       e.preventDefault();
@@ -1226,7 +1512,7 @@ struct ChatTranscriptView: NSViewRepresentable {
     }, true);
     document.addEventListener('keyup', function(e) {
       if (e.key === 'Escape') {
-        hideSelectionToolbar();
+        hideSelectionToolbar(true);
         return;
       }
       // Shift+arrows / keyboard selection.
@@ -1236,7 +1522,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       }
     });
     document.addEventListener('selectionchange', function() {
-      if (!currentSelectionText()) hideSelectionToolbar();
+      syncPendingFromSelection();
     });
     document.addEventListener('scroll', function() {
       if (selToolbar && selToolbar.style.display !== 'none') {

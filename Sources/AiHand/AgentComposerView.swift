@@ -415,10 +415,10 @@ struct AgentComposerView: View {
             composerPlusMenuRow(
                 symbol: "list.bullet.clipboard",
                 title: "Plan",
-                subtitle: "Generate an implementation plan"
+                subtitle: BuiltInSkills.plan.description
             ) {
                 plusMenuOpen = false
-                insertPlanCommand()
+                insertBuiltInSkill(BuiltInSkills.plan)
             }
 
             if attachments != nil {
@@ -505,14 +505,16 @@ struct AgentComposerView: View {
             )
     }
 
-    private func insertPlanCommand() {
+    /// + menu shortcut for a built-in skill (same chip token as `/` autocomplete).
+    private func insertBuiltInSkill(_ skill: AgentSkill) {
+        let token = ComposerFileChipToken.serializeSkill(skill.name)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            text = "/plan "
-        } else if trimmed.lowercased().hasPrefix("/plan") {
-            // Already planning — just focus.
+        if trimmed.contains(token) {
+            // Already using this built-in — just focus.
+        } else if trimmed.isEmpty {
+            text = token + " "
         } else {
-            text = "/plan " + trimmed
+            text = token + " " + trimmed
         }
         focusPrompt()
         DispatchQueue.main.async {
@@ -886,9 +888,12 @@ struct AgentComposerView: View {
         keyBridge.onCancelEdit = onCancelEdit
         keyBridge.onDismissPlusMenu = { plusMenuOpen = false }
         keyBridge.pasteMedia = { [self] in pasteMediaFromClipboard() }
-        keyBridge.onCommandHeld = { held in
-            if commandHeld != held {
-                commandHeld = held
+        keyBridge.onCommandHeld = { [self] held in
+            // Only flip Steer/Send while the prompt is focused — otherwise ⌘ for
+            // chat copy re-renders this chrome and collapses the transcript selection.
+            let next = held && (focused || keyBridge.focused)
+            if commandHeld != next {
+                commandHeld = next
             }
         }
     }

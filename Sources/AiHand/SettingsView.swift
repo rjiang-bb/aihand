@@ -1647,7 +1647,7 @@ private struct WorkspaceWorktreesBlock: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
-                PlainField(placeholder: "branch-name", text: $branchName)
+                PlainField(placeholder: GitWorkspace.branchNamePlaceholder, text: $branchName)
                     .frame(width: 160)
                 PillButton(title: busy ? "…" : "Add", enabled: canAdd) {
                     addWorktree()

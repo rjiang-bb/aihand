@@ -117,7 +117,7 @@ struct SessionChatView: View {
         .onDisappear {
             ChatSelectionHotkeys.onAddToChat = nil
             ChatSelectionHotkeys.onAddToNewSession = nil
-            ChatSelectionHotkeys.pendingText = ""
+            ChatSelectionHotkeys.clearPending()
         }
         .onReceive(NotificationCenter.default.publisher(for: ChatSelectionHotkeys.addToChatNotification)) { note in
             if let text = note.userInfo?["text"] as? String {

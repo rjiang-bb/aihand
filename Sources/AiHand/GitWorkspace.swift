@@ -279,6 +279,9 @@ enum GitWorkspace {
         return nil
     }
 
+    /// Placeholder for the add-worktree branch field (sessions picker + Settings).
+    static let branchNamePlaceholder = "worktree-branch-name"
+
     static func addWorktree(branch: String, inRepo root: String, connection: SSHConnection? = nil) -> (path: String?, error: String?) {
         let name = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return (nil, "Enter a branch name.") }

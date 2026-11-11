@@ -891,7 +891,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         redo.keyEquivalentModifierMask = [.command, .shift]
         edit.addItem(.separator())
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        // Prefer transcript selection (rich) over NSText when the chat has a highlight.
+        edit.addItem(withTitle: "Copy", action: #selector(copyChatOrStandard), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
@@ -939,12 +940,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         _ = ChatSelectionHotkeys.perform(addToNewSession: true)
     }
 
+    /// ⌘C: transcript selection (HTML/RTF) when present; otherwise standard responder copy.
+    @objc private func copyChatOrStandard() {
+        // Prefer chat highlight — panel often keeps first responder on the composer.
+        if ChatSelectionHotkeys.copyPendingToPasteboard() {
+            return
+        }
+        if let textView = ComposerFieldEditor.editableTextView(),
+           textView.selectedRange().length > 0 {
+            textView.copy(nil)
+            return
+        }
+        NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: nil)
+    }
+
     @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(addChatSelectionToChat), #selector(addChatSelectionToNewSession):
             return sessionsPanel.isVisible
                 && sessionsPanel.selectedSessionID != nil
-                && !ChatSelectionHotkeys.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && ChatSelectionHotkeys.hasPendingSelection
+        case #selector(copyChatOrStandard):
+            return true
         default:
             return true
         }

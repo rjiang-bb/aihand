@@ -917,8 +917,17 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             && !flags.contains(.control)
 
         let showCmd = cmdAlone && !store.sessions.isEmpty
+        // While a transcript selection is armed, skip ⌘-hint layout — toggling the
+        // list footer collapses the WKWebView selection before ⌘C can land.
+        let suppressHintsForCopy = showCmd
+            && selection.selectedID != nil
+            && ChatSelectionHotkeys.hasPendingSelection
         if selection.showShortcutBadges != showCmd {
-            setShortcutHintsVisible(showCmd)
+            if suppressHintsForCopy {
+                // Keep badges hidden; sticky selection + ⌘C still work via key monitor.
+            } else {
+                setShortcutHintsVisible(showCmd)
+            }
         }
 
         let showOpt = optAlone && !store.workspaceFolders.isEmpty
@@ -1067,6 +1076,19 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             }
         }
 
+        // ⌘C → chat selection wins when present (webview often isn't first responder
+        // in this nonactivating panel, so Edit-menu / composer copy never sees it).
+        if panel.isKeyWindow,
+           selection.selectedID != nil,
+           Int(event.keyCode) == kVK_ANSI_C,
+           flags.contains(.command),
+           !flags.contains(.shift),
+           !flags.contains(.option),
+           !flags.contains(.control),
+           ChatSelectionHotkeys.copyPendingToPasteboard() {
+            return nil
+        }
+
         // ⌃C stops the open chat (same as the Stop button).
         if panel.isKeyWindow,
            Int(event.keyCode) == kVK_ANSI_C,
@@ -1204,6 +1226,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         if event.charactersIgnoringModifiers == "/" { return true }
         return false
     }
+
 }
 
 /// Persist / restore the last-open chat id per workspace (survives force-quit).
@@ -2296,7 +2319,7 @@ private struct GitWorktreeAddRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                TextField("branch-name", text: $branchName)
+                TextField(GitWorkspace.branchNamePlaceholder, text: $branchName)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(fg)
