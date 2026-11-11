@@ -2000,7 +2000,23 @@ enum ComposerMarkdownStyler {
 
     // MARK: - URLs
 
+    /// Custom attr for composer autolinks — not AppKit `.link`, so plain click still
+    /// places the caret; ⌘-click / ⌘-hover are handled in `ComposerPromptTextView`.
+    static let linkURLAttribute = NSAttributedString.Key("aihand.composerLinkURL")
+
+    /// Resolve a styled autolink token (`https://…` / `http://…` / `www.…`) to a URL.
+    static func url(fromAutolinkToken token: String) -> URL? {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let raw = trimmed.lowercased().hasPrefix("www.") ? "https://\(trimmed)" : trimmed
+        guard let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        return url
+    }
+
     /// Paint bare `https://…` / `http://…` / `www.…` links blue (skip code / chips).
+    /// No underline — ⌘ + pointer / ⌘-click is the affordance.
     private static func styleURLs(
         in textStorage: NSTextStorage,
         string: NSString,
@@ -2040,10 +2056,12 @@ enum ComposerMarkdownStyler {
                 }
             }
             guard range.length > 0 else { return }
+            let token = string.substring(with: range)
+            guard let url = url(fromAutolinkToken: token) else { return }
             textStorage.addAttributes([
                 .foregroundColor: linkBlue,
-                .underlineStyle: NSUnderlineStyle.single.rawValue,
-                .underlineColor: linkBlue.withAlphaComponent(0.55),
+                .underlineStyle: 0,
+                linkURLAttribute: url.absoluteString,
             ], range: range)
         }
     }

@@ -526,7 +526,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .md a {
         color: var(--link);
         cursor: pointer;
-        text-decoration: underline;
+        text-decoration: none;
         /* Bare autolinks are one long token — break inside the bubble, not past it. */
         overflow-wrap: anywhere;
         word-break: break-word;

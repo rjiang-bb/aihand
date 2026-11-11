@@ -167,6 +167,8 @@ struct ComposerPromptEditor: NSViewRepresentable {
                 ?? textView.insertionPointColor
             // Layout-level hide — clear/kern alone still showed ``` over the chip.
             ComposerMarkdownStyler.suppressFenceGlyphs(in: textView)
+            // Link cursor rects depend on freshly laid-out glyph bounds.
+            textView.window?.invalidateCursorRects(for: textView)
             textView.needsDisplay = true
             recalculateHeight(force: true)
         }
@@ -688,16 +690,22 @@ final class ComposerPromptTextView: NSTextView {
         if ok {
             parent?.parent.focused = true
             ComposerFieldEditor.register(self)
+            installLinkCursorMonitor()
         }
         return ok
     }
 
     override func resignFirstResponder() -> Bool {
+        removeLinkCursorMonitor()
         let ok = super.resignFirstResponder()
         if ok {
             parent?.parent.focused = false
         }
         return ok
+    }
+
+    deinit {
+        removeLinkCursorMonitor()
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -1068,6 +1076,129 @@ final class ComposerPromptTextView: NSTextView {
             return
         }
         super.pasteAsPlainText(sender)
+    }
+
+    // MARK: - ⌘-click autolinks
+
+    private var linkCursorMonitor: Any?
+
+    private func installLinkCursorMonitor() {
+        guard linkCursorMonitor == nil else { return }
+        // Rebuild cursor rects when ⌘ goes down/up even if this view doesn't see flagsChanged
+        // (e.g. focus quirks). Cursor rects are how NSTextView's i-beam loses to the hand.
+        linkCursorMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self, self.window != nil else { return event }
+            self.window?.invalidateCursorRects(for: self)
+            // Also set immediately so we don't wait for the next mouse pixel of movement.
+            self.applyLinkCursorIfNeeded(windowPoint: nil)
+            return event
+        }
+    }
+
+    private func removeLinkCursorMonitor() {
+        if let linkCursorMonitor {
+            NSEvent.removeMonitor(linkCursorMonitor)
+        }
+        linkCursorMonitor = nil
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard NSEvent.modifierFlags.contains(.command),
+              let layoutManager, let textContainer, let textStorage,
+              textStorage.length > 0 else { return }
+        let full = NSRange(location: 0, length: textStorage.length)
+        textStorage.enumerateAttribute(
+            ComposerMarkdownStyler.linkURLAttribute, in: full, options: []
+        ) { value, range, _ in
+            guard value != nil else { return }
+            let glyphs = layoutManager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { return }
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+            rect.origin.x += textContainerOrigin.x
+            rect.origin.y += textContainerOrigin.y
+            // Expand slightly so the hand engages on the glyph ink, not only the baseline.
+            addCursorRect(rect.insetBy(dx: -2, dy: -3), cursor: .pointingHand)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.command),
+           let url = linkURL(at: convert(event.locationInWindow, from: nil)) {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        super.flagsChanged(with: event)
+        window?.invalidateCursorRects(for: self)
+        applyLinkCursorIfNeeded(windowPoint: nil)
+    }
+
+    // NSTextView re-applies the i-beam on every mouse move / cursorUpdate, undoing the
+    // hand after the first frame. Let it run, then re-assert the pointer over links.
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        applyLinkCursorIfNeeded(windowPoint: event.locationInWindow)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        super.cursorUpdate(with: event)
+        applyLinkCursorIfNeeded(windowPoint: event.locationInWindow)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self && area.userInfo?["aihandLink"] != nil {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: ["aihandLink": true]
+        ))
+    }
+
+    private func applyLinkCursorIfNeeded(windowPoint: NSPoint?) {
+        guard let window else { return }
+        let viewPoint = convert(windowPoint ?? window.mouseLocationOutsideOfEventStream, from: nil)
+        if NSEvent.modifierFlags.contains(.command),
+           bounds.contains(viewPoint),
+           linkURL(at: viewPoint) != nil {
+            NSCursor.pointingHand.set()
+        }
+    }
+
+    /// Autolink under `point` in view coords, if styled by `ComposerMarkdownStyler`.
+    func linkURL(at point: NSPoint) -> URL? {
+        guard let layoutManager, let textContainer, let textStorage,
+              textStorage.length > 0 else { return nil }
+        var fraction: CGFloat = 0
+        let rawIndex = layoutManager.characterIndex(
+            for: NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y),
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: &fraction
+        )
+        guard rawIndex < textStorage.length else { return nil }
+        var attrRange = NSRange()
+        guard let raw = textStorage.attribute(
+            ComposerMarkdownStyler.linkURLAttribute,
+            at: rawIndex,
+            effectiveRange: &attrRange
+        ) as? String else { return nil }
+
+        let glyphs = layoutManager.glyphRange(forCharacterRange: attrRange, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
+        var bounding = layoutManager.boundingRect(forGlyphRange: glyphs, in: textContainer)
+        bounding.origin.x += textContainerOrigin.x
+        bounding.origin.y += textContainerOrigin.y
+        guard bounding.insetBy(dx: -3, dy: -3).contains(point) else { return nil }
+
+        return ComposerMarkdownStyler.url(fromAutolinkToken: raw)
+            ?? URL(string: raw)
     }
 
     func restyleAfterExternalEdit() {

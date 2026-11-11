@@ -110,7 +110,7 @@ struct AgentComposerView: View {
             }
 
             promptField
-                .help("Type @ for files · / for skills · Enter send · ⇧↩ list / code newline · Tab / ⇧Tab indent · ⌘↩ send · ⌘V / drop to attach")
+                .help("Type @ for files · / for skills · Enter send · ⇧↩ add newline · Tab / ⇧Tab indent · ⌘↩ send · ⌘V / drop to attach")
 
             HStack(alignment: .center, spacing: 6) {
                 composerPlusButton
@@ -541,9 +541,7 @@ struct AgentComposerView: View {
                 return [
                     ("Enter", "queue"),
                     ("⌘↩", "steer"),
-                    ("⇧↩", "list / code newline"),
-                    ("Tab", "indent list"),
-                    ("⇧Tab", "outdent / unlist"),
+                    ("⇧↩", "add newline"),
                     ("⌃C", "stop"),
                     ("⌘/", "switch model"),
                 ]
@@ -553,9 +551,7 @@ struct AgentComposerView: View {
                 ("/", "skills"),
                 ("Enter", "send"),
                 ("⌘↩", "send (steer)"),
-                ("⇧↩", "list / code newline"),
-                ("Tab", "indent list"),
-                ("⇧Tab", "outdent / unlist"),
+                ("⇧↩", "add newline"),
                 ("⌘V", "paste file"),
                 ("⌘L", "add selection"),
                 ("⇧⌘L", "selection → new"),
@@ -565,7 +561,7 @@ struct AgentComposerView: View {
         return [
             ("Enter", "send to agent"),
             ("⌘↩", "send"),
-            ("⇧↩", "list / code newline"),
+            ("⇧↩", "add newline"),
             ("Tab / ⇧Tab", "indent / outdent"),
             ("Esc", "cancel"),
         ]
