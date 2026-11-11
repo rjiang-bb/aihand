@@ -270,9 +270,6 @@ struct SessionChatView: View {
                 Text("Queued · \(session.queuedFollowUps.count)")
                     .font(.system(size: 11, weight: .semibold))
                 Spacer()
-                Text("Drag to reorder")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 4)
@@ -345,7 +342,6 @@ struct SessionChatView: View {
                         .softHoverInnerBorder(Capsule(style: .continuous), inset: 1.5)
                 }
                 .buttonStyle(.pointerPlain)
-                .hoverTooltip(HoverTooltipLabel.icon("Steer"))
                 Button {
                     startEditingQueued(item)
                 } label: {
@@ -357,7 +353,6 @@ struct SessionChatView: View {
                         .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
                 }
                 .buttonStyle(.pointerPlain)
-                .hoverTooltip(HoverTooltipLabel.icon("Edit"))
                 Button {
                     removeQueued(item)
                 } label: {
@@ -369,7 +364,6 @@ struct SessionChatView: View {
                         .softHoverInnerBorder(Circle(), inset: 1.5, lineWidth: 1)
                 }
                 .buttonStyle(.pointerPlain)
-                .hoverTooltip(HoverTooltipLabel.icon("Remove"))
             }
         }
         .padding(.horizontal, 10)
