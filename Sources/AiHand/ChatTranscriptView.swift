@@ -108,12 +108,14 @@ struct ChatTranscriptView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
+        config.setURLSchemeHandler(AssetSchemeHandler(), forURLScheme: AssetSchemeHandler.scheme)
         let uc = config.userContentController
         uc.add(context.coordinator, name: "openImage")
         uc.add(context.coordinator, name: "imageMenu")
         uc.add(context.coordinator, name: "selectionAction")
         uc.add(context.coordinator, name: "selectionChanged")
         uc.add(context.coordinator, name: "copyText")
+        uc.add(context.coordinator, name: "loadEditSnapshot")
         let webView = ChatTranscriptWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
@@ -128,7 +130,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         context.coordinator.pendingLiveActivity = liveActivity
         context.coordinator.onAddSelectionToChat = onAddSelectionToChat
         context.coordinator.onAddSelectionToNewSession = onAddSelectionToNewSession
-        webView.loadHTMLString(Self.shellHTML, baseURL: URL(fileURLWithPath: "/"))
+        webView.loadHTMLString(Self.shellHTML, baseURL: AssetSchemeHandler.baseURL)
         return webView
     }
 
@@ -145,6 +147,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         uc.removeScriptMessageHandler(forName: "selectionAction")
         uc.removeScriptMessageHandler(forName: "selectionChanged")
         uc.removeScriptMessageHandler(forName: "copyText")
+        uc.removeScriptMessageHandler(forName: "loadEditSnapshot")
         if ChatSelectionHotkeys.hasPendingSelection {
             // Selection dies with the web view.
             ChatSelectionHotkeys.clearPending()
@@ -188,7 +191,12 @@ struct ChatTranscriptView: NSViewRepresentable {
                 return
             }
             // Keep the in-memory transcript shell; never navigate the web view away.
-            if url.isFileURL || url.scheme?.lowercased() == "about" {
+            // The asset scheme is the shell's base URL: allow the initial load, but not link clicks
+            // (relative markdown links resolve against it).
+            let isShellLoad = url.scheme?.lowercased() == AssetSchemeHandler.scheme
+                && navigationAction.navigationType == .other
+                && navigationAction.targetFrame?.isMainFrame != false
+            if url.isFileURL || url.scheme?.lowercased() == "about" || isShellLoad {
                 decisionHandler(.allow)
                 return
             }
@@ -273,6 +281,11 @@ struct ChatTranscriptView: NSViewRepresentable {
                 default:
                     break
                 }
+            case "loadEditSnapshot":
+                guard let id = body["id"] as? String,
+                      let messageID = UUID(uuidString: id),
+                      let sessionID = boundSessionID ?? pendingSessionID else { return }
+                loadEditSnapshot(messageID: messageID, sessionID: sessionID)
             case "copyText":
                 guard let text = body["text"] as? String else { return }
                 let html = body["html"] as? String
@@ -285,6 +298,24 @@ struct ChatTranscriptView: NSViewRepresentable {
                 }
             default:
                 break
+            }
+        }
+
+        /// Reads the sidecar off the main thread and hands it to `window.receiveEditSnapshot`.
+        private func loadEditSnapshot(messageID: UUID, sessionID: UUID) {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let snapshot = EditSnapshotStore.read(sessionID: sessionID, messageID: messageID)
+                let json = snapshot
+                    .flatMap { try? JSONEncoder().encode($0) }
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+                DispatchQueue.main.async {
+                    guard let self, let webView = self.webView,
+                          self.boundSessionID == nil || self.boundSessionID == sessionID else { return }
+                    webView.evaluateJavaScript(
+                        "window.receiveEditSnapshot && window.receiveEditSnapshot('\(messageID.uuidString)', \(json));",
+                        completionHandler: nil
+                    )
+                }
             }
         }
 
@@ -320,6 +351,9 @@ struct ChatTranscriptView: NSViewRepresentable {
                 ]
                 if msg.steered {
                     dict["steered"] = true
+                }
+                if msg.editSnapshot {
+                    dict["editSnapshot"] = true
                 }
                 let paths = msg.imagePaths
                 if !paths.isEmpty {
@@ -365,7 +399,7 @@ struct ChatTranscriptView: NSViewRepresentable {
             lastLiveActivity = activityKey
             var script = ""
             if shouldForceScroll {
-                script += "window.__expandedGroups = {};"
+                script += "window.__expandedGroups = {}; window.__expandedDiffs = {};"
             }
             if !imageLoads.isEmpty,
                let imgData = try? JSONSerialization.data(withJSONObject: imageLoads),
@@ -444,6 +478,7 @@ struct ChatTranscriptView: NSViewRepresentable {
     <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="codeview/codeview.css">
     <style>
       :root {
         color-scheme: light dark;
@@ -592,7 +627,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       .msg.worked-group .tool-detail {
         display: flex;
         gap: 6px;
-        align-items: flex-start;
+        align-items: center;
         padding: 2px 0;
       }
       .msg.tool-group .tool-detail .glyph,
@@ -602,7 +637,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         align-items: center;
         justify-content: center;
         width: 12px;
-        height: 14px;
+        height: 12px;
         opacity: 0.72;
         color: var(--muted);
       }
@@ -651,13 +686,13 @@ struct ChatTranscriptView: NSViewRepresentable {
         transition: transform 0.12s ease, opacity 0.12s ease;
       }
       .msg.edits-group .tool-summary:hover .chev,
-      .msg.edits-group.expanded .chev { opacity: 0.9; }
+      .msg.edits-group.expanded > .tool-summary .chev { opacity: 0.9; }
       .msg.edits-group .chev svg {
         width: 10px;
         height: 10px;
         display: block;
       }
-      .msg.edits-group.expanded .chev { transform: rotate(90deg); }
+      .msg.edits-group.expanded > .tool-summary .chev { transform: rotate(90deg); }
       .msg.edits-group .tool-body {
         min-width: 0;
         overflow: hidden;
@@ -676,9 +711,21 @@ struct ChatTranscriptView: NSViewRepresentable {
       .msg.edits-group .tool-detail {
         display: flex;
         gap: 6px;
-        align-items: flex-start;
+        align-items: center;
         flex-wrap: wrap;
         padding: 2px 0;
+      }
+      .msg.edits-group .tool-detail.has-diff {
+        cursor: pointer;
+        border-radius: 4px;
+      }
+      .msg.edits-group .tool-detail.has-diff:hover .tool-body { color: var(--text); }
+      .msg.edits-group .tool-detail.has-diff:hover .chev,
+      .msg.edits-group .tool-detail.has-diff.open .chev { opacity: 0.9; }
+      .msg.edits-group .tool-detail.has-diff.open .chev { transform: rotate(90deg); }
+      .msg.edits-group .file-diff {
+        margin: 4px 0 8px 18px;
+        font-family: var(--sans);
       }
       .msg.edits-group .tool-detail .glyph {
         flex: none;
@@ -686,7 +733,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         align-items: center;
         justify-content: center;
         width: 12px;
-        height: 14px;
+        height: 12px;
         opacity: 0.72;
         color: var(--muted);
       }
@@ -1109,6 +1156,7 @@ struct ChatTranscriptView: NSViewRepresentable {
     <script>
     /*__MARKED__*/
     </script>
+    <script src="codeview/codeview.js"></script>
     <script>
     function esc(s) {
       return String(s)
@@ -1425,10 +1473,19 @@ struct ChatTranscriptView: NSViewRepresentable {
         if (stat) {
           const rowInProgress = text.indexOf('Editing ') === 0 || text.indexOf('Writing ') === 0;
           const rowVerb = rowInProgress ? 'Editing' : 'Edited';
-          return '<div class="tool-detail">'
+          const msgId = it.item.id || '';
+          const hasDiff = !!it.item.editSnapshot && !rowInProgress && !!msgId;
+          const diffOpen = hasDiff && expanded && !!window.__expandedDiffs[msgId];
+          const attrs = hasDiff
+            ? ' class="tool-detail has-diff' + (diffOpen ? ' open' : '') + '" role="button"'
+              + ' data-msg-id="' + esc(msgId) + '" data-added="' + stat.added + '" data-removed="' + stat.removed + '"'
+            : ' class="tool-detail"';
+          return '<div' + attrs + '>'
             + '<span class="glyph">' + outlineGlyph('edit') + '</span>'
             + '<span class="tool-body">' + rowVerb + ' ' + esc(stat.path) + diffStatsHTML(stat.added, stat.removed) + '</span>'
-            + '</div>';
+            + (hasDiff ? chevronHTML() : '')
+            + '</div>'
+            + (diffOpen ? fileDiffPlaceholderHTML(msgId, stat) : '');
         }
         return '<div class="tool-detail">'
           + '<span class="glyph">' + outlineGlyph('edit') + '</span>'
@@ -1445,6 +1502,81 @@ struct ChatTranscriptView: NSViewRepresentable {
     }
 
 
+    function fileDiffPlaceholderHTML(msgId, stat) {
+      return '<div class="file-diff" data-msg-id="' + esc(msgId) + '"'
+        + ' data-added="' + (stat.added || 0) + '" data-removed="' + (stat.removed || 0) + '"></div>';
+    }
+
+    // One live Monaco diff at a time; its DOM node survives re-renders by being re-parented.
+    window.__expandedDiffs = window.__expandedDiffs || {};
+    window.__liveDiff = window.__liveDiff || null;
+
+    function disposeLiveDiff() {
+      const live = window.__liveDiff;
+      window.__liveDiff = null;
+      if (live && live.handle) live.handle.dispose();
+      if (live && live.node && live.node.parentNode) live.node.parentNode.removeChild(live.node);
+    }
+
+    function mountFileDiffs(root) {
+      const ph = root.querySelector('.file-diff[data-msg-id]');
+      const live = window.__liveDiff;
+      if (!ph) { if (live) disposeLiveDiff(); return; }
+      const id = ph.getAttribute('data-msg-id');
+      if (live && live.id === id) { ph.appendChild(live.node); return; }
+      if (live) disposeLiveDiff();
+      const node = document.createElement('div');
+      node.className = 'file-diff-host';
+      ph.appendChild(node);
+      window.__liveDiff = {
+        id: id,
+        node: node,
+        handle: null,
+        added: parseInt(ph.getAttribute('data-added') || '0', 10),
+        removed: parseInt(ph.getAttribute('data-removed') || '0', 10)
+      };
+      if (window.webkit && window.webkit.messageHandlers.loadEditSnapshot) {
+        window.webkit.messageHandlers.loadEditSnapshot.postMessage({ id: id });
+      }
+    }
+
+    window.receiveEditSnapshot = function(id, snap) {
+      const live = window.__liveDiff;
+      if (!live || live.id !== id || live.handle) return;
+      if (!snap || !window.CodeView) {
+        live.node.innerHTML = '<div class="cv"><div class="cv-body cv-message">Diff unavailable</div></div>';
+        return;
+      }
+      live.handle = window.CodeView.createDiff(live.node, {
+        path: snap.path,
+        original: snap.original,
+        modified: snap.modified,
+        lineOffset: snap.lineOffset || 0,
+        tooLarge: !!snap.tooLarge,
+        added: live.added,
+        removed: live.removed
+      });
+    };
+
+    function toggleFileDiff(row) {
+      const id = row.getAttribute('data-msg-id');
+      if (!id) return;
+      const wasOpen = !!window.__expandedDiffs[id];
+      window.__expandedDiffs = {};
+      document.querySelectorAll('.msg.edits-group .file-diff').forEach(function(n) { n.remove(); });
+      document.querySelectorAll('.msg.edits-group .tool-detail.has-diff.open').forEach(function(n) {
+        n.classList.remove('open');
+      });
+      if (wasOpen) { disposeLiveDiff(); return; }
+      window.__expandedDiffs[id] = true;
+      row.classList.add('open');
+      row.insertAdjacentHTML('afterend', fileDiffPlaceholderHTML(id, {
+        added: parseInt(row.getAttribute('data-added') || '0', 10),
+        removed: parseInt(row.getAttribute('data-removed') || '0', 10)
+      }));
+      mountFileDiffs(document.getElementById('root'));
+    }
+
     window.__images = window.__images || {};
     window.__expandedGroups = window.__expandedGroups || {};
     window.cacheImages = function(items) {
@@ -1455,6 +1587,7 @@ struct ChatTranscriptView: NSViewRepresentable {
     window.renderMessages = function(messages, forceScroll, liveActivity) {
       const root = document.getElementById('root');
       if ((!messages || !messages.length) && !liveActivity) {
+        disposeLiveDiff();
         root.innerHTML = '<div class="empty">Send a message to start.</div>';
         if (forceScroll) window.scrollTo(0, 0);
         return;
@@ -1619,6 +1752,14 @@ struct ChatTranscriptView: NSViewRepresentable {
           if (id) window.__expandedGroups[id] = next;
         });
       });
+      root.querySelectorAll('.msg.edits-group .tool-detail.has-diff').forEach(function(row) {
+        row.addEventListener('click', function(e) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleFileDiff(row);
+        });
+      });
+      mountFileDiffs(root);
       function bindMediaOpen(el) {
         el.addEventListener('click', function(e) {
           e.preventDefault();

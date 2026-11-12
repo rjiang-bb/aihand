@@ -8,6 +8,13 @@ After finishing each agent turn that changed the app (or when in doubt), **autom
 - Skip only for pure read-only answers with no file edits, or when the user explicitly says not to relaunch.
 - Confirm briefly that AiHand relaunched; do not dump the full build log unless it failed.
 
+## Fix build warnings
+
+When building the app (`./scripts/run-debug.sh`, `swift build`, `swift test`), read the compiler output for **warnings**, not just errors.
+
+- If any warnings appear, fix them (don't suppress or ignore), then **build again** and confirm the build is warning-free.
+- Repeat until a clean build. Only warnings that originate in vendored/third-party code you can't change may be left, and call them out briefly.
+
 ## Sessions panel placement
 
 When the chat pane closes, the sessions list must slide so its **right edge lines up with where the chat window’s right edge was**.
@@ -88,6 +95,16 @@ All UI chrome uses **monochrome outline** icons — same family as the sessions 
 - Transcript / WKWebView rows: inline SVG strokes with `stroke="currentColor"` (see `outlineGlyph` in `ChatTranscriptView`) — never ✏️📄💭 or other emoji glyphs.
 - Do **not** introduce new filled circle badges (`*.circle.fill`) or hierarchical multi-tone plates unless matching an existing SoftChrome control that already needs an accent fill for state (and even then prefer outline + `foregroundStyle`).
 - Keep weight/size consistent with neighbors (composer actions ~22–26pt, list/header ~12–14pt, transcript glyphs ~12px).
+
+## In-chat file diffs (CodeView / Monaco)
+
+Edited file rows in the transcript expand into a Monaco diff (VS Code's editor core, vendored at `assets/monaco`).
+
+- All code surfaces go through `assets/codeview/codeview.js` (`CodeView.createDiff` / `CodeView.createEditor`) so diffs and the future file editor share one header, theme, and options. Don't call `monaco.editor.*` directly from the transcript.
+- Assets are served by `AssetSchemeHandler` (`aihand-asset://app/...`); the transcript shell uses that as its base URL so Monaco and its worker are same-origin. Monaco loads lazily on first expand.
+- Before/after text lives in sidecar files (`EditSnapshotStore`, `Application Support/AiHand/EditSnapshots/<session>/<message>.json`); `AgentMessage.editSnapshot` is only a flag. Keep large text out of the per-token `renderMessages` payload — fetch via the `loadEditSnapshot` handler.
+- One live diff at a time; its DOM node is re-parented across re-renders (not rebuilt).
+- `TranscriptMonacoTests` runs the real shell in a WKWebView (with a rAF shim — the XCTest host has no display link).
 
 ## Hover tooltips
 

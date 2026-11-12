@@ -59,6 +59,20 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
         XCTAssertEqual(sum?.removed, 22)
     }
 
+    func testEditCompletionStoresDiffSnapshot() throws {
+        let s = try run([
+            #"{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/README.md"}}}}"#,
+            ##"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/README.md","strReplace":{"oldText":"Hi","newText":"Hello"}},"result":{"success":{"path":"/w/README.md","linesAdded":1,"linesRemoved":1,"afterFullFileContent":"# Title\nHello\n"}}}}}"##,
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"c"}"#,
+        ])
+        let edit = try XCTUnwrap(s.messages.first { $0.kind == .tool })
+        waitUntil("snapshot flag") { s.messages.first { $0.id == edit.id }?.editSnapshot == true }
+        let snap = try XCTUnwrap(EditSnapshotStore.read(sessionID: s.id, messageID: edit.id))
+        XCTAssertEqual(snap.path, "/w/README.md")
+        XCTAssertEqual(snap.original, "# Title\nHi\n")
+        XCTAssertEqual(snap.modified, "# Title\nHello\n")
+    }
+
     func testCursorLongShellCommandIsClippedToOneLine() throws {
         let long = String(repeating: "x", count: 200)
         let s = try run([

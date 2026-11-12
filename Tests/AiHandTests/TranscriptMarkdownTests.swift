@@ -231,4 +231,57 @@ final class TranscriptMarkdownTests: XCTestCase {
         // Default is collapsed — expanded only when __expandedGroups remembers it.
         XCTAssertTrue(html.contains("!!window.__expandedGroups[groupId]"))
     }
+
+    func testEditRowGlyphsAreVerticallyCentered() {
+        let html = ChatTranscriptView.shellHTML
+        let block = try! XCTUnwrap(html.range(of: ".msg.edits-group .tool-detail {"))
+        let rule = html[block.upperBound...].prefix(120)
+        XCTAssertTrue(rule.contains("align-items: center;"), String(rule))
+        XCTAssertFalse(html.contains("align-items: flex-start;\n        flex-wrap: wrap;"))
+    }
+
+    func testFileDiffRowsWireCodeViewAndSnapshotBridge() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("<script src=\"codeview/codeview.js\"></script>"))
+        XCTAssertTrue(html.contains("href=\"codeview/codeview.css\""))
+        XCTAssertTrue(html.contains("tool-detail has-diff"))
+        XCTAssertTrue(html.contains("it.item.editSnapshot"))
+        XCTAssertTrue(html.contains("window.__expandedDiffs"))
+        XCTAssertTrue(html.contains("messageHandlers.loadEditSnapshot"))
+        XCTAssertTrue(html.contains("window.receiveEditSnapshot = function"))
+        XCTAssertTrue(html.contains("window.CodeView.createDiff"))
+        // One live diff; re-parented across re-renders instead of rebuilt.
+        XCTAssertTrue(html.contains("ph.appendChild(live.node)"))
+        XCTAssertTrue(html.contains("disposeLiveDiff"))
+    }
+
+    func testCodeViewModuleExposesDiffAndEditorWithSharedChrome() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("assets/codeview/codeview.js")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        let js = JSContext()!
+        var err: String?
+        js.exceptionHandler = { _, e in err = e?.toString() }
+        js.evaluateScript("var window = this;")
+        js.evaluateScript(src)
+        XCTAssertNil(err)
+        XCTAssertEqual(js.evaluateScript("typeof CodeView.createDiff")?.toString(), "function")
+        XCTAssertEqual(js.evaluateScript("typeof CodeView.createEditor")?.toString(), "function")
+        let lang = js.evaluateScript("""
+        CodeView.languageFor({ languages: { getLanguages: function() { return [
+          { id: 'markdown', extensions: ['.md'] },
+          { id: 'dockerfile', extensions: [], filenames: ['Dockerfile'] }
+        ]; } } }, '/w/aihand/README.md') + ',' +
+        CodeView.languageFor({ languages: { getLanguages: function() { return [
+          { id: 'dockerfile', extensions: [], filenames: ['Dockerfile'] }
+        ]; } } }, '/w/Dockerfile') + ',' +
+        CodeView.languageFor({ languages: { getLanguages: function() { return []; } } }, '/w/x.zzz')
+        """)?.toString()
+        XCTAssertEqual(lang, "markdown,dockerfile,plaintext")
+        // Inline / side-by-side switch lives on the diff editor (renderSideBySide).
+        XCTAssertTrue(src.contains("renderSideBySide"))
+        XCTAssertTrue(src.contains("hideUnchangedRegions"))
+        XCTAssertTrue(src.contains("useInlineViewWhenSpaceIsLimited = false"))
+    }
 }

@@ -15,6 +15,8 @@ final class AgentSessionRunner {
     private var turnStartedAt: Date?
     /// When the current thinking/reasoning phase began (for "Thought Xs").
     private var thinkingStartedAt: Date?
+    /// File contents read when a Cursor `writeToolCall` started (keyed by absolute path).
+    private var preWriteContents: [String: String] = [:]
     private weak var session: AgentSession?
     /// Fired on the main queue after a natural process exit (not interrupt/stop).
     var onFinished: (() -> Void)?
@@ -437,6 +439,7 @@ final class AgentSessionRunner {
             let subtype = json["subtype"] as? String ?? ""
             if subtype == "started" {
                 finalizeThinkingIfNeeded()
+                capturePreWrite(json)
                 let label = toolLabel(json)
                 session.messages.append(AgentMessage(kind: .tool, text: label))
                 session.preview = label
@@ -761,6 +764,38 @@ final class AgentSessionRunner {
         }) {
             session.messages[idx].text = label
             session.preview = label
+            let isWrite = tool["writeToolCall"] != nil
+            let pre = preWriteContents.removeValue(forKey: rawPath)
+            if let snapshot = EditSnapshotBuilder.fromCursor(payload: payload, isWrite: isWrite, preWriteContents: pre) {
+                storeSnapshot(snapshot, messageID: session.messages[idx].id, in: session)
+            }
+        }
+    }
+
+    /// Writes replace the whole file — read what's there first so the diff has an original side.
+    private func capturePreWrite(_ json: [String: Any]) {
+        guard let tool = json["tool_call"] as? [String: Any],
+              let write = tool["writeToolCall"] as? [String: Any],
+              let path = (write["args"] as? [String: Any])?["path"] as? String else { return }
+        preWriteContents[path] = EditSnapshotBuilder.readLocalText(path) ?? ""
+    }
+
+    private static let snapshotQueue = DispatchQueue(label: "aihand.edit-snapshots", qos: .utility)
+
+    /// Sidecar write off the main thread; flag the row once the file exists.
+    private func storeSnapshot(_ snapshot: EditSnapshot, messageID: UUID, in session: AgentSession) {
+        let sessionID = session.id
+        Self.snapshotQueue.async { [weak session] in
+            do {
+                try EditSnapshotStore.write(snapshot, sessionID: sessionID, messageID: messageID)
+            } catch {
+                Log.write("edit snapshot write failed: \(error.localizedDescription)")
+                return
+            }
+            DispatchQueue.main.async {
+                guard let session, let i = session.messages.firstIndex(where: { $0.id == messageID }) else { return }
+                session.messages[i].editSnapshot = true
+            }
         }
     }
 

@@ -42,6 +42,9 @@ make_bundle() {
     cp "$ROOT"/assets/menubar_*.png "$stage/Contents/Resources/"
     # Vendored CommonMark/GFM parser for chat transcript rendering.
     cp "$ROOT/assets/marked.min.js" "$stage/Contents/Resources/"
+    # Monaco (VS Code editor core) for in-chat file diffs; served via aihand-asset://.
+    ditto "$ROOT/assets/monaco" "$stage/Contents/Resources/monaco"
+    ditto "$ROOT/assets/codeview" "$stage/Contents/Resources/codeview"
 
     local fw
     fw="$(find "$ROOT/.build/artifacts" -path "*macos-arm64_x86_64/Sparkle.framework" -maxdepth 6 | head -1)"
