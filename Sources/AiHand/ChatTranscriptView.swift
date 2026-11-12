@@ -97,6 +97,8 @@ enum ChatSelectionHotkeys {
 struct ChatTranscriptView: NSViewRepresentable {
     let messages: [AgentMessage]
     var sessionID: UUID
+    /// Ephemeral footer while the agent is working ("Exploring…", "Planning next moves").
+    var liveActivity: String? = nil
     var onAddSelectionToChat: ((String) -> Void)? = nil
     var onAddSelectionToNewSession: ((String) -> Void)? = nil
 
@@ -123,6 +125,7 @@ struct ChatTranscriptView: NSViewRepresentable {
 #endif
         context.coordinator.webView = webView
         context.coordinator.pendingSessionID = sessionID
+        context.coordinator.pendingLiveActivity = liveActivity
         context.coordinator.onAddSelectionToChat = onAddSelectionToChat
         context.coordinator.onAddSelectionToNewSession = onAddSelectionToNewSession
         webView.loadHTMLString(Self.shellHTML, baseURL: URL(fileURLWithPath: "/"))
@@ -132,7 +135,7 @@ struct ChatTranscriptView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onAddSelectionToChat = onAddSelectionToChat
         context.coordinator.onAddSelectionToNewSession = onAddSelectionToNewSession
-        context.coordinator.push(messages: messages, sessionID: sessionID)
+        context.coordinator.push(messages: messages, sessionID: sessionID, liveActivity: liveActivity)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -155,8 +158,10 @@ struct ChatTranscriptView: NSViewRepresentable {
         private var ready = false
         private var pendingMessages: [AgentMessage] = []
         var pendingSessionID: UUID?
+        var pendingLiveActivity: String?
         private var boundSessionID: UUID?
         private var lastPayload: String = ""
+        private var lastLiveActivity: String = "\u{0}"
         private var imageDataURLs: [String: String] = [:]
         private var imagesSentToPage: Set<String> = []
 
@@ -164,7 +169,13 @@ struct ChatTranscriptView: NSViewRepresentable {
             ready = true
             imagesSentToPage.removeAll()
             lastPayload = ""
-            push(messages: pendingMessages, sessionID: pendingSessionID ?? boundSessionID, forceScroll: true)
+            lastLiveActivity = "\u{0}"
+            push(
+                messages: pendingMessages,
+                sessionID: pendingSessionID ?? boundSessionID,
+                liveActivity: pendingLiveActivity,
+                forceScroll: true
+            )
         }
 
         func webView(
@@ -277,8 +288,14 @@ struct ChatTranscriptView: NSViewRepresentable {
             }
         }
 
-        func push(messages: [AgentMessage], sessionID: UUID? = nil, forceScroll: Bool = false) {
+        func push(
+            messages: [AgentMessage],
+            sessionID: UUID? = nil,
+            liveActivity: String? = nil,
+            forceScroll: Bool = false
+        ) {
             pendingMessages = messages
+            pendingLiveActivity = liveActivity
             if let sessionID {
                 pendingSessionID = sessionID
             }
@@ -288,6 +305,7 @@ struct ChatTranscriptView: NSViewRepresentable {
             if let sessionID, switched {
                 boundSessionID = sessionID
                 lastPayload = ""
+                lastLiveActivity = "\u{0}"
             }
             let shouldForceScroll = forceScroll || switched
 
@@ -341,8 +359,10 @@ struct ChatTranscriptView: NSViewRepresentable {
 
             guard let data = try? JSONSerialization.data(withJSONObject: payload),
                   let json = String(data: data, encoding: .utf8) else { return }
-            if json == lastPayload && imageLoads.isEmpty { return }
+            let activityKey = liveActivity ?? ""
+            if json == lastPayload && imageLoads.isEmpty && activityKey == lastLiveActivity { return }
             lastPayload = json
+            lastLiveActivity = activityKey
             var script = ""
             if shouldForceScroll {
                 script += "window.__expandedGroups = {};"
@@ -352,7 +372,18 @@ struct ChatTranscriptView: NSViewRepresentable {
                let imgJSON = String(data: imgData, encoding: .utf8) {
                 script += "window.cacheImages(\(imgJSON));"
             }
-            script += "window.renderMessages(\(json), \(shouldForceScroll ? "true" : "false"));"
+            // Top-level String is not a valid JSONSerialization root (throws NSException
+            // that `try?` cannot catch) — wrap as a one-element array then peel it.
+            let activityJSON: String
+            if let liveActivity,
+               let aData = try? JSONSerialization.data(withJSONObject: [liveActivity]),
+               let aStr = String(data: aData, encoding: .utf8),
+               aStr.count >= 2 {
+                activityJSON = String(aStr.dropFirst().dropLast())
+            } else {
+                activityJSON = "null"
+            }
+            script += "window.renderMessages(\(json), \(shouldForceScroll ? "true" : "false"), \(activityJSON));"
             webView.evaluateJavaScript(script, completionHandler: nil)
         }
 
@@ -362,6 +393,7 @@ struct ChatTranscriptView: NSViewRepresentable {
             case .assistant: return "assistant"
             case .tool: return "tool"
             case .system: return "system"
+            case .status: return "status"
             }
         }
 
@@ -473,12 +505,12 @@ struct ChatTranscriptView: NSViewRepresentable {
       .msg.tool-group {
         align-self: stretch;
         max-width: 100%;
-        font: 13.5px/1.45 var(--sans);
+        font: 14.5px/1.55 var(--sans);
         color: var(--muted);
       }
       .msg.tool-group .tool-summary {
         display: inline-flex;
-        gap: 5px;
+        gap: 6px;
         align-items: center;
         max-width: 100%;
         padding: 1px 0;
@@ -488,13 +520,20 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-radius: 4px;
       }
       .msg.tool-group .tool-summary:hover { color: var(--text); }
+      .msg.tool-group .tool-summary:hover .chev { opacity: 0.9; }
+      /* Cursor-style disclosure: chevron on the trailing edge. */
       .msg.tool-group .chev {
         flex: none;
-        width: 9px;
-        font-size: 8px;
-        line-height: 1;
-        opacity: 0.7;
-        transition: transform 0.12s ease;
+        display: inline-flex;
+        width: 10px;
+        height: 10px;
+        opacity: 0.55;
+        transition: transform 0.12s ease, opacity 0.12s ease;
+      }
+      .msg.tool-group .chev svg {
+        width: 10px;
+        height: 10px;
+        display: block;
       }
       .msg.tool-group.expanded .chev { transform: rotate(90deg); }
       .msg.tool-group .tool-body {
@@ -505,7 +544,7 @@ struct ChatTranscriptView: NSViewRepresentable {
       }
       .msg.tool-group .tool-details {
         display: none;
-        margin: 4px 0 2px 14px;
+        margin: 4px 0 2px 0;
         padding: 0;
         font-family: var(--mono);
         font-size: 12.5px;
@@ -538,6 +577,49 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 8px 10px;
         font-size: 13px;
         color: var(--text);
+      }
+      .msg.status {
+        align-self: flex-start;
+        margin: 2px 0 6px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        font: 14.5px/1.55 var(--sans);
+        color: var(--muted);
+      }
+      .msg.live-activity {
+        align-self: flex-start;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 0 2px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        font: 14.5px/1.55 var(--sans);
+        color: var(--muted);
+      }
+      .msg.live-activity .live-strong {
+        color: var(--text);
+        opacity: 0.72;
+      }
+      .msg.live-activity .live-spinner {
+        flex: none;
+        width: 12px;
+        height: 12px;
+        border: 1.5px solid rgba(255,255,255,0.22);
+        border-top-color: var(--muted);
+        border-radius: 50%;
+        animation: live-spin 0.7s linear infinite;
+      }
+      @media (prefers-color-scheme: light) {
+        .msg.live-activity .live-spinner {
+          border-color: rgba(0,0,0,0.14);
+          border-top-color: var(--muted);
+        }
+      }
+      @keyframes live-spin {
+        to { transform: rotate(360deg); }
       }
       .msg .media-row {
         display: flex;
@@ -1057,13 +1139,24 @@ struct ChatTranscriptView: NSViewRepresentable {
       if (items.length === 1) return items[0].text || 'Tool';
       const counts = { read: 0, edit: 0, run: 0, search: 0, other: 0 };
       items.forEach(function(m) { counts[toolCategory(m.text)]++; });
+      const files = counts.read + counts.edit;
       const parts = [];
-      if (counts.read) parts.push(counts.read === 1 ? 'Read 1 file' : 'Read ' + counts.read + ' files');
-      if (counts.edit) parts.push(counts.edit === 1 ? 'Edited 1 file' : 'Edited ' + counts.edit + ' files');
-      if (counts.run) parts.push(counts.run === 1 ? 'Ran 1 command' : 'Ran ' + counts.run + ' commands');
-      if (counts.search) parts.push(counts.search === 1 ? 'Searched once' : 'Searched ' + counts.search + ' times');
-      if (counts.other) parts.push(counts.other === 1 ? '1 other tool' : counts.other + ' other tools');
-      return parts.join(', ') || (items.length + ' tools');
+      if (files) parts.push(files === 1 ? '1 file' : files + ' files');
+      if (counts.search) parts.push(counts.search === 1 ? '1 search' : counts.search + ' searches');
+      if (counts.run) parts.push(counts.run === 1 ? '1 command' : counts.run + ' commands');
+      if (counts.other) parts.push(counts.other === 1 ? '1 other' : counts.other + ' other');
+      if (!parts.length) return items.length + ' tools';
+      return 'Exploring ' + parts.join(', ');
+    }
+
+    function liveActivityHTML(text) {
+      if (!text) return '';
+      // Emphasize numeric chunks: "Exploring 10 files, 9 searches"
+      const html = esc(text).replace(/(\\d+\\s+[a-z]+)/gi, '<span class="live-strong">$1</span>');
+      return '<div class="msg live-activity" role="status" aria-live="polite">'
+        + '<span class="live-spinner" aria-hidden="true"></span>'
+        + '<span class="live-label">' + html + '</span>'
+        + '</div>';
     }
 
     function toolGroupHTML(items, groupId, expanded) {
@@ -1076,10 +1169,13 @@ struct ChatTranscriptView: NSViewRepresentable {
           + '<span class="tool-body">' + esc(text) + '</span>'
           + '</div>';
       }).join('');
+      const chev = '<span class="chev" aria-hidden="true">'
+        + '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">'
+        + '<path d="M3.2 1.8 L6.8 5 L3.2 8.2"/></svg></span>';
       return '<div class="msg tool-group' + open + '" data-group-id="' + esc(groupId) + '" aria-expanded="' + (expanded ? 'true' : 'false') + '">'
         + '<div class="tool-summary" role="button">'
-        + '<span class="chev">▶</span>'
         + '<span class="tool-body" title="' + esc(summary) + '">' + esc(summary) + '</span>'
+        + chev
         + '</div>'
         + '<div class="tool-details">' + details + '</div>'
         + '</div>';
@@ -1092,9 +1188,9 @@ struct ChatTranscriptView: NSViewRepresentable {
         if (item && item.key && item.url) window.__images[item.key] = item.url;
       });
     };
-    window.renderMessages = function(messages, forceScroll) {
+    window.renderMessages = function(messages, forceScroll, liveActivity) {
       const root = document.getElementById('root');
-      if (!messages || !messages.length) {
+      if ((!messages || !messages.length) && !liveActivity) {
         root.innerHTML = '<div class="empty">Send a message to start.</div>';
         if (forceScroll) window.scrollTo(0, 0);
         return;
@@ -1102,7 +1198,7 @@ struct ChatTranscriptView: NSViewRepresentable {
 
       // Collapse consecutive tool calls into one Cursor-style summary.
       const blocks = [];
-      for (let i = 0; i < messages.length; i++) {
+      for (let i = 0; i < (messages || []).length; i++) {
         const m = messages[i];
         if ((m.kind || 'assistant') === 'tool') {
           const tools = [m];
@@ -1165,9 +1261,9 @@ struct ChatTranscriptView: NSViewRepresentable {
             + '<div class="steer-body">' + body + '</div></div>';
         }
         return '<div class="msg ' + kind + '" data-id="' + esc(m.id) + '">' + body + '</div>';
-      }).join('');
+      }).join('') + liveActivityHTML(liveActivity || '');
       const nearBottom = (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 80);
-      root.innerHTML = html;
+      root.innerHTML = html || liveActivityHTML(liveActivity || '');
       root.querySelectorAll('.msg.tool-group .tool-summary').forEach(function(summary) {
         summary.addEventListener('click', function(e) {
           e.preventDefault();

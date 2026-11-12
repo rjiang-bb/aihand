@@ -105,36 +105,22 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
         position(on: screen, placement: lastPlacement)
     }
 
-    /// Force the prompt NSTextField to become first responder (SwiftUI FocusState alone is flaky in panels).
+    /// Force the composer NSTextView to become first responder (SwiftUI FocusState alone is flaky in panels).
     private func focusPromptField() {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        guard let root = panel.contentView else { return }
-        if let field = findPromptTextField(in: root) {
-            panel.makeFirstResponder(field)
-            if let editor = panel.fieldEditor(true, for: field) as? NSTextView {
-                let end = (field.stringValue as NSString).length
-                editor.setSelectedRange(NSRange(location: end, length: 0))
+        // AgentComposerView uses ComposerPromptTextView — not an NSTextField.
+        if let textView = ComposerFieldEditor.promptTextView(in: panel.contentView) {
+            ComposerFieldEditor.register(textView)
+            if panel.firstResponder !== textView {
+                _ = panel.makeFirstResponder(textView)
             }
-            return
-        }
-        // Fallback: whatever SwiftUI focused via FocusState.
-        if let textView = editableFieldEditor() {
             let end = (textView.string as NSString).length
             textView.setSelectedRange(NSRange(location: end, length: 0))
+            return
         }
-    }
-
-    private func findPromptTextField(in view: NSView) -> NSTextField? {
-        if let field = view as? NSTextField, field.isEditable {
-            return field
-        }
-        for sub in view.subviews {
-            if let found = findPromptTextField(in: sub) {
-                return found
-            }
-        }
-        return nil
+        // Hosting view may not have materialized the editor yet.
+        ComposerFieldEditor.focus()
     }
 
     private func position(on screen: NSScreen, placement: Placement) {
@@ -213,11 +199,8 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
 
     private func clearPromptField() {
         model.text = ""
-        if let root = panel.contentView, let field = findPromptTextField(in: root) {
-            field.stringValue = ""
-            if let editor = panel.fieldEditor(false, for: field) as? NSTextView {
-                editor.string = ""
-            }
+        if let textView = ComposerFieldEditor.promptTextView(in: panel.contentView) {
+            textView.string = ""
         }
         panel.makeFirstResponder(nil)
     }
@@ -250,19 +233,6 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             }
             return event
         }
-    }
-
-    private func editableFieldEditor() -> NSTextView? {
-        let responder = panel.firstResponder ?? NSApp.keyWindow?.firstResponder
-        if let textView = responder as? NSTextView, textView.isEditable {
-            return textView
-        }
-        if let field = responder as? NSTextField,
-           let editor = panel.fieldEditor(false, for: field) as? NSTextView,
-           editor.isEditable {
-            return editor
-        }
-        return nil
     }
 
     private func removeKeyMonitor() {
@@ -398,5 +368,9 @@ extension AnnotatePromptPanel {
     var probeModel: AnnotatePromptModel { model }
     var probeWindowNumber: Int { panel.windowNumber }
     var probeIsKey: Bool { panel.isKeyWindow }
+    var probePromptIsFirstResponder: Bool {
+        guard let tv = ComposerFieldEditor.promptTextView(in: panel.contentView) else { return false }
+        return panel.firstResponder === tv
+    }
 }
 #endif

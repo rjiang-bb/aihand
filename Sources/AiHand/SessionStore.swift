@@ -15,6 +15,8 @@ enum AgentMessageKind: String, Codable, Equatable {
     case assistant
     case tool
     case system
+    /// Cursor-style chip: "Worked for 23s", "Thought 2s".
+    case status
 }
 
 struct AgentMessage: Identifiable, Equatable, Codable {
@@ -151,6 +153,8 @@ final class AgentSession: ObservableObject, Identifiable {
     @Published var preview: String
     @Published var chatId: String?
     @Published var errorMessage: String?
+    /// Ephemeral in-transcript footer while working ("Exploring…", "Planning next moves").
+    @Published var liveActivity: String? = nil
     /// Pending follow-ups; not persisted across relaunch.
     @Published var queuedFollowUps: [QueuedFollowUp] = []
     /// Queue item loaded into the composer for edit; that item and everything after it are held.

@@ -103,4 +103,16 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertFalse(html.contains("title=\"Add to chat"))
         XCTAssertFalse(html.contains("title=\"Add to new session"))
     }
+
+    func testStatusChipAndLiveActivityMarkup() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains(".msg.status"))
+        XCTAssertTrue(html.contains("live-activity"))
+        XCTAssertTrue(html.contains("live-spinner"))
+        XCTAssertTrue(html.contains("live-spin"))
+        XCTAssertTrue(html.contains("Exploring "))
+        XCTAssertTrue(html.contains("liveActivityHTML"))
+        // In-progress footer matches body text size (not the smaller muted caption).
+        XCTAssertTrue(html.contains(".msg.live-activity") && html.contains("14.5px"))
+    }
 }

@@ -29,6 +29,8 @@ final class OverlayController {
 
     private enum VideoPhase {
         case off
+        /// ⌘D video mode — waiting for a drag to marquee the region.
+        case armed
         case selecting
         case recording
         case ready
@@ -39,13 +41,15 @@ final class OverlayController {
     private var videoLocalRect: CGRect?
     private var videoScreenRect: CGRect?
     private var videoScreen: NSScreen?
-    private var videoRightSeenDown = false
+    /// True once a mouse button was seen down during the current marquee.
+    private var videoSelectButtonSeenDown = false
     private var readyVideoURL: URL?
     private var videoElapsedFrozen: TimeInterval = 0
     private let regionRecorder = RegionRecorder()
     private var videoSaveHotKey: UInt32?
     private var videoSaveShiftHotKey: UInt32?
     private var videoSendHotKey: UInt32?
+    private var drawVideoToggleHotKey: UInt32?
 
     private let toolbar = Toolbar()
     private var revealUntil = Date.distantPast
@@ -139,6 +143,10 @@ final class OverlayController {
             guard let self = self else {
                 return
             }
+            if self.videoPhase == .armed {
+                self.beginVideoSelect()
+                return
+            }
             guard self.videoPhase == .off else { return }
             if self.textEditor.isEditing {
                 self.textEditor.commit()
@@ -154,13 +162,25 @@ final class OverlayController {
             self.noteButtonEvent()
         }
         inputTap.onLeftDragged = { [weak self] in
-            guard let self, self.videoPhase == .off else { return }
+            guard let self else { return }
+            if self.videoPhase == .selecting {
+                self.updateVideoSelect()
+                self.aimFrame()
+                return
+            }
+            guard self.videoPhase == .off else { return }
             self.dragEvents += 1
             self.drag()
             self.aimFrame()
         }
         inputTap.onLeftMouseUp = { [weak self] in
-            guard let self, self.videoPhase == .off else { return }
+            guard let self else { return }
+            if self.videoPhase == .selecting {
+                self.finishVideoSelect()
+                self.noteButtonEvent()
+                return
+            }
+            guard self.videoPhase == .off else { return }
             self.release()
             self.noteButtonEvent()
         }
@@ -280,12 +300,36 @@ final class OverlayController {
         } else {
             inputTap.setActive(!suspended)
         }
-        // Drop Enter / ⌘↩ while the comment box is key so the field can use them.
+        // Drop Enter / ⌘↩ / ⌘D while the comment box is key so the field can use them
+        // (and ⌘/ can cycle models in the annotate box).
         if videoPhase == .off {
             setAnnotationHotKeysEnabled(!suspended)
         }
+        setDrawVideoToggleHotKeyEnabled(!suspended)
         if let screen = currentScreen() {
             updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+        }
+    }
+
+    /// ⌘D while drawing (annotate box closed): arm video mode ↔ return to drawing.
+    /// Returns true when the shortcut was handled.
+    @discardableResult
+    func toggleDrawVideoMode() -> Bool {
+        guard isActive, !ownMenuOpen else { return false }
+        switch videoPhase {
+        case .off:
+            enterArmedVideoMode()
+            return true
+        case .armed:
+            leaveArmedVideoMode()
+            return true
+        case .selecting:
+            Task { @MainActor in
+                await abandonVideoSession(restoreDrawing: true)
+            }
+            return true
+        case .recording, .ready:
+            return false
         }
     }
 
@@ -447,6 +491,11 @@ final class OverlayController {
             videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.drawingParts)
             drawingTools.show(on: screen, above: annotationHints.frame)
+        case .armed:
+            drawingTools.hide()
+            videoToolbar.hide()
+            videoDestinationPicker.hide()
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoArmedParts)
         case .selecting:
             drawingTools.hide()
             videoToolbar.hide()
@@ -468,8 +517,52 @@ final class OverlayController {
         }
     }
 
+    private func enterArmedVideoMode() {
+        guard isActive, videoPhase == .off else { return }
+        if textEditor.isEditing {
+            textEditor.cancel()
+        }
+        if armView.ink.isDrawing {
+            _ = armView.ink.end(holdFade: false)
+        }
+        downPoint = nil
+        buttonSeenDown = false
+        videoPhase = .armed
+        videoAnchor = nil
+        videoLocalRect = nil
+        videoSelectButtonSeenDown = false
+        armView.setVideoSelectionOutline(localRect: nil)
+        setAnnotationHotKeysEnabled(false)
+        setVideoHotKeysEnabled(false)
+        setDrawVideoToggleHotKeyEnabled(true)
+        if let screen = currentScreen() {
+            videoScreen = screen
+            showChrome(on: screen)
+        }
+        toolbar.hideHint()
+        Log.write("video mode armed (⌘D)")
+    }
+
+    private func leaveArmedVideoMode() {
+        guard videoPhase == .armed else { return }
+        videoPhase = .off
+        videoAnchor = nil
+        videoLocalRect = nil
+        videoScreenRect = nil
+        videoSelectButtonSeenDown = false
+        armView.setVideoSelectionOutline(localRect: nil)
+        setAnnotationHotKeysEnabled(true)
+        setDrawVideoToggleHotKeyEnabled(true)
+        let screen = videoScreen ?? currentScreen()
+        videoScreen = nil
+        if let screen {
+            showChrome(on: screen)
+        }
+        Log.write("video mode disarmed (⌘D)")
+    }
+
     private func beginVideoSelect() {
-        guard isActive, videoPhase == .off || videoPhase == .selecting else { return }
+        guard isActive, videoPhase == .off || videoPhase == .armed || videoPhase == .selecting else { return }
         if textEditor.isEditing {
             textEditor.cancel()
         }
@@ -483,10 +576,11 @@ final class OverlayController {
         videoAnchor = local
         videoLocalRect = CGRect(origin: local, size: .zero)
         videoScreen = screen
-        videoRightSeenDown = true
+        videoSelectButtonSeenDown = true
         armView.setVideoSelectionOutline(localRect: videoLocalRect)
         setAnnotationHotKeysEnabled(false)
         setVideoHotKeysEnabled(false)
+        setDrawVideoToggleHotKeyEnabled(true)
         showChrome(on: screen)
         toolbar.hideHint()
         noteButtonEvent()
@@ -507,7 +601,7 @@ final class OverlayController {
 
     private func finishVideoSelect() {
         guard videoPhase == .selecting else { return }
-        videoRightSeenDown = false
+        videoSelectButtonSeenDown = false
         updateVideoSelect()
         guard let local = videoLocalRect, let frame = currentFrame, let screen = videoScreen ?? currentScreen() else {
             Task { @MainActor in await abandonVideoSession(restoreDrawing: true) }
@@ -560,6 +654,7 @@ final class OverlayController {
         videoPhase = .recording
         setAnnotationHotKeysEnabled(false)
         setVideoHotKeysEnabled(true)
+        setDrawVideoToggleHotKeyEnabled(false)
         setEscEnabled(true)
         showChrome(on: screen)
 
@@ -677,7 +772,7 @@ final class OverlayController {
         videoAnchor = nil
         videoLocalRect = nil
         videoScreenRect = nil
-        videoRightSeenDown = false
+        videoSelectButtonSeenDown = false
         armView.clearVideoRecordingIndicator()
         armView.setVideoSelectionOutline(localRect: nil)
         let previous = videoPhase
@@ -688,6 +783,7 @@ final class OverlayController {
 
         guard restoreDrawing, isActive else {
             videoScreen = nil
+            setDrawVideoToggleHotKeyEnabled(false)
             return
         }
 
@@ -707,6 +803,7 @@ final class OverlayController {
             updateZones(mouse: NSEvent.mouseLocation, screen: screen)
         }
         setAnnotationHotKeysEnabled(true)
+        setDrawVideoToggleHotKeyEnabled(true)
         setEscEnabled(true)
     }
 
@@ -717,12 +814,13 @@ final class OverlayController {
         videoAnchor = nil
         videoLocalRect = nil
         videoScreenRect = nil
-        videoRightSeenDown = false
+        videoSelectButtonSeenDown = false
         videoScreen = nil
         armView.clearVideoRecordingIndicator()
         armView.setVideoSelectionOutline(localRect: nil)
         videoPhase = .off
         setVideoHotKeysEnabled(false)
+        setDrawVideoToggleHotKeyEnabled(false)
         videoToolbar.hide()
         videoDestinationPicker.hide()
         annotationHints.hide()
@@ -814,6 +912,7 @@ final class OverlayController {
         }
         setEscEnabled(true)
         setAnnotationHotKeysEnabled(true)
+        setDrawVideoToggleHotKeyEnabled(true)
         updateCaptureOutline()
         onActiveChanged?()
         return installed
@@ -858,6 +957,7 @@ final class OverlayController {
         setEscEnabled(false)
         setAnnotationHotKeysEnabled(false)
         setVideoHotKeysEnabled(false)
+        setDrawVideoToggleHotKeyEnabled(false)
         ownMenuOpen = false
         CursorHider.show()
         onActiveChanged?()
@@ -972,6 +1072,28 @@ final class OverlayController {
         if !enabled, let id = escHotKey {
             HotKeyCenter.shared.unregister(id)
             escHotKey = nil
+        }
+    }
+
+    /// ⌘D toggles drawing ↔ video-armed (and cancels an in-progress marquee).
+    /// Disabled while the annotate comment box is open so ⌘D isn't stolen from the field.
+    private func setDrawVideoToggleHotKeyEnabled(_ enabled: Bool) {
+        let want = enabled && isActive && !ownMenuOpen
+            && (videoPhase == .off || videoPhase == .armed || videoPhase == .selecting)
+        if want {
+            if drawVideoToggleHotKey == nil {
+                drawVideoToggleHotKey = HotKeyCenter.shared.register(
+                    keyCode: UInt32(kVK_ANSI_D),
+                    modifiers: UInt32(cmdKey)
+                ) { [weak self] in
+                    _ = self?.toggleDrawVideoMode()
+                }
+            }
+            return
+        }
+        if let id = drawVideoToggleHotKey {
+            HotKeyCenter.shared.unregister(id)
+            drawVideoToggleHotKey = nil
         }
     }
 
@@ -1323,17 +1445,19 @@ final class OverlayController {
 
         lastMouse = mouse
         let local = CGPoint(x: mouse.x - screen.frame.origin.x, y: mouse.y - screen.frame.origin.y)
-        // Keep the hand tracking while marquee-selecting a video region.
-        if videoPhase == .off || videoPhase == .selecting {
+        // Keep the hand tracking while armed / marquee-selecting a video region.
+        if videoPhase == .off || videoPhase == .armed || videoPhase == .selecting {
             armView.aim(cursor: local)
         }
 
         if videoPhase == .selecting {
-            let down = CGEventSource.buttonState(.hidSystemState, button: .right)
+            let rightDown = CGEventSource.buttonState(.hidSystemState, button: .right)
+            let leftDown = CGEventSource.buttonState(.hidSystemState, button: .left)
+            let down = rightDown || leftDown
             if down {
-                videoRightSeenDown = true
+                videoSelectButtonSeenDown = true
             }
-            if videoRightSeenDown && !down {
+            if videoSelectButtonSeenDown && !down {
                 finishVideoSelect()
                 return
             }

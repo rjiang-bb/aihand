@@ -1023,9 +1023,22 @@ enum ComposerFieldEditor {
         return true
     }
 
+    /// First `ComposerPromptTextView` under `root` (the prompt is an NSTextView, not an NSTextField).
+    static func promptTextView(in root: NSView?) -> ComposerPromptTextView? {
+        guard let root else { return nil }
+        if let tv = root as? ComposerPromptTextView { return tv }
+        for sub in root.subviews {
+            if let found = promptTextView(in: sub) { return found }
+        }
+        return nil
+    }
+
     static func editableTextView() -> NSTextView? {
         if let registeredPrompt, registeredPrompt.window != nil {
             return registeredPrompt
+        }
+        if let prompt = promptTextView(in: NSApp.keyWindow?.contentView) {
+            return prompt
         }
         let window = NSApp.keyWindow
         let responder = window?.firstResponder

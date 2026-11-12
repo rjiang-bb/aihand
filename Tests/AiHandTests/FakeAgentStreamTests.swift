@@ -71,7 +71,47 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
             #"{"type":"assistant","timestamp_ms":2,"message":{"content":[{"type":"text","text":"after"}]}}"#,
             #"{"type":"result","is_error":false,"result":"after","session_id":"c"}"#,
         ])
-        XCTAssertEqual(s.messages.filter { $0.kind != .user }.map(\.kind), [.assistant, .tool, .assistant])
+        let kinds = s.messages.filter { $0.kind != .user && $0.kind != .status }.map(\.kind)
+        XCTAssertEqual(kinds, [.assistant, .tool, .assistant])
+        XCTAssertTrue(s.messages.contains { $0.kind == .status && $0.text.hasPrefix("Worked for") })
+        XCTAssertNil(s.liveActivity)
+    }
+
+    func testSuccessfulResultEmitsWorkedForStatusChip() throws {
+        let s = try run([
+            #"{"type":"assistant","timestamp_ms":1,"message":{"content":[{"type":"text","text":"ok"}]}}"#,
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"c"}"#,
+        ])
+        let chips = s.messages.filter { $0.kind == .status }.map(\.text)
+        XCTAssertEqual(chips.count, 1, "\(chips)")
+        XCTAssertTrue(chips[0].hasPrefix("Worked for"), chips[0])
+        // Chip sits right after the user turn.
+        XCTAssertEqual(s.messages[1].kind, .status)
+    }
+
+    func testCodexReasoningEmitsThoughtChip() throws {
+        let s = try run([
+            #"{"type":"thread.started","thread_id":"t1"}"#,
+            #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"type":"reasoning"}}"#,
+            #"{"type":"item.completed","item":{"type":"reasoning"}}"#,
+            #"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+            #"{"type":"turn.completed"}"#,
+        ])
+        let status = s.messages.filter { $0.kind == .status }.map(\.text)
+        XCTAssertTrue(status.contains { $0.hasPrefix("Thought") }, "\(status)")
+        XCTAssertTrue(status.contains { $0.hasPrefix("Worked for") }, "\(status)")
+        XCTAssertNil(s.liveActivity)
+    }
+
+    func testToolCallsSetExploringLiveActivityThenClearOnResult() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("go")
+        waitUntil("tool landed") { s.messages.contains { $0.kind == .tool } }
+        XCTAssertEqual(s.liveActivity, "Exploring 1 file")
+        waitUntil("run ends") { s.status != .working }
+        XCTAssertNil(s.liveActivity)
+        XCTAssertTrue(s.messages.contains { $0.kind == .status && $0.text.hasPrefix("Worked for") })
     }
 
     func testGarbageAndBlankLinesAreIgnored() throws {

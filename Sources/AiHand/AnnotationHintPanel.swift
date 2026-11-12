@@ -20,13 +20,22 @@ final class AnnotationHintPanel {
             ("⌘B", "screen / window"),
             ("Enter", "comment"),
             ("⌘↩", "send to agent"),
+            ("⌘D", "video"),
             ("Right-drag", "video"),
             ("Esc", "exit"),
         ]
     }
 
+    /// Keyboard-armed video mode: waiting for a drag to pick the region.
+    static let videoArmedParts: [(String, String)] = [
+        ("Drag", "select region"),
+        ("⌘D", "drawing"),
+        ("Esc", "cancel"),
+    ]
+
     static let videoSelectingParts: [(String, String)] = [
         ("Release", "start recording"),
+        ("⌘D", "drawing"),
         ("Esc", "cancel"),
     ]
 

@@ -54,6 +54,7 @@ struct SessionChatView: View {
             ChatTranscriptView(
                 messages: session.messages,
                 sessionID: session.id,
+                liveActivity: session.liveActivity,
                 onAddSelectionToChat: { appendSelectionToDraft($0) },
                 onAddSelectionToNewSession: { onAddSelectionToNewSession?($0) }
             )

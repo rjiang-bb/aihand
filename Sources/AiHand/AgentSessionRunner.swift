@@ -11,6 +11,10 @@ final class AgentSessionRunner {
     private var currentAssistantID: UUID?
     /// Claude stream-json re-emits full assistant snapshots that include prior `tool_use` blocks.
     private var seenToolUseIDs: Set<String> = []
+    /// Wall-clock start of the current agent turn (for "Worked for Xs").
+    private var turnStartedAt: Date?
+    /// When the current thinking/reasoning phase began (for "Thought Xs").
+    private var thinkingStartedAt: Date?
     private weak var session: AgentSession?
     /// Fired on the main queue after a natural process exit (not interrupt/stop).
     var onFinished: (() -> Void)?
@@ -67,6 +71,7 @@ final class AgentSessionRunner {
                 AgentMessage(kind: .user, text: prompt, imagePaths: paths, steered: steered)
             )
             session.status = .working
+            self.beginTurnTracking(on: session)
             let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             session.preview = trimmedPrompt.isEmpty && !paths.isEmpty ? "Annotation" : prompt
             session.errorMessage = nil
@@ -210,8 +215,9 @@ final class AgentSessionRunner {
     func stop() {
         guard process != nil else { return }
         stopQuietly()
-        DispatchQueue.main.async { [weak session] in
-            guard let session else { return }
+        DispatchQueue.main.async { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.endTurnTracking(emitWorked: false)
             if session.status == .working {
                 session.status = .stopped
                 session.preview = "Stopped"
@@ -275,6 +281,7 @@ final class AgentSessionRunner {
         bufferLock.unlock()
         currentAssistantID = nil
         seenToolUseIDs.removeAll()
+        // Turn timing is owned by begin/endTurnTracking — keep it across buffer resets mid-turn.
     }
 
     private func attachPipes(to process: Process) {
@@ -324,6 +331,10 @@ final class AgentSessionRunner {
         self.process = process
         DispatchQueue.main.async {
             session.status = .working
+            // First turn may not go through followUp's beginTurnTracking.
+            if self.turnStartedAt == nil {
+                self.beginTurnTracking(on: session)
+            }
         }
         do {
             try process.run()
@@ -407,11 +418,14 @@ final class AgentSessionRunner {
             // message.content (text + tool_use). Same envelope shape for text extraction.
             let hasTS = json["timestamp_ms"] != nil
             let hasMC = json["model_call_id"] != nil
+            ingestEmbeddedThinking(json)
             let text = extractAssistantText(json)
             if hasTS && hasMC {
                 return
             }
             if !text.isEmpty {
+                finalizeThinkingIfNeeded()
+                session.liveActivity = nil
                 if hasTS {
                     appendAssistant(text, replace: true)
                 } else {
@@ -422,11 +436,19 @@ final class AgentSessionRunner {
         case "tool_call":
             let subtype = json["subtype"] as? String ?? ""
             if subtype == "started" {
+                finalizeThinkingIfNeeded()
                 let label = toolLabel(json)
                 session.messages.append(AgentMessage(kind: .tool, text: label))
                 session.preview = label
                 currentAssistantID = nil
+                refreshExploringActivity()
+            } else if subtype == "completed" {
+                // Brief planning gap between tools.
+                session.liveActivity = TurnStatusCopy.planning
             }
+        case "thinking":
+            // Some Cursor builds emit a top-level thinking event.
+            beginThinking()
         case "result":
             if let sid = json["session_id"] as? String, !sid.isEmpty {
                 session.chatId = sid
@@ -440,6 +462,7 @@ final class AgentSessionRunner {
                 if session.messages.last?.kind != .system || session.messages.last?.text != msg {
                     session.messages.append(AgentMessage(kind: .system, text: msg))
                 }
+                endTurnTracking(emitWorked: false)
             } else {
                 session.status = .finished
                 if let result = json["result"] as? String, !result.isEmpty {
@@ -447,6 +470,7 @@ final class AgentSessionRunner {
                 } else {
                     session.preview = "Finished"
                 }
+                endTurnTracking(emitWorked: true)
             }
             currentAssistantID = nil
 
@@ -457,6 +481,7 @@ final class AgentSessionRunner {
             }
         case "turn.started":
             session.status = .working
+            beginTurnTracking(on: session)
         case "item.started", "item.updated", "item.completed":
             handleCodexItem(json, completed: type == "item.completed")
         case "turn.completed":
@@ -464,6 +489,7 @@ final class AgentSessionRunner {
             if session.preview.isEmpty || session.preview == "Working…" {
                 session.preview = "Finished"
             }
+            endTurnTracking(emitWorked: true)
             currentAssistantID = nil
         case "turn.failed", "error":
             session.status = .failed
@@ -473,6 +499,7 @@ final class AgentSessionRunner {
             session.errorMessage = msg
             session.preview = msg
             session.messages.append(AgentMessage(kind: .system, text: msg))
+            endTurnTracking(emitWorked: false)
             currentAssistantID = nil
 
         default:
@@ -500,14 +527,19 @@ final class AgentSessionRunner {
             }
         case "command_execution":
             if !completed {
+                finalizeThinkingIfNeeded()
                 let cmd = item["command"] as? String ?? "command"
                 let label = "Running \(shortCommand(cmd))"
                 session.messages.append(AgentMessage(kind: .tool, text: label))
                 session.preview = label
                 currentAssistantID = nil
+                refreshExploringActivity()
+            } else {
+                session.liveActivity = TurnStatusCopy.planning
             }
         case "file_change", "file_change_proposed":
             if !completed {
+                finalizeThinkingIfNeeded()
                 let path = (item["path"] as? String)
                     ?? (item["changes"] as? [[String: Any]])?.first.flatMap { $0["path"] as? String }
                     ?? "file"
@@ -515,31 +547,53 @@ final class AgentSessionRunner {
                 session.messages.append(AgentMessage(kind: .tool, text: label))
                 session.preview = label
                 currentAssistantID = nil
+                refreshExploringActivity()
+            } else {
+                session.liveActivity = TurnStatusCopy.planning
             }
         case "mcp_tool_call":
             if !completed {
+                finalizeThinkingIfNeeded()
                 let name = item["tool"] as? String ?? item["name"] as? String ?? "MCP tool"
                 let label = "MCP \(name)"
                 session.messages.append(AgentMessage(kind: .tool, text: label))
                 session.preview = label
                 currentAssistantID = nil
+                refreshExploringActivity()
+            } else {
+                session.liveActivity = TurnStatusCopy.planning
             }
         case "web_search":
             if !completed {
+                finalizeThinkingIfNeeded()
                 let q = item["query"] as? String ?? "web"
                 let label = "Search \(q)"
                 session.messages.append(AgentMessage(kind: .tool, text: label))
                 session.preview = label
                 currentAssistantID = nil
+                refreshExploringActivity()
+            } else {
+                session.liveActivity = TurnStatusCopy.planning
             }
-        case "reasoning", "plan_update":
-            break
+        case "reasoning":
+            if !completed {
+                beginThinking()
+            } else {
+                finalizeThinkingIfNeeded()
+                session.liveActivity = TurnStatusCopy.planning
+            }
+        case "plan_update":
+            if !completed {
+                session.liveActivity = TurnStatusCopy.planning
+            }
         default:
             if !completed {
+                finalizeThinkingIfNeeded()
                 let label = itemType.replacingOccurrences(of: "_", with: " ")
                 session.messages.append(AgentMessage(kind: .tool, text: label.capitalized))
                 session.preview = label
                 currentAssistantID = nil
+                refreshExploringActivity()
             }
         }
     }
@@ -611,10 +665,22 @@ final class AgentSessionRunner {
             seenToolUseIDs.insert(toolID)
             let name = item["name"] as? String ?? "Tool"
             let input = item["input"] as? [String: Any] ?? [:]
+            finalizeThinkingIfNeeded()
             let label = claudeToolLabel(name: name, input: input)
             session.messages.append(AgentMessage(kind: .tool, text: label))
             session.preview = label
             currentAssistantID = nil
+            refreshExploringActivity()
+        }
+    }
+
+    /// Cursor/Claude may embed `thinking` blocks inside assistant message content.
+    private func ingestEmbeddedThinking(_ json: [String: Any]) {
+        guard let message = json["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else { return }
+        let hasThinking = content.contains { ($0["type"] as? String) == "thinking" }
+        if hasThinking {
+            beginThinking()
         }
     }
 
@@ -740,6 +806,66 @@ final class AgentSessionRunner {
         return two.count <= 42 ? two : "…/\(name)"
     }
 
+    private func beginTurnTracking(on session: AgentSession) {
+        turnStartedAt = Date()
+        thinkingStartedAt = nil
+        session.liveActivity = TurnStatusCopy.planning
+    }
+
+    private func endTurnTracking(emitWorked: Bool) {
+        finalizeThinkingIfNeeded()
+        if emitWorked, let start = turnStartedAt {
+            let text = TurnStatusCopy.worked(seconds: Date().timeIntervalSince(start))
+            insertStatusAfterUser(text, atFront: true)
+        }
+        turnStartedAt = nil
+        thinkingStartedAt = nil
+        session?.liveActivity = nil
+    }
+
+    private func beginThinking() {
+        guard thinkingStartedAt == nil else { return }
+        thinkingStartedAt = Date()
+        session?.liveActivity = TurnStatusCopy.thinkingLive
+    }
+
+    private func finalizeThinkingIfNeeded() {
+        guard let start = thinkingStartedAt else { return }
+        thinkingStartedAt = nil
+        let text = TurnStatusCopy.thought(seconds: Date().timeIntervalSince(start))
+        insertStatusAfterUser(text, atFront: false)
+    }
+
+    /// Status chips sit with the agent turn: after the latest user message (and after any
+    /// existing status chips unless `atFront` — used for "Worked for" at the top).
+    private func insertStatusAfterUser(_ text: String, atFront: Bool) {
+        guard let session else { return }
+        guard let userIdx = session.messages.lastIndex(where: { $0.kind == .user }) else {
+            session.messages.append(AgentMessage(kind: .status, text: text))
+            return
+        }
+        if atFront {
+            session.messages.insert(AgentMessage(kind: .status, text: text), at: userIdx + 1)
+            return
+        }
+        var at = userIdx + 1
+        while at < session.messages.count && session.messages[at].kind == .status {
+            at += 1
+        }
+        session.messages.insert(AgentMessage(kind: .status, text: text), at: at)
+    }
+
+    private func refreshExploringActivity() {
+        guard let session else { return }
+        var texts: [String] = []
+        for msg in session.messages.reversed() {
+            if msg.kind == .user { break }
+            if msg.kind == .tool { texts.append(msg.text) }
+        }
+        texts.reverse()
+        session.liveActivity = TurnStatusCopy.exploring(toolTexts: texts) ?? TurnStatusCopy.planning
+    }
+
     private func handleTermination(status: Int32) {
         process = nil
         guard let session else { return }
@@ -747,6 +873,7 @@ final class AgentSessionRunner {
             if status == 0 {
                 session.status = .finished
                 if session.preview.isEmpty { session.preview = "Finished" }
+                endTurnTracking(emitWorked: true)
             } else {
                 session.status = .waiting
                 bufferLock.lock()
@@ -760,6 +887,7 @@ final class AgentSessionRunner {
                 session.errorMessage = msg
                 session.preview = msg
                 session.messages.append(AgentMessage(kind: .system, text: msg))
+                endTurnTracking(emitWorked: false)
             }
         }
         onFinished?()

@@ -42,6 +42,7 @@ Holding **⌘** shows per-row `⌘1`…`⌘9` labels and a hints footer (`⌘1�
 
 - Own the shortcut in `SessionsSidePanel`’s key monitor when the panel is key, in `AnnotatePromptPanel` while commenting, and keep the app menu item “Cycle Agent Model” (`AppDelegate`) as the fallback — menu key equivalents are more reliable than local monitors with ⌘ held.
 - Capture screen ↔ window while drawing is **⌘B** (not ⌘/) so model cycling stays free in the comment box.
+- While drawing (annotate box closed), **⌘D** toggles drawing ↔ video mode (`OverlayController.toggleDrawVideoMode`). Sessions-panel ⌘D still starts Draw when the overlay is inactive.
 - Do **not** also consume ⌘/ in `SessionChatView` (double-cycle skips favorites).
 - Do **not** call `closeChat()` from `windowDidResignKey`. Menu key equivalents and the favorite picker resign key briefly; collapsing clears `selectedID` and makes ⌘/ a no-op. Use Esc / the chat close control to dismiss chat.
 
