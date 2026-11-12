@@ -106,10 +106,11 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
     }
 
     /// Force the composer NSTextView to become first responder (SwiftUI FocusState alone is flaky in panels).
-    private func focusPromptField() {
+    private func focusPromptField(attemptsRemaining: Int = 10) {
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
-        // AgentComposerView uses ComposerPromptTextView — not an NSTextField.
+        // Only target *this* panel's prompt — ComposerFieldEditor.focus() can land on the
+        // sessions chat composer if that view is still registered.
         if let textView = ComposerFieldEditor.promptTextView(in: panel.contentView) {
             ComposerFieldEditor.register(textView)
             if panel.firstResponder !== textView {
@@ -119,8 +120,11 @@ final class AnnotatePromptPanel: NSObject, NSWindowDelegate {
             textView.setSelectedRange(NSRange(location: end, length: 0))
             return
         }
-        // Hosting view may not have materialized the editor yet.
-        ComposerFieldEditor.focus()
+        guard attemptsRemaining > 0 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+            guard let self, self.panel.isVisible else { return }
+            self.focusPromptField(attemptsRemaining: attemptsRemaining - 1)
+        }
     }
 
     private func position(on screen: NSScreen, placement: Placement) {

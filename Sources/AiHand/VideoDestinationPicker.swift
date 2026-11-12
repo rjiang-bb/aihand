@@ -11,7 +11,7 @@ enum VideoDestination: String, CaseIterable, Equatable {
         switch self {
         case .comment: return "Save + comment"
         case .save: return "Save video"
-        case .send: return "Send to agent"
+        case .send: return "Attach to chat"
         case .discard: return "Discard"
         }
     }

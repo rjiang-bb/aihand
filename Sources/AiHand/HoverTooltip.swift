@@ -30,6 +30,45 @@ enum HoverTooltipLabel {
     }
 }
 
+enum HoverTooltipLevel {
+    /// Above sessions (+2) and Settings (+4).
+    static let base = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 5)
+
+    /// Clear the hovered window *and* an NSMenu opened from it.
+    /// Menus from high-level panels (annotate = screenSaver+3) sit at about owner+1;
+    /// tips use owner+2 so "Cycle model (⌘/)" isn't trapped under the favorites menu.
+    static func above(_ ownerLevel: NSWindow.Level) -> NSWindow.Level {
+        let aboveOwnerAndMenu = ownerLevel.rawValue + 2
+        let abovePopUp = NSWindow.Level.popUpMenu.rawValue + 1
+        return NSWindow.Level(rawValue: max(base.rawValue, aboveOwnerAndMenu, abovePopUp))
+    }
+}
+
+enum HoverTooltipPlacement {
+    static let gap: CGFloat = 6
+    static let screenPad: CGFloat = 4
+
+    /// Prefer above the control (composer / annotate sit near the bottom); fall back below.
+    static func origin(
+        tipSize: NSSize,
+        controlOnScreen: CGRect,
+        visibleFrame: CGRect
+    ) -> NSPoint {
+        var origin = NSPoint(
+            x: controlOnScreen.midX - tipSize.width / 2,
+            y: controlOnScreen.maxY + gap
+        )
+        origin.x = min(
+            max(origin.x, visibleFrame.minX + screenPad),
+            visibleFrame.maxX - tipSize.width - screenPad
+        )
+        if origin.y + tipSize.height > visibleFrame.maxY - screenPad {
+            origin.y = controlOnScreen.minY - tipSize.height - gap
+        }
+        return origin
+    }
+}
+
 /// Hosts an always-active tracking area and shows a small tip window on hover.
 private struct AppKitHoverTooltip: NSViewRepresentable {
     var text: String
@@ -123,7 +162,7 @@ private final class AppKitHoverTooltipView: NSView {
     }
 }
 
-/// Tiny floating tip — stays above the sessions panel (floating + 2).
+/// Tiny floating tip — rises above the hovered control's window (sessions, Settings, annotate…).
 private final class HoverTooltipWindow {
     static let shared = HoverTooltipWindow()
 
@@ -143,7 +182,7 @@ private final class HoverTooltipWindow {
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
         panel.isFloatingPanel = true
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 5)
+        panel.level = HoverTooltipLevel.base
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isReleasedWhenClosed = false
         panel.ignoresMouseEvents = true
@@ -192,20 +231,16 @@ private final class HoverTooltipWindow {
         panel.setContentSize(size)
 
         guard let window = view.window else { return }
+        panel.level = HoverTooltipLevel.above(window.level)
         let rectInWindow = view.convert(view.bounds, to: nil)
         let rectOnScreen = window.convertToScreen(rectInWindow)
-        // Below the control, centered.
-        var origin = NSPoint(
-            x: rectOnScreen.midX - size.width / 2,
-            y: rectOnScreen.minY - size.height - 6
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame
+            ?? NSRect(x: rectOnScreen.minX, y: rectOnScreen.minY, width: 2000, height: 2000)
+        let origin = HoverTooltipPlacement.origin(
+            tipSize: size,
+            controlOnScreen: rectOnScreen,
+            visibleFrame: visible
         )
-        if let screen = window.screen ?? NSScreen.main {
-            let visible = screen.visibleFrame
-            origin.x = min(max(origin.x, visible.minX + 4), visible.maxX - size.width - 4)
-            if origin.y < visible.minY + 4 {
-                origin.y = rectOnScreen.maxY + 6
-            }
-        }
         panel.setFrameOrigin(origin)
         panel.orderFrontRegardless()
     }

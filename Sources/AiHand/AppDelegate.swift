@@ -163,10 +163,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         annotatePanel.onSubmit = { [weak self] prompt in
             guard let self else { return }
+            // Enter → comment box → submit: start the agent turn with media + prompt.
             if self.pendingVideoPath != nil {
-                self.submitPendingVideo(prompt: prompt)
+                self.submitPendingVideo(prompt: prompt, startTurn: true)
             } else {
-                self.submitAnnotation(prompt: prompt)
+                self.submitAnnotation(prompt: prompt, startTurn: true)
             }
         }
 
@@ -178,8 +179,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self?.openAnnotationComment()
         }
         overlay.onRequestSend = { [weak self] in
+            // ⌘↩ from drawing: attach to the chat composer; user types then sends.
             guard let self, !self.annotatePanel.isVisible else { return }
-            self.submitAnnotation(prompt: "")
+            self.submitAnnotation(prompt: "", startTurn: false)
         }
         overlay.onRequestSave = { [weak self] in
             guard let self, !self.annotatePanel.isVisible else { return }
@@ -196,7 +198,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self?.saveVideoPreview(url: url)
         }
         overlay.onRequestVideoSend = { [weak self] url in
-            self?.sendVideo(path: url.path, prompt: "")
+            // ⌘↩ / “Attach to chat”: stage on the composer, don’t start a turn.
+            self?.sendVideo(path: url.path, prompt: "", startTurn: false)
         }
         overlay.onVideoCaptureFailed = { [weak self] error in
             self?.presentCaptureFailure(error, kind: .video)
@@ -268,11 +271,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    private func submitPendingVideo(prompt: String) {
+    private func submitPendingVideo(prompt: String, startTurn: Bool) {
         guard let path = pendingVideoPath else { return }
         pendingVideoPath = nil
         videoAnnotatePreview.hide()
-        sendVideo(path: path, prompt: prompt)
+        sendVideo(path: path, prompt: prompt, startTurn: startTurn)
     }
 
     private func saveVideoPreview(url: URL) {
@@ -290,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         Log.write("video saved \(url.path)")
     }
 
-    private func sendVideo(path: String, prompt: String) {
+    private func sendVideo(path: String, prompt: String, startTurn: Bool) {
         let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else {
             pendingVideoPath = path
@@ -304,7 +307,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         annotatePanel.hide()
         videoAnnotatePreview.hide()
         overlay.exit()
-        deliverAnnotation(prompt: prompt, mediaPath: path, targetSessionID: targetID)
+        if startTurn {
+            startAnnotationTurn(prompt: prompt, mediaPath: path, targetSessionID: targetID)
+        } else {
+            attachAnnotationToComposer(prompt: prompt, mediaPath: path, targetSessionID: targetID)
+        }
     }
 
     private func inkScreenBounds() -> CGRect? {
@@ -319,7 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         )
     }
 
-    private func submitAnnotation(prompt: String) {
+    private func submitAnnotation(prompt: String, startTurn: Bool) {
         let workspace = Preferences.agentWorkspace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !workspace.isEmpty else {
             overlay.exit()
@@ -360,7 +367,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 }
                 self.overlay.clearInk()
                 self.overlay.exit()
-                self.deliverAnnotation(prompt: prompt, mediaPath: outcome.path, targetSessionID: targetID)
+                if startTurn {
+                    self.startAnnotationTurn(
+                        prompt: prompt, mediaPath: outcome.path, targetSessionID: targetID)
+                } else {
+                    self.attachAnnotationToComposer(
+                        prompt: prompt, mediaPath: outcome.path, targetSessionID: targetID)
+                }
             } catch {
                 for stroke in strokes {
                     self.overlay.releaseStrokeHold(stroke, fadeNow: false)
@@ -372,8 +385,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    /// New session, or follow-up on the chat that started Draw (⌘D).
-    private func deliverAnnotation(prompt: String, mediaPath: String, targetSessionID: UUID?) {
+    /// Enter → comment → submit: start (or follow up) an agent turn with the capture.
+    private func startAnnotationTurn(prompt: String, mediaPath: String, targetSessionID: UUID?) {
         if let targetSessionID, sessionStore.session(id: targetSessionID) != nil {
             sessionManager.followUp(
                 sessionID: targetSessionID,
@@ -387,6 +400,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if let session = sessionManager.startFromAnnotation(prompt: prompt, screenshotPath: mediaPath) {
             sessionsPanel.openChat(for: session.id)
         }
+    }
+
+    /// ⌘↩ from drawing / video: open a chat with the capture attached — user sends when ready.
+    private func attachAnnotationToComposer(prompt: String, mediaPath: String, targetSessionID: UUID?) {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sessionID: UUID?
+        if let targetSessionID, sessionStore.session(id: targetSessionID) != nil {
+            sessionID = targetSessionID
+        } else {
+            sessionID = sessionManager.createBlankSession()?.id
+        }
+        guard let sessionID else { return }
+
+        // Stage for this session before opening so a prior chat can’t swallow the
+        // paths, and so onAppear of the target chat still sees them.
+        if !trimmed.isEmpty {
+            sessionsPanel.setComposerSeed(trimmed)
+        }
+        sessionsPanel.setComposerAttachments([mediaPath], for: sessionID)
+        sessionsPanel.openChat(for: sessionID)
     }
 
     /// ⌘⇧S — write an annotated capture to the screenshots folder without starting an agent.

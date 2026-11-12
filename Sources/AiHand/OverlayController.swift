@@ -66,6 +66,8 @@ final class OverlayController {
     private var copyHotKey: UInt32?
     private var toolHotKeys: [UInt32] = []
     private let annotationHints = AnnotationHintPanel()
+    /// Hint/tools sit raised while the hand picker is visible; dock to the bottom once it fades.
+    private var chromeDocked = false
     private let drawingTools = DrawingToolsPanel()
     private let videoToolbar = VideoToolbarPanel()
     private let videoDestinationPicker = VideoDestinationPicker()
@@ -89,7 +91,7 @@ final class OverlayController {
     var onStrokeComplete: ((StrokeResult, CGRect, NSScreen) -> Void)?
     /// Enter while ink is on screen — open the comment box.
     var onRequestComment: (() -> Void)?
-    /// ⌘↩ while ink is on screen — send the annotated screenshot immediately.
+    /// ⌘↩ while ink is on screen — capture and attach to the chat composer (does not send).
     var onRequestSend: (() -> Void)?
     /// ⌘⇧S while drawing — save an annotated screenshot to the AiHand folder.
     var onRequestSave: (() -> Void)?
@@ -102,7 +104,7 @@ final class OverlayController {
     var onRequestVideoAnnotate: ((URL, CGRect) -> Void)?
     /// Video saved only (`⌘⇧S`).
     var onRequestVideoSave: ((URL) -> Void)?
-    /// Video saved and sent to agent (`⌘↩`).
+    /// Video saved and attached to the chat composer (`⌘↩`).
     var onRequestVideoSend: ((URL) -> Void)?
     var onVideoCaptureFailed: ((Error) -> Void)?
 
@@ -290,15 +292,21 @@ final class OverlayController {
     var extraPassThrough: (() -> [CGRect])?
 
     func suspendInput(_ suspended: Bool) {
-        guard isActive, inputTap.isInstalled else {
-            return
-        }
+        guard isActive else { return }
         ownMenuOpen = suspended
-        // Keep the tap off while recording / ready so the real cursor stays usable.
-        if videoPhase == .recording || videoPhase == .ready {
-            inputTap.setActive(false)
-        } else {
-            inputTap.setActive(!suspended)
+        // Comment box / menus need the real arrow + I-beam; don't leave the drawing cursor hidden.
+        if suspended {
+            normalCursor = true
+            armView.pointerHidden = true
+            CursorHider.show()
+        }
+        if inputTap.isInstalled {
+            // Keep the tap off while recording / ready so the real cursor stays usable.
+            if videoPhase == .recording || videoPhase == .ready {
+                inputTap.setActive(false)
+            } else {
+                inputTap.setActive(!suspended)
+            }
         }
         // Drop Enter / ⌘↩ / ⌘D while the comment box is key so the field can use them
         // (and ⌘/ can cycle models in the annotate box).
@@ -489,31 +497,62 @@ final class OverlayController {
         case .off:
             videoToolbar.hide()
             videoDestinationPicker.hide()
-            annotationHints.show(on: screen, parts: AnnotationHintPanel.drawingParts)
-            drawingTools.show(on: screen, above: annotationHints.frame)
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.drawingParts, docked: chromeDocked)
+            drawingTools.show(on: screen, above: annotationHints.frame, docked: chromeDocked)
         case .armed:
             drawingTools.hide()
             videoToolbar.hide()
             videoDestinationPicker.hide()
-            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoArmedParts)
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoArmedParts, docked: chromeDocked)
         case .selecting:
             drawingTools.hide()
             videoToolbar.hide()
             videoDestinationPicker.hide()
-            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoSelectingParts)
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoSelectingParts, docked: chromeDocked)
         case .recording:
             drawingTools.hide()
             videoDestinationPicker.hide()
-            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts)
-            videoToolbar.show(on: screen, above: annotationHints.frame, recording: true)
+            // Hand picker is hidden for recording — dock chrome to the bottom.
+            chromeDocked = true
+            annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts, docked: true)
+            videoToolbar.show(on: screen, above: annotationHints.frame, recording: true, docked: true)
             videoToolbar.setElapsed(videoElapsedFrozen)
         case .ready:
             drawingTools.hide()
             // Picker lists destinations + shortcuts; drop the recording hint strip.
+            chromeDocked = true
             annotationHints.hide()
-            videoToolbar.show(on: screen, above: .zero, recording: false)
+            videoToolbar.show(on: screen, above: .zero, recording: false, docked: true)
             videoToolbar.setElapsed(videoElapsedFrozen)
             videoDestinationPicker.show(on: screen, above: videoToolbar.frame)
+        }
+    }
+
+    /// Slide the hint strip + tools into the hand picker's bottom slot once it fades (and back up if it returns).
+    private func syncChromeDock(on screen: NSScreen, animated: Bool) {
+        let wantDocked: Bool
+        switch videoPhase {
+        case .recording, .ready:
+            wantDocked = true
+        default:
+            wantDocked = !toolbar.revealed
+        }
+        let changed = wantDocked != chromeDocked
+        chromeDocked = wantDocked
+        let slide = animated && changed
+        annotationHints.reposition(on: screen, docked: chromeDocked, animated: slide)
+        drawingTools.reposition(
+            on: screen, above: annotationHints.frame, docked: chromeDocked, animated: slide)
+        videoToolbar.reposition(
+            on: screen, above: annotationHints.frame, docked: chromeDocked, animated: slide)
+        if slide {
+            // Destination picker sits above the video toolbar; snap after the slide so it tracks.
+            DispatchQueue.main.asyncAfter(deadline: .now() + AnnotationChromeLayout.slideDuration) { [weak self] in
+                guard let self, let screen = self.videoScreen ?? self.currentScreen() else { return }
+                self.videoDestinationPicker.reposition(on: screen, above: self.videoToolbar.frame)
+            }
+        } else {
+            videoDestinationPicker.reposition(on: screen, above: videoToolbar.frame)
         }
     }
 
@@ -872,16 +911,11 @@ final class OverlayController {
         }
         isActive = true
         currentFrame = nil
+        chromeDocked = false
         tapSound.warm()
 
         CursorHider.hide()
         window.orderFrontRegardless()
-
-        startDisplayLink()
-        installMouseAimMonitors()
-        runServiceTimer()
-        aimFrame()
-        serviceTick()
 
         activity = ProcessInfo.processInfo.beginActivity(
             options: [.userInitiated, .latencyCritical], reason: "AiHand pointer is on")
@@ -890,13 +924,20 @@ final class OverlayController {
         inputTap.setActive(installed)
         Log.write("activate trusted=\(AXIsProcessTrusted()) tapInstalled=\(installed)")
 
+        // Hand picker must be revealed (and revealUntil set) *before* aimFrame/serviceTick,
+        // otherwise syncChromeDock treats the faded picker as gone and opens chrome already docked.
+        revealUntil = Date().addingTimeInterval(3)
         if let screen = currentScreen() {
             toolbar.place(on: screen)
+            toolbar.setNeedsPermission(!installed)
+            toolbar.show()
+            toolbar.setRevealed(true)
             showChrome(on: screen)
+        } else {
+            toolbar.setNeedsPermission(!installed)
+            toolbar.show()
+            toolbar.setRevealed(true)
         }
-        toolbar.setNeedsPermission(!installed)
-        toolbar.show()
-        revealUntil = Date().addingTimeInterval(3)
         if installed && !UserDefaults.standard.bool(forKey: OverlayController.hintShownKey) {
             UserDefaults.standard.set(true, forKey: OverlayController.hintShownKey)
             var parts: [(key: String, text: String)] = [("Click", "to tap"), ("Drag", "to draw")]
@@ -910,6 +951,13 @@ final class OverlayController {
                 self?.toolbar.hideHint()
             }
         }
+
+        startDisplayLink()
+        installMouseAimMonitors()
+        runServiceTimer()
+        aimFrame()
+        serviceTick()
+
         setEscEnabled(true)
         setAnnotationHotKeysEnabled(true)
         setDrawVideoToggleHotKeyEnabled(true)
@@ -923,6 +971,7 @@ final class OverlayController {
             return
         }
         isActive = false
+        chromeDocked = false
 
         stopDisplayLink()
         timer?.invalidate()
@@ -994,7 +1043,12 @@ final class OverlayController {
         let near = f.insetBy(dx: -80, dy: 0).union(f.offsetBy(dx: 0, dy: 90)).insetBy(dx: 0, dy: -10).contains(mouse)
         let needsPermission = !inputTap.isInstalled
         let drawing = armView.ink.isDrawing
-        toolbar.setRevealed(!drawing && (near || Date() < revealUntil || needsPermission))
+        let wantHand = !drawing && (near || Date() < revealUntil || needsPermission)
+        let handWasRevealed = toolbar.revealed
+        toolbar.setRevealed(wantHand)
+        if toolbar.revealed != handWasRevealed {
+            syncChromeDock(on: screen, animated: true)
+        }
 
         let menuLikely = !menuRects.isEmpty || ownMenuOpen || Date() < menuOpeningUntil
             || Date().timeIntervalSince(lastButtonEvent) < 2
@@ -1012,12 +1066,20 @@ final class OverlayController {
         let interacting = (!key.isEmpty && CGEventSource.flagsState(.hidSystemState).contains(key)) || inputTap.interactPressing
         interactHeld = interacting
         menuHover = overMenu
-        let normal = !drawing && !Preferences.interactKeepsHand && (interacting || overMenu || ownMenuOpen)
+        let normal = Self.wantsSystemCursor(
+            ownMenuOpen: ownMenuOpen,
+            drawing: drawing,
+            interactKeepsHand: Preferences.interactKeepsHand,
+            interacting: interacting,
+            overMenu: overMenu
+        )
         setEscEnabled(menuRects.isEmpty && !ownMenuOpen)
 
         if normal != normalCursor {
             let at = "at \(Int(mouse.x)),\(Int(mouse.y))"
-            let why = interacting ? "interact key" : menuBar.contains(mouse) ? "menu bar" : "menu"
+            let why = ownMenuOpen ? "comment/menu"
+                : interacting ? "interact key"
+                : menuBar.contains(mouse) ? "menu bar" : "menu"
             Log.write(normal ? "real cursor (\(why)) \(at)" : "pointer back \(at)")
             normalCursor = normal
             armView.pointerHidden = normal
@@ -1248,6 +1310,21 @@ final class OverlayController {
         toolHotKeys = []
     }
 
+    /// Real (system) cursor while the annotate comment box / own menu is up, or when
+    /// interact/menu pass-through is active — never leave CGDisplayHideCursor on over a text field.
+    static func wantsSystemCursor(
+        ownMenuOpen: Bool,
+        drawing: Bool,
+        interactKeepsHand: Bool,
+        interacting: Bool,
+        overMenu: Bool
+    ) -> Bool {
+        if ownMenuOpen { return true }
+        if drawing { return false }
+        if interactKeepsHand { return false }
+        return interacting || overMenu
+    }
+
     private static func menuBarRect(_ screen: NSScreen) -> CGRect {
         let height = max(24, screen.frame.maxY - screen.visibleFrame.maxY)
         return CGRect(x: screen.frame.minX, y: screen.frame.maxY - height, width: screen.frame.width, height: height)
@@ -1433,10 +1510,7 @@ final class OverlayController {
             window.setFrame(screen.frame, display: false)
             armView.frame = NSRect(origin: .zero, size: screen.frame.size)
             toolbar.place(on: screen)
-            annotationHints.reposition(on: screen)
-            drawingTools.reposition(on: screen, above: annotationHints.frame)
-            videoToolbar.reposition(on: screen, above: annotationHints.frame)
-            videoDestinationPicker.reposition(on: screen, above: videoToolbar.frame)
+            syncChromeDock(on: screen, animated: false)
             updateCaptureOutline()
             if let link = displayLink,
                let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {

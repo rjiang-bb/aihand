@@ -99,6 +99,19 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         selection.pendingComposerSeed = trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Attach media to a specific chat’s composer without sending.
+    /// Scoped by session so a previously open chat can’t swallow the pending paths.
+    func setComposerAttachments(_ paths: [String], for sessionID: UUID) {
+        let existing = paths.filter { FileManager.default.fileExists(atPath: $0) }
+        guard !existing.isEmpty else {
+            Log.write("composer attach skipped — no files at \(paths)")
+            return
+        }
+        selection.pendingComposerAttach = PendingComposerAttach(sessionID: sessionID, paths: existing)
+        // Bump so SessionChatView re-consumes when that chat is already open.
+        selection.composerAttachEpoch &+= 1
+    }
+
     var screen: NSScreen? { panel.screen ?? NSScreen.main }
 
     /// Collapse the open chat so a New prompt can take focus cleanly.
@@ -1391,6 +1404,12 @@ enum SessionsListMetrics {
     }
 }
 
+/// Staged media for a chat composer — must match `sessionID` before SessionChatView consumes it.
+struct PendingComposerAttach: Equatable {
+    let sessionID: UUID
+    let paths: [String]
+}
+
 private final class SessionsPanelSelection: ObservableObject {
     @Published var selectedID: UUID?
     @Published var showShortcutBadges = false
@@ -1409,6 +1428,10 @@ private final class SessionsPanelSelection: ObservableObject {
     @Published var listPage = 0
     /// One-shot composer prefill for the next chat open (selection → new session).
     @Published var pendingComposerSeed: String?
+    /// One-shot media for a specific session’s composer (annotation / video → chat).
+    @Published var pendingComposerAttach: PendingComposerAttach?
+    /// Increments whenever attachments are staged (triggers consume even if chat is already open).
+    @Published var composerAttachEpoch: Int = 0
 
     var workspacePickerExpanded: Bool {
         !suppressWorkspacePicker && (showWorkspacePicker || pinnedWorkspacePicker)
@@ -1550,6 +1573,8 @@ private struct SessionsSidePanelView: View {
                     compact: true,
                     onPanelDragEnded: onPanelDragEnded,
                     composerSeed: $selection.pendingComposerSeed,
+                    composerAttach: $selection.pendingComposerAttach,
+                    composerAttachEpoch: selection.composerAttachEpoch,
                     onAddSelectionToNewSession: { text in
                         let quote = ChatSelectionQuote.blockquoted(text)
                         onNewWithDraft(quote.isEmpty ? text : quote + "\n")

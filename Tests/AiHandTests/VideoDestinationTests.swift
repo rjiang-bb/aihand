@@ -7,7 +7,7 @@ final class VideoDestinationTests: XCTestCase {
         XCTAssertEqual(all, [.comment, .save, .send, .discard])
         XCTAssertEqual(VideoDestination.comment.title, "Save + comment")
         XCTAssertEqual(VideoDestination.save.title, "Save video")
-        XCTAssertEqual(VideoDestination.send.title, "Send to agent")
+        XCTAssertEqual(VideoDestination.send.title, "Attach to chat")
         XCTAssertEqual(VideoDestination.discard.title, "Discard")
         XCTAssertTrue(VideoDestination.discard.isDestructive)
         XCTAssertFalse(VideoDestination.send.isDestructive)

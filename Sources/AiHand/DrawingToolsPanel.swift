@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// Tool + thickness strip shown above the annotation hint box while the hand is active.
 final class DrawingToolsPanel {
@@ -28,7 +29,7 @@ final class DrawingToolsPanel {
 
     var frame: CGRect { panel?.frame ?? .zero }
 
-    func show(on screen: NSScreen, above hintFrame: CGRect) {
+    func show(on screen: NSScreen, above hintFrame: CGRect, docked: Bool = false) {
         hide()
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let p = Panel(
@@ -109,7 +110,7 @@ final class DrawingToolsPanel {
         p.setContentSize(row.fittingSize)
 
         refreshSelection(dark: dark)
-        place(p, on: screen, above: hintFrame)
+        place(p, on: screen, above: hintFrame, docked: docked)
         p.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.2
@@ -147,24 +148,30 @@ final class DrawingToolsPanel {
         })
     }
 
-    func reposition(on screen: NSScreen, above hintFrame: CGRect) {
+    func reposition(on screen: NSScreen, above hintFrame: CGRect, docked: Bool = false, animated: Bool = false) {
         guard let p = panel else { return }
-        place(p, on: screen, above: hintFrame)
+        place(p, on: screen, above: hintFrame, docked: docked, animated: animated)
     }
 
-    private func place(_ p: NSPanel, on screen: NSScreen, above hintFrame: CGRect) {
+    private func place(
+        _ p: NSPanel,
+        on screen: NSScreen,
+        above hintFrame: CGRect,
+        docked: Bool = false,
+        animated: Bool = false
+    ) {
         let visible = screen.visibleFrame
-        let gap: CGFloat = 10
-        let y: CGFloat
-        if hintFrame.height > 0 {
-            y = hintFrame.maxY + gap
-        } else {
-            y = visible.minY + 178
-        }
-        p.setFrameOrigin(CGPoint(
+        let frame = NSRect(
             x: visible.midX - p.frame.width / 2,
-            y: y
-        ))
+            y: AnnotationChromeLayout.toolsOriginY(
+                hintHeight: hintFrame.height,
+                visibleMinY: visible.minY,
+                docked: docked
+            ),
+            width: p.frame.width,
+            height: p.frame.height
+        )
+        AnnotationHintPanel.move(p, to: frame, animated: animated)
     }
 
     private func refreshSelection(dark: Bool) {

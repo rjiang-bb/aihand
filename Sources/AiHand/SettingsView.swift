@@ -544,7 +544,7 @@ private struct AgentPage: View {
             }
             Card(title: "CLI") {
                 VStack(alignment: .leading, spacing: 0) {
-                    Row("Agent CLI", detail: "Cursor Agent, Claude Code, or Codex. Draw freely, then press Enter to comment or ⌘↩ to send.") {
+                    Row("Agent CLI", detail: "Cursor Agent, Claude Code, or Codex. Draw freely, then Enter to comment & send, or ⌘↩ to attach to chat.") {
                         Picker("", selection: Binding(
                             get: { Preferences.agentCLI },
                             set: { kind in

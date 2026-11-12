@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// Recording chrome shown above the hint strip while video mode is active.
 final class VideoToolbarPanel {
@@ -74,11 +75,11 @@ final class VideoToolbarPanel {
     var onStop: (() -> Void)?
     var frame: CGRect { panel?.frame ?? .zero }
 
-    func show(on screen: NSScreen, above hintFrame: CGRect, recording: Bool) {
+    func show(on screen: NSScreen, above hintFrame: CGRect, recording: Bool, docked: Bool = false) {
         // Reuse the live panel when chrome is re-shown in the same mode (avoids
         // resetting the timer label / tearing down the Stop button).
         if panel != nil, showingRecording == recording {
-            reposition(on: screen, above: hintFrame)
+            reposition(on: screen, above: hintFrame, docked: docked)
             return
         }
 
@@ -170,7 +171,7 @@ final class VideoToolbarPanel {
             height: fitted.height + inset.top + inset.bottom
         ))
 
-        place(p, on: screen, above: hintFrame)
+        place(p, on: screen, above: hintFrame, docked: docked)
         p.orderFrontRegardless()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.2
@@ -213,24 +214,30 @@ final class VideoToolbarPanel {
         })
     }
 
-    func reposition(on screen: NSScreen, above hintFrame: CGRect) {
+    func reposition(on screen: NSScreen, above hintFrame: CGRect, docked: Bool = false, animated: Bool = false) {
         guard let p = panel else { return }
-        place(p, on: screen, above: hintFrame)
+        place(p, on: screen, above: hintFrame, docked: docked, animated: animated)
     }
 
-    private func place(_ p: NSPanel, on screen: NSScreen, above hintFrame: CGRect) {
+    private func place(
+        _ p: NSPanel,
+        on screen: NSScreen,
+        above hintFrame: CGRect,
+        docked: Bool = false,
+        animated: Bool = false
+    ) {
         let visible = screen.visibleFrame
-        let gap: CGFloat = 10
-        let y: CGFloat
-        if hintFrame.height > 0 {
-            y = hintFrame.maxY + gap
-        } else {
-            y = visible.minY + 178
-        }
-        p.setFrameOrigin(CGPoint(
+        let frame = NSRect(
             x: visible.midX - p.frame.width / 2,
-            y: y
-        ))
+            y: AnnotationChromeLayout.toolsOriginY(
+                hintHeight: hintFrame.height,
+                visibleMinY: visible.minY,
+                docked: docked
+            ),
+            width: p.frame.width,
+            height: p.frame.height
+        )
+        AnnotationHintPanel.move(p, to: frame, animated: animated)
     }
 
     private func startBlink() {
