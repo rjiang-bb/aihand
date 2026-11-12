@@ -6,6 +6,10 @@ final class AnnotationHintTests: XCTestCase {
         let keys = AnnotationHintPanel.drawingParts.map(\.0)
         XCTAssertTrue(keys.contains("⌘D"), keys.joined(separator: ", "))
         XCTAssertTrue(keys.contains("Right-drag"), "right-drag video entry remains")
+        XCTAssertEqual(
+            AnnotationHintPanel.drawingParts.first { $0.0 == "Esc" }?.1,
+            "clear & exit"
+        )
     }
 
     func testVideoArmedAndSelectingHintsToggleBackWithCmdD() {

@@ -22,7 +22,7 @@ final class AnnotationHintPanel {
             ("⌘↩", "send to agent"),
             ("⌘D", "video"),
             ("Right-drag", "video"),
-            ("Esc", "exit"),
+            ("Esc", "clear & exit"),
         ]
     }
 

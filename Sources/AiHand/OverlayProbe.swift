@@ -196,12 +196,15 @@ enum OverlayProbe {
         // MARK: nothing leaked to the window underneath
         expect("swallow: drawing clicks never reached the window below", catcherView.clicks == 0, "clicks=\(catcherView.clicks)")
 
-        // MARK: Esc exits
+        // MARK: Esc clears ink and exits
+        drag(from: start, to: end)
+        expect("esc: stroke is on screen before Esc", overlay.inkStrokes == 1, "strokes=\(overlay.inkStrokes)")
         for down in [true, false] {
             CGEvent(keyboardEventSource: source, virtualKey: 0x35, keyDown: down)?.post(tap: .cghidEventTap)
             pump(0.1)
         }
         pump(0.3)
+        expect("esc: clears the drawing", overlay.inkStrokes == 0, "strokes=\(overlay.inkStrokes)")
         expect("esc: leaves the overlay", !overlay.isActive)
 
         overlay.deactivate()

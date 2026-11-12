@@ -1066,6 +1066,7 @@ final class OverlayController {
                     }
                     return
                 }
+                self.clearInk()
                 self.exit()
             }
         }
