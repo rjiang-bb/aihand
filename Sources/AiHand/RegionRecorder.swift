@@ -3,7 +3,7 @@ import AVFoundation
 import ScreenCaptureKit
 
 /// Records a rectangular region of a display to a temporary `.mov` via ScreenCaptureKit.
-final class RegionRecorder: NSObject {
+final class RegionRecorder: NSObject, @unchecked Sendable {
     enum RecorderError: Error, Equatable, LocalizedError {
         case permissionDenied
         case noDisplay
@@ -152,16 +152,16 @@ final class RegionRecorder: NSObject {
             throw RecorderError.startFailed(error.localizedDescription)
         }
 
-        lock.lock()
-        self.stream = stream
-        self.writer = assetWriter
-        self.writerInput = input
-        self.adaptor = pixelAdaptor
-        self.tempURL = url
-        self.startedSession = false
-        self.firstTimestamp = nil
-        self.isStopping = false
-        lock.unlock()
+        lock.withLock {
+            self.stream = stream
+            self.writer = assetWriter
+            self.writerInput = input
+            self.adaptor = pixelAdaptor
+            self.tempURL = url
+            self.startedSession = false
+            self.firstTimestamp = nil
+            self.isStopping = false
+        }
 
         do {
             try await stream.startCapture()
@@ -182,11 +182,10 @@ final class RegionRecorder: NSObject {
         guard isRecording else {
             throw RecorderError.notRecording
         }
-        lock.lock()
-        isStopping = true
-        let url = tempURL
-        let stream = self.stream
-        lock.unlock()
+        let (url, stream): (URL?, SCStream?) = lock.withLock {
+            isStopping = true
+            return (tempURL, self.stream)
+        }
 
         guard let url else {
             throw RecorderError.notRecording
@@ -201,13 +200,13 @@ final class RegionRecorder: NSObject {
         }
 
         let (didStart, status, error) = await finishWriter()
-        lock.lock()
-        self.stream = nil
-        self.writer = nil
-        self.writerInput = nil
-        self.adaptor = nil
-        self.tempURL = nil
-        lock.unlock()
+        lock.withLock {
+            self.stream = nil
+            self.writer = nil
+            self.writerInput = nil
+            self.adaptor = nil
+            self.tempURL = nil
+        }
 
         guard didStart, status == .completed else {
             try? FileManager.default.removeItem(at: url)
@@ -222,11 +221,10 @@ final class RegionRecorder: NSObject {
         stopElapsedTimer()
         isRecording = false
         startedAt = nil
-        lock.lock()
-        isStopping = true
-        let stream = self.stream
-        let url = tempURL
-        lock.unlock()
+        let (stream, url): (SCStream?, URL?) = lock.withLock {
+            isStopping = true
+            return (self.stream, tempURL)
+        }
 
         if let stream {
             try? await stream.stopCapture()
@@ -235,10 +233,10 @@ final class RegionRecorder: NSObject {
         if let url {
             try? FileManager.default.removeItem(at: url)
         }
-        lock.lock()
-        tempURL = nil
-        self.stream = nil
-        lock.unlock()
+        lock.withLock {
+            tempURL = nil
+            self.stream = nil
+        }
         Log.write("video recording cancelled")
     }
 
