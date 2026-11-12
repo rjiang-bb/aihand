@@ -443,8 +443,12 @@ final class AgentSessionRunner {
                 currentAssistantID = nil
                 refreshExploringActivity()
             } else if subtype == "completed" {
-                // Brief planning gap between tools.
-                session.liveActivity = TurnStatusCopy.planning
+                applyEditCompletion(json)
+                // Keep "Editing N files +X" while more edits remain in progress; else plan.
+                refreshExploringActivity()
+                if session.liveActivity?.hasPrefix("Edited ") == true {
+                    session.liveActivity = TurnStatusCopy.planning
+                }
             }
         case "thinking":
             // Some Cursor builds emit a top-level thinking event.
@@ -549,7 +553,10 @@ final class AgentSessionRunner {
                 currentAssistantID = nil
                 refreshExploringActivity()
             } else {
-                session.liveActivity = TurnStatusCopy.planning
+                refreshExploringActivity()
+                if session.liveActivity?.hasPrefix("Edited ") == true {
+                    session.liveActivity = TurnStatusCopy.planning
+                }
             }
         case "mcp_tool_call":
             if !completed {
@@ -727,6 +734,36 @@ final class AgentSessionRunner {
         }.joined()
     }
 
+    /// Cursor `editToolCall` / `writeToolCall` completed → rewrite last matching row with +/-.
+    private func applyEditCompletion(_ json: [String: Any]) {
+        guard let session,
+              let tool = json["tool_call"] as? [String: Any] else { return }
+        let payload = (tool["editToolCall"] as? [String: Any])
+            ?? (tool["writeToolCall"] as? [String: Any])
+        guard let payload else { return }
+        let success = (payload["result"] as? [String: Any])?["success"] as? [String: Any]
+        let args = payload["args"] as? [String: Any]
+        let rawPath = (success?["path"] as? String)
+            ?? (args?["path"] as? String)
+        guard let rawPath else { return }
+        let path = shortPath(rawPath)
+        let added = (success?["linesAdded"] as? Int)
+            ?? (success?["linesCreated"] as? Int)
+            ?? 0
+        let removed = (success?["linesRemoved"] as? Int) ?? 0
+        let label = TurnEditCopy.line(path: path, added: added, removed: removed)
+        // Patch the latest in-progress edit/write for this path (or any latest edit row).
+        if let idx = session.messages.lastIndex(where: {
+            $0.kind == .tool && TurnEditCopy.isFileEditTool($0.text)
+                && (TurnEditCopy.parse($0.text)?.path == path
+                    || $0.text.hasPrefix("Editing \(path)")
+                    || $0.text.hasPrefix("Writing \(path)"))
+        }) {
+            session.messages[idx].text = label
+            session.preview = label
+        }
+    }
+
     private func toolLabel(_ json: [String: Any]) -> String {
         guard let tool = json["tool_call"] as? [String: Any] else {
             return "Tool"
@@ -863,7 +900,13 @@ final class AgentSessionRunner {
             if msg.kind == .tool { texts.append(msg.text) }
         }
         texts.reverse()
-        session.liveActivity = TurnStatusCopy.exploring(toolTexts: texts) ?? TurnStatusCopy.planning
+        // In-progress file edits → Cursor-style "Editing N files +X" (not Exploring).
+        if let editing = TurnEditCopy.activityHeader(toolTexts: texts.filter(TurnEditCopy.isFileEditTool)) {
+            session.liveActivity = editing
+            return
+        }
+        let other = texts.filter { !TurnEditCopy.isFileEditTool($0) }
+        session.liveActivity = TurnStatusCopy.exploring(toolTexts: other) ?? TurnStatusCopy.planning
     }
 
     private func handleTermination(status: Int32) {

@@ -23,7 +23,12 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 - **Draw** — freehand, rectangle, arrow, and text; thickness and ink color; lines can fade
 - **Screenshot annotate** — draw on screen or a window, comment, and send to Cursor Agent, Claude Code, or Codex
 - **Video annotate** — right-drag a region, record it, then comment or send the clip to an agent (preview plays at the capture spot)
-- **AI sessions** — chat, follow-ups, skills (`/`), favorite models, and per-folder working directories
+- **AI sessions** — chat, queued follow-ups, skills (`/`), built-in `/plan`, favorite models, and per-folder working directories
+- **Git worktrees** — branch-scoped sessions; switch or delete worktrees from the workspace picker
+- **SSH workspaces** — run sessions and agents against remote machines
+- **Rich composer** — Markdown editing, file `@` autocomplete, image/video/file attachments (drag in or paste), and Cursor-style turn status chips
+- **Chat** — Markdown transcript with copy, image previews, and per-turn edit summaries
+- **Video destination** — after recording, pick where the clip goes (save, preview, or send to an agent)
 
 <p align="center"><strong>Draw → ask the agent</strong></p>
 
@@ -60,8 +65,21 @@ Forked from [nilbuild/tinyhand](https://github.com/nilbuild/tinyhand).
 | **⌘/** | Cycle agent model (chat / annotate comment) |
 | **Enter** | Comment, then send to agent |
 | **⌘↩** | Send annotated screenshot to agent |
+| **⌘D** | Toggle drawing ↔ video mode |
 | **Right-drag** | Enter video mode (select region) |
-| **Esc** | Exit pointer |
+| **Esc** | Clear ink, then exit pointer |
+
+### Sessions panel
+
+| | |
+|---|---|
+| **⌘N** | New session |
+| **⌘1–9** | Jump to session (hold **⌘** to show hints) |
+| **⌘↑ / ⌘↓** | Previous / next session |
+| **⌘/** | Cycle favorite models |
+| **⌘D** | Start drawing |
+| **⌘W** | Archive session (closes previews / Settings first when focused) |
+| **Esc** | Cancel queued-follow-up edit, then close chat |
 
 ### Video mode
 

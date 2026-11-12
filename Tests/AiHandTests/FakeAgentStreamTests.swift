@@ -41,6 +41,24 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
         XCTAssertTrue(t[6].contains("Sources"), t[6])
     }
 
+    func testEditCompletionRewritesLabelWithDiffStats() throws {
+        let s = try run([
+            #"{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/VideoDestinationPicker.swift"}}}}"#,
+            #"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/VideoDestinationPicker.swift"},"result":{"success":{"path":"/w/Sources/VideoDestinationPicker.swift","linesAdded":85,"linesRemoved":22}}}}}"#,
+            #"{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/SoftChrome.swift"}}}}"#,
+            #"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/SoftChrome.swift"},"result":{"success":{"path":"/w/Sources/SoftChrome.swift","linesAdded":5,"linesRemoved":0}}}}}"#,
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"c"}"#,
+        ])
+        let t = tools(s)
+        XCTAssertEqual(t.count, 2, "\(t)")
+        XCTAssertEqual(t[0], "Edited Sources/VideoDestinationPicker.swift +85 -22")
+        XCTAssertEqual(t[1], "Edited Sources/SoftChrome.swift +5")
+        let sum = TurnEditCopy.summarize(toolTexts: t)
+        XCTAssertEqual(sum?.fileCount, 2)
+        XCTAssertEqual(sum?.added, 90)
+        XCTAssertEqual(sum?.removed, 22)
+    }
+
     func testCursorLongShellCommandIsClippedToOneLine() throws {
         let long = String(repeating: "x", count: 200)
         let s = try run([
@@ -112,6 +130,26 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
         waitUntil("run ends") { s.status != .working }
         XCTAssertNil(s.liveActivity)
         XCTAssertTrue(s.messages.contains { $0.kind == .status && $0.text.hasPrefix("Worked for") })
+    }
+
+    func testInProgressEditsSetEditingLiveActivity() throws {
+        try? FileManager.default.removeItem(at: fakeDir.appendingPathComponent("lines.txt"))
+        let exe = fakeDir.appendingPathComponent("fake-agent")
+        let body = """
+        #!/bin/bash
+        echo '{"type":"system","session_id":"c"}'
+        echo '{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/a.swift"}}}}'
+        echo '{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/a.swift"},"result":{"success":{"path":"/w/a.swift","linesAdded":79,"linesRemoved":0}}}}}'
+        echo '{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/b.swift"}}}}'
+        sleep 1.5
+        echo '{"type":"result","is_error":false,"result":"ok","session_id":"c"}'
+        """
+        try body.write(to: exe, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe.path)
+        let s = try send("go")
+        waitUntil("editing live activity") { s.liveActivity == "Editing 2 files +79" }
+        waitUntil("run ends") { s.status != .working }
+        XCTAssertNil(s.liveActivity)
     }
 
     func testGarbageAndBlankLinesAreIgnored() throws {

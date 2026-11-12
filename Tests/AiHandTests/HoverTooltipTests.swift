@@ -58,19 +58,19 @@ final class ComposerSendButtonIconTests: XCTestCase {
     func testSteerGlyphOnlyWhenCommandHeldInFollowUpPrompt() {
         XCTAssertEqual(
             ComposerSendButtonIcon.systemName(isFollowUp: true, commandHeld: true, promptFocused: true),
-            "steeringwheel.circle.fill"
+            "steeringwheel.circle"
         )
         XCTAssertEqual(
             ComposerSendButtonIcon.systemName(isFollowUp: true, commandHeld: false, promptFocused: true),
-            "arrow.up.circle.fill"
+            "arrow.up.circle"
         )
         XCTAssertEqual(
             ComposerSendButtonIcon.systemName(isFollowUp: true, commandHeld: true, promptFocused: false),
-            "arrow.up.circle.fill"
+            "arrow.up.circle"
         )
         XCTAssertEqual(
             ComposerSendButtonIcon.systemName(isFollowUp: false, commandHeld: true, promptFocused: true),
-            "arrow.up.circle.fill"
+            "arrow.up.circle"
         )
     }
 }

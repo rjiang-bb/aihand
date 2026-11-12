@@ -13,6 +13,15 @@ enum TurnStatusCopy {
         "Thought \(formatSeconds(seconds))"
     }
 
+    /// Transcript nests Thought chips + tool rows under a Worked disclosure.
+    static func isWorkedChip(_ text: String) -> Bool {
+        text.hasPrefix("Worked for ")
+    }
+
+    static func isThoughtChip(_ text: String) -> Bool {
+        text.hasPrefix("Thought ")
+    }
+
     /// Aggregate tool activity for the live footer / collapsed group label.
     /// Returns nil when there are no categorized tools.
     static func exploring(toolTexts: [String]) -> String? {

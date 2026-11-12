@@ -8,6 +8,10 @@ final class TurnStatusCopyTests: XCTestCase {
         XCTAssertEqual(TurnStatusCopy.worked(seconds: 60), "Worked for 1m")
         XCTAssertEqual(TurnStatusCopy.worked(seconds: 75), "Worked for 1m 15s")
         XCTAssertEqual(TurnStatusCopy.thought(seconds: 2), "Thought 2s")
+        XCTAssertTrue(TurnStatusCopy.isWorkedChip("Worked for 10s"))
+        XCTAssertFalse(TurnStatusCopy.isWorkedChip("Thought 2s"))
+        XCTAssertTrue(TurnStatusCopy.isThoughtChip("Thought 2s"))
+        XCTAssertFalse(TurnStatusCopy.isThoughtChip("Worked for 10s"))
         XCTAssertEqual(TurnStatusCopy.planning, "Planning next moves")
     }
 

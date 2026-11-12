@@ -44,12 +44,41 @@ final class VideoDestinationPicker {
         override var canBecomeMain: Bool { false }
     }
 
+    /// Passes clicks through to the enclosing `RowButton`.
+    private final class HitThroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    /// Hover matches chat session cards: inset white stroke, no fill.
     private final class RowButton: NSButton {
         var destination: VideoDestination = .save
         var dark = true
         private var tracking: NSTrackingArea?
+        private let hoverBorder = CALayer()
         private var hovering = false {
             didSet { refreshChrome() }
+        }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.cornerRadius = 8
+            layer?.cornerCurve = .continuous
+            hoverBorder.cornerRadius = 5.5
+            hoverBorder.cornerCurve = .continuous
+            hoverBorder.borderWidth = 1.25
+            hoverBorder.opacity = 0
+            layer?.addSublayer(hoverBorder)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+        override func layout() {
+            super.layout()
+            // Match SoftChrome softHoverInnerBorder inset (2.5).
+            hoverBorder.frame = bounds.insetBy(dx: 2.5, dy: 2.5)
+            hoverBorder.cornerRadius = max(0, (layer?.cornerRadius ?? 8) - 2.5)
         }
 
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -92,8 +121,9 @@ final class VideoDestinationPicker {
         }
 
         func refreshChrome() {
-            let fill: CGFloat = hovering ? (dark ? 0.22 : 0.08) : 0
-            layer?.backgroundColor = NSColor(white: dark ? 1 : 0, alpha: fill).cgColor
+            layer?.backgroundColor = NSColor.clear.cgColor
+            hoverBorder.borderColor = SoftChrome.hoverInnerBorderNSColor(dark: dark).cgColor
+            hoverBorder.opacity = hovering ? 1 : 0
         }
     }
 
@@ -172,7 +202,7 @@ final class VideoDestinationPicker {
         ])
         stack.layoutSubtreeIfNeeded()
         let fitted = stack.fittingSize
-        p.setContentSize(NSSize(width: max(240, fitted.width + inset * 2), height: fitted.height + inset * 2))
+        p.setContentSize(NSSize(width: max(260, fitted.width + inset * 2), height: fitted.height + inset * 2))
 
         place(p, on: screen, above: anchor)
         p.orderFrontRegardless()
@@ -222,36 +252,72 @@ final class VideoDestinationPicker {
         row.dark = dark
         row.isBordered = false
         row.bezelStyle = .regularSquare
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 8
-        row.layer?.cornerCurve = .continuous
         row.setButtonType(.momentaryChange)
         row.target = self
         row.action = #selector(picked(_:))
+        row.title = ""
+        row.image = nil
 
         let titleColor: NSColor = dest.isDestructive
             ? .systemRed
             : (dark ? .white : .black)
         let muted = titleColor.withAlphaComponent(0.55)
 
+        let content = HitThroughView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
-        row.image = NSImage(systemSymbolName: dest.symbolName, accessibilityDescription: dest.title)?
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: dest.symbolName, accessibilityDescription: dest.title)?
             .withSymbolConfiguration(config)
-        row.imagePosition = .imageLeading
-        row.imageHugsTitle = true
-        row.contentTintColor = titleColor
-        row.attributedTitle = {
-            let out = NSMutableAttributedString(string: "  \(dest.title)", attributes: [
-                .foregroundColor: titleColor,
-                .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            ])
-            out.append(NSAttributedString(string: "   \(dest.shortcut)", attributes: [
-                .foregroundColor: muted,
-                .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            ]))
-            return out
-        }()
-        row.heightAnchor.constraint(equalToConstant: 34).isActive = true
+        icon.contentTintColor = titleColor
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: dest.title)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = titleColor
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let shortcut = NSTextField(labelWithString: dest.shortcut)
+        shortcut.font = .systemFont(ofSize: 12, weight: .medium)
+        shortcut.textColor = muted
+        shortcut.alignment = .right
+        shortcut.setContentHuggingPriority(.required, for: .horizontal)
+        shortcut.setContentCompressionResistancePriority(.required, for: .horizontal)
+        shortcut.translatesAutoresizingMaskIntoConstraints = false
+
+        content.addSubview(icon)
+        content.addSubview(label)
+        content.addSubview(shortcut)
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 10),
+            icon.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 14),
+            icon.heightAnchor.constraint(equalToConstant: 14),
+
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            label.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: shortcut.leadingAnchor, constant: -10),
+
+            shortcut.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -10),
+            shortcut.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            shortcut.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 10),
+
+            content.heightAnchor.constraint(equalToConstant: 34),
+        ])
+
+        row.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            content.topAnchor.constraint(equalTo: row.topAnchor),
+            content.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            row.heightAnchor.constraint(equalToConstant: 34),
+        ])
         row.setContentHuggingPriority(.defaultLow, for: .horizontal)
         row.refreshChrome()
         return row

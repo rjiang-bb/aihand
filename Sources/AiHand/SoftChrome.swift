@@ -18,6 +18,11 @@ enum SoftChrome {
     static func hoverInnerBorder(dark: Bool) -> Color {
         dark ? Color.white.opacity(0.92) : Color(white: 0.28)
     }
+
+    /// AppKit counterpart of `hoverInnerBorder` (session / menu row hover stroke).
+    static func hoverInnerBorderNSColor(dark: Bool) -> NSColor {
+        dark ? NSColor.white.withAlphaComponent(0.92) : NSColor(white: 0.28, alpha: 1)
+    }
 }
 
 extension View {

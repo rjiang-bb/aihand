@@ -80,6 +80,15 @@ Do **not** let the Archive Session menu key equivalent archive while a preview o
 
 The last open chat per workspace is written to `Preferences.openChatByWorkspace` on every select/close (not only on clean quit). On launch, `SessionsSidePanel` restores `selectedID` when that session still exists so force-quit doesn’t leave the list with nothing selected.
 
+## UI icons
+
+All UI chrome uses **monochrome outline** icons — same family as the sessions header (`gearshape`, `xmark`, chevrons).
+
+- Prefer SF Symbols **without** `.fill` (e.g. `plus.circle`, `arrow.up.circle`, `pencil`, `keyboard`). Color via `foregroundStyle` / `currentColor`, not multi-color emoji.
+- Transcript / WKWebView rows: inline SVG strokes with `stroke="currentColor"` (see `outlineGlyph` in `ChatTranscriptView`) — never ✏️📄💭 or other emoji glyphs.
+- Do **not** introduce new filled circle badges (`*.circle.fill`) or hierarchical multi-tone plates unless matching an existing SoftChrome control that already needs an accent fill for state (and even then prefer outline + `foregroundStyle`).
+- Keep weight/size consistent with neighbors (composer actions ~22–26pt, list/header ~12–14pt, transcript glyphs ~12px).
+
 ## Hover tooltips
 
 Use `hoverTooltip(_:)` (floating tip window in `HoverTooltip.swift`) for all control tips — including sessions header, composer actions, queue chips, and Settings. Do **not** use SwiftUI `.help` on floating / nonactivating panels; it often never appears.

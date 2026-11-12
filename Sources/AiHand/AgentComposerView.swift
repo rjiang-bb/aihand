@@ -307,9 +307,9 @@ struct AgentComposerView: View {
         Button {
             plusMenuOpen.toggle()
         } label: {
-            Image(systemName: "plus.circle.fill")
+            Image(systemName: "plus.circle")
                 .font(.system(size: 22, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
+                .symbolRenderingMode(.monochrome)
                 .foregroundStyle(Color.primary.opacity(0.72))
                 .frame(width: 24, height: 24)
                 .softHoverInnerBorder(Circle(), inset: 1.25)
@@ -326,9 +326,9 @@ struct AgentComposerView: View {
     private var composerActionButtons: some View {
         if kind == .followUp, let onDraw, !isEditingQueued {
             Button(action: onDraw) {
-                Image(systemName: "pencil.tip.crop.circle.fill")
+                Image(systemName: "pencil.tip.crop.circle")
                     .font(.system(size: 26))
-                    .symbolRenderingMode(.hierarchical)
+                    .symbolRenderingMode(.monochrome)
                     .foregroundStyle(Color.primary.opacity(0.85))
                     .softHoverInnerBorder(Circle(), inset: 2.5)
             }
@@ -342,13 +342,10 @@ struct AgentComposerView: View {
                 guard canSend else { return }
                 onConfirmEdit?()
             }) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(
-                        canSend ? Color.white : Color.secondary.opacity(0.55),
-                        canSend ? Color.accentColor : Color.secondary.opacity(0.25)
-                    )
+                Image(systemName: "checkmark.circle")
+                    .font(.system(size: 26, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.45))
                     .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
             }
             .buttonStyle(.pointerPlain)
@@ -358,9 +355,9 @@ struct AgentComposerView: View {
         } else if isWorking, let onStop {
             // Gray stop replaces Send while a turn runs; Enter still queues, ⌘↩ steers.
             Button(action: onStop) {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.hierarchical)
+                Image(systemName: "stop.circle")
+                    .font(.system(size: 26, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
                     .foregroundStyle(Color.secondary.opacity(0.9))
                     .softHoverInnerBorder(Circle(), inset: 2.5)
             }
@@ -373,12 +370,9 @@ struct AgentComposerView: View {
                 onSend()
             }) {
                 Image(systemName: sendButtonSymbol)
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(
-                        canSend ? Color.white : Color.secondary.opacity(0.55),
-                        canSend ? Color.accentColor : Color.secondary.opacity(0.25)
-                    )
+                    .font(.system(size: 26, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.45))
                     .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
             }
             .buttonStyle(.pointerPlain)
@@ -1158,9 +1152,9 @@ enum ComposerFieldEditor {
 enum ComposerSendButtonIcon {
     static func systemName(isFollowUp: Bool, commandHeld: Bool, promptFocused: Bool) -> String {
         if isFollowUp, commandHeld, promptFocused {
-            return "steeringwheel.circle.fill"
+            return "steeringwheel.circle"
         }
-        return "arrow.up.circle.fill"
+        return "arrow.up.circle"
     }
 }
 
@@ -1607,8 +1601,9 @@ private struct ComposerAttachmentThumb: View {
                                 .aspectRatio(contentMode: .fill)
                         } else {
                             Color.primary.opacity(0.08)
-                            Image(systemName: attachment.isVideo ? "video.fill" : "photo")
+                            Image(systemName: attachment.isVideo ? "video" : "photo")
                                 .font(.system(size: 16, weight: .medium))
+                                .symbolRenderingMode(.monochrome)
                                 .foregroundStyle(Color.primary.opacity(0.45))
                         }
                     }
@@ -1620,10 +1615,10 @@ private struct ComposerAttachmentThumb: View {
                     )
 
                     if attachment.isVideo {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 18))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, Color.black.opacity(0.45))
+                        Image(systemName: "play.circle")
+                            .font(.system(size: 18, weight: .regular))
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(Color.primary.opacity(0.85))
                     }
                 }
             }
