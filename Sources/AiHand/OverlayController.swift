@@ -69,6 +69,7 @@ final class OverlayController {
     /// Hint/tools sit raised while the hand picker is visible; dock to the bottom once it fades.
     private var chromeDocked = false
     private let drawingTools = DrawingToolsPanel()
+    private let modeBadge = ModeBadgePanel()
     private let videoToolbar = VideoToolbarPanel()
     private let videoDestinationPicker = VideoDestinationPicker()
     private let textEditor = InkTextEditor()
@@ -110,6 +111,8 @@ final class OverlayController {
 
     var isEditingText: Bool { textEditor.isEditing }
     var isVideoModeActive: Bool { videoPhase != .off }
+    /// True while the system cursor is parked so underlying hover/tooltips stay put.
+    var isPointerParked: Bool { DrawingPointerPark.isParked }
 
     /// Screen the overlay currently tracks (mouse / active display).
     var activeScreen: NSScreen? { currentScreen() }
@@ -138,7 +141,7 @@ final class OverlayController {
         }
         textEditor.onFrameChanged = { [weak self] in
             guard let self, let screen = self.currentScreen() else { return }
-            self.updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+            self.updateZones(mouse: DrawingPointerPark.pointerLocation, screen: screen)
         }
 
         inputTap.onLeftMouseDown = { [weak self] in
@@ -315,7 +318,7 @@ final class OverlayController {
         }
         setDrawVideoToggleHotKeyEnabled(!suspended)
         if let screen = currentScreen() {
-            updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+            updateZones(mouse: DrawingPointerPark.pointerLocation, screen: screen)
         }
     }
 
@@ -387,7 +390,7 @@ final class OverlayController {
             fontSize: fontSize,
             on: screen
         )
-        updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+        updateZones(mouse: DrawingPointerPark.pointerLocation, screen: screen)
     }
 
     private func finishTextEditing(commit text: String?) {
@@ -395,7 +398,7 @@ final class OverlayController {
             if isActive {
                 setAnnotationHotKeysEnabled(true)
                 if let screen = currentScreen() {
-                    updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+                    updateZones(mouse: DrawingPointerPark.pointerLocation, screen: screen)
                 }
             }
         }
@@ -485,6 +488,7 @@ final class OverlayController {
         guard visible, isActive, let screen = videoScreen ?? currentScreen() else {
             annotationHints.hide()
             drawingTools.hide()
+            modeBadge.hide()
             videoToolbar.hide()
             videoDestinationPicker.hide()
             return
@@ -499,16 +503,21 @@ final class OverlayController {
             videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.drawingParts, docked: chromeDocked)
             drawingTools.show(on: screen, above: annotationHints.frame, docked: chromeDocked)
+            // Drawing: title sits above the tools toolbar.
+            modeBadge.show(mode: .drawing, on: screen, above: drawingTools.frame)
         case .armed:
             drawingTools.hide()
             videoToolbar.hide()
             videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.videoArmedParts, docked: chromeDocked)
+            // Video: title sits above the hint bar.
+            modeBadge.show(mode: .video, on: screen, above: annotationHints.frame)
         case .selecting:
             drawingTools.hide()
             videoToolbar.hide()
             videoDestinationPicker.hide()
             annotationHints.show(on: screen, parts: AnnotationHintPanel.videoSelectingParts, docked: chromeDocked)
+            modeBadge.show(mode: .video, on: screen, above: annotationHints.frame)
         case .recording:
             drawingTools.hide()
             videoDestinationPicker.hide()
@@ -517,6 +526,7 @@ final class OverlayController {
             annotationHints.show(on: screen, parts: AnnotationHintPanel.videoRecordingParts, docked: true)
             videoToolbar.show(on: screen, above: annotationHints.frame, recording: true, docked: true)
             videoToolbar.setElapsed(videoElapsedFrozen)
+            modeBadge.show(mode: .video, on: screen, above: annotationHints.frame)
         case .ready:
             drawingTools.hide()
             // Picker lists destinations + shortcuts; drop the recording hint strip.
@@ -525,6 +535,11 @@ final class OverlayController {
             videoToolbar.show(on: screen, above: .zero, recording: false, docked: true)
             videoToolbar.setElapsed(videoElapsedFrozen)
             videoDestinationPicker.show(on: screen, above: videoToolbar.frame)
+            // No hint bar — park above the destination / stop stack.
+            let top = videoDestinationPicker.frame.height > 0
+                ? videoDestinationPicker.frame
+                : videoToolbar.frame
+            modeBadge.show(mode: .video, on: screen, above: top)
         }
     }
 
@@ -545,15 +560,34 @@ final class OverlayController {
             on: screen, above: annotationHints.frame, docked: chromeDocked, animated: slide)
         videoToolbar.reposition(
             on: screen, above: annotationHints.frame, docked: chromeDocked, animated: slide)
+        repositionModeBadge(on: screen, animated: slide)
         if slide {
             // Destination picker sits above the video toolbar; snap after the slide so it tracks.
             DispatchQueue.main.asyncAfter(deadline: .now() + AnnotationChromeLayout.slideDuration) { [weak self] in
                 guard let self, let screen = self.videoScreen ?? self.currentScreen() else { return }
                 self.videoDestinationPicker.reposition(on: screen, above: self.videoToolbar.frame)
+                self.repositionModeBadge(on: screen, animated: false)
             }
         } else {
             videoDestinationPicker.reposition(on: screen, above: videoToolbar.frame)
+            repositionModeBadge(on: screen, animated: false)
         }
+    }
+
+    private func repositionModeBadge(on screen: NSScreen, animated: Bool) {
+        let above: CGRect
+        switch videoPhase {
+        case .off:
+            above = drawingTools.frame.height > 0 ? drawingTools.frame : annotationHints.frame
+        case .armed, .selecting, .recording:
+            above = annotationHints.frame
+        case .ready:
+            above = videoDestinationPicker.frame.height > 0
+                ? videoDestinationPicker.frame
+                : videoToolbar.frame
+        }
+        guard above.height > 0 else { return }
+        modeBadge.reposition(on: screen, above: above, animated: animated)
     }
 
     private func enterArmedVideoMode() {
@@ -672,6 +706,7 @@ final class OverlayController {
         // Real cursor + pass-through clicks; keep overlay up so the recording frame is visible
         // (AiHand windows are excluded from ScreenCaptureKit).
         inputTap.setActive(false)
+        DrawingPointerPark.unpark(warpToLogical: true)
         armView.pointerHidden = true
         normalCursor = true
         CursorHider.show()
@@ -830,6 +865,9 @@ final class OverlayController {
             window.orderFrontRegardless()
             window.ignoresMouseEvents = true
             inputTap.setActive(inputTap.isInstalled)
+            if inputTap.isInstalled {
+                DrawingPointerPark.park()
+            }
             normalCursor = false
             armView.pointerHidden = false
             CursorHider.hide()
@@ -839,7 +877,7 @@ final class OverlayController {
         videoScreen = nil
         if let screen {
             showChrome(on: screen)
-            updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+            updateZones(mouse: DrawingPointerPark.pointerLocation, screen: screen)
         }
         setAnnotationHotKeysEnabled(true)
         setDrawVideoToggleHotKeyEnabled(true)
@@ -863,6 +901,7 @@ final class OverlayController {
         videoToolbar.hide()
         videoDestinationPicker.hide()
         annotationHints.hide()
+        modeBadge.hide()
     }
 
     private func drag() {
@@ -885,7 +924,7 @@ final class OverlayController {
         guard let frame = currentFrame else {
             return nil
         }
-        let mouse = NSEvent.mouseLocation
+        let mouse = DrawingPointerPark.pointerLocation
         return CGPoint(x: mouse.x - frame.origin.x, y: mouse.y - frame.origin.y)
     }
 
@@ -922,6 +961,9 @@ final class OverlayController {
         let installed = inputTap.install()
         inputTap.interactKey = Preferences.interactKey.cgFlags
         inputTap.setActive(installed)
+        if installed {
+            DrawingPointerPark.park()
+        }
         Log.write("activate trusted=\(AXIsProcessTrusted()) tapInstalled=\(installed)")
 
         // Hand picker must be revealed (and revealUntil set) *before* aimFrame/serviceTick,
@@ -994,11 +1036,13 @@ final class OverlayController {
         armView.setCaptureOutline(localRect: nil)
         armView.setVideoSelectionOutline(localRect: nil)
         savePreview.hide()
+        DrawingPointerPark.unpark(warpToLogical: true)
         window.ignoresMouseEvents = true
         window.orderOut(nil)
         toolbar.hide()
         annotationHints.hide()
         drawingTools.hide()
+        modeBadge.hide()
         videoToolbar.hide()
         normalCursor = false
         armView.pointerHidden = false
@@ -1015,7 +1059,7 @@ final class OverlayController {
     func showSavePreview(fileURL: URL, image: NSImage, on screen: NSScreen) {
         savePreview.show(fileURL: fileURL, image: image, on: screen)
         if let screen = currentScreen() {
-            updateZones(mouse: NSEvent.mouseLocation, screen: screen)
+            updateZones(mouse: DrawingPointerPark.pointerLocation, screen: screen)
         }
     }
 
@@ -1112,6 +1156,23 @@ final class OverlayController {
             rects.append(OverlayController.cgRect(previewFrame))
         }
         inputTap.passThroughRects = rects
+        let overChrome = rects.contains { $0.contains(cgMouse) }
+        syncPointerPark(wantHandCursor: !normal && !interacting && !overChrome)
+    }
+
+    /// Park the system cursor while the hand is active so underlying hover UI stays put.
+    /// Unpark (and warp to the hand) when the real cursor is needed — menus, our chrome,
+    /// the interact key, the comment box. Never park without the tap: it is what moves the hand.
+    private func syncPointerPark(wantHandCursor: Bool) {
+        let drawingPhases = videoPhase == .off || videoPhase == .armed || videoPhase == .selecting
+        let shouldPark = isActive && inputTap.isInstalled && drawingPhases && wantHandCursor
+        if shouldPark {
+            if !DrawingPointerPark.isParked {
+                DrawingPointerPark.park(at: DrawingPointerPark.pointerLocation)
+            }
+        } else if DrawingPointerPark.isParked {
+            DrawingPointerPark.unpark(warpToLogical: true)
+        }
     }
 
     private func setEscEnabled(_ enabled: Bool) {
@@ -1404,10 +1465,13 @@ final class OverlayController {
     }
 
     private func currentScreen() -> NSScreen? {
-        let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+        screenForPointer(DrawingPointerPark.pointerLocation)
             ?? NSScreen.main
             ?? NSScreen.screens.first
+    }
+
+    private func screenForPointer(_ point: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
     }
 
     private func runServiceTimer() {
@@ -1476,13 +1540,14 @@ final class OverlayController {
         let events: NSEvent.EventTypeMask = [
             .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
         ]
-        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: { [weak self] _ in
+        let handle: (NSEvent) -> Void = { [weak self] _ in
             self?.aimFrame()
-        }) {
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: events, handler: handle) {
             mouseAimMonitors.append(global)
         }
-        if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { [weak self] event in
-            self?.aimFrame()
+        if let local = NSEvent.addLocalMonitorForEvents(matching: events, handler: { event in
+            handle(event)
             return event
         }) {
             mouseAimMonitors.append(local)
@@ -1497,8 +1562,8 @@ final class OverlayController {
     /// Vsync / mouse-driven: keep the hand on the cursor with minimal latency.
     private func aimFrame() {
         guard isActive else { return }
-        let mouse = NSEvent.mouseLocation
-        guard let screen = currentScreen() else { return }
+        let mouse = DrawingPointerPark.pointerLocation
+        guard let screen = screenForPointer(mouse) ?? currentScreen() else { return }
 
         if currentFrame != screen.frame {
             let moving = currentFrame != nil
@@ -1559,7 +1624,7 @@ final class OverlayController {
         if videoPhase == .recording || videoPhase == .ready {
             return
         }
-        let mouse = NSEvent.mouseLocation
+        let mouse = DrawingPointerPark.pointerLocation
         guard let screen = currentScreen() else { return }
 
         updateZones(mouse: mouse, screen: screen)

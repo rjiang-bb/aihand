@@ -195,6 +195,10 @@ enum OverlayProbe {
 
         // MARK: nothing leaked to the window underneath
         expect("swallow: drawing clicks never reached the window below", catcherView.clicks == 0, "clicks=\(catcherView.clicks)")
+        // Over the toolbar the real cursor is released so the click lands; it re-parks off chrome.
+        move(start)
+        pump(0.3)
+        expect("park: system cursor parked again once the hand leaves the toolbar", overlay.isPointerParked)
 
         // MARK: Esc clears ink and exits
         drag(from: start, to: end)
@@ -206,6 +210,7 @@ enum OverlayProbe {
         pump(0.3)
         expect("esc: clears the drawing", overlay.inkStrokes == 0, "strokes=\(overlay.inkStrokes)")
         expect("esc: leaves the overlay", !overlay.isActive)
+        expect("park: released after exit", !overlay.isPointerParked)
 
         overlay.deactivate()
         pump(0.1)

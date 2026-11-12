@@ -16,8 +16,15 @@ enum AnnotationChromeLayout {
     static let toolsGapAboveHint: CGFloat = 10
     /// Fallback tools height when the hint strip isn't shown (armed/recording chrome).
     static let toolsFallbackAboveHint: CGFloat = 50
+    /// Gap between the top chrome strip and the Drawing / Video mode title pill.
+    static let modeBadgeGapAboveChrome: CGFloat = 10
 
     static let slideDuration: TimeInterval = 0.35
+
+    /// AppKit Y for the mode badge sitting above `belowChromeMaxY`.
+    static func modeBadgeOriginY(belowChromeMaxY: CGFloat) -> CGFloat {
+        belowChromeMaxY + modeBadgeGapAboveChrome
+    }
 
     static func hintOriginY(visibleMinY: CGFloat, docked: Bool) -> CGFloat {
         visibleMinY + (docked ? dockedHintBottomInset : raisedHintBottomInset)

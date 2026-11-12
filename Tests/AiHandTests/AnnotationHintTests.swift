@@ -2,6 +2,15 @@ import XCTest
 @testable import AiHand
 
 final class AnnotationHintTests: XCTestCase {
+    func testModeBadgeTitles() {
+        XCTAssertEqual(ModeBadgePanel.Mode.drawing.title, "Drawing mode")
+        XCTAssertEqual(ModeBadgePanel.Mode.video.title, "Video mode")
+    }
+
+    func testModeBadgeSitsAboveChrome() {
+        XCTAssertEqual(AnnotationChromeLayout.modeBadgeOriginY(belowChromeMaxY: 200), 210)
+    }
+
     func testChromeLayoutDocksBelowHandPicker() {
         let minY: CGFloat = 100
         let raised = AnnotationChromeLayout.raisedHintBottomInset

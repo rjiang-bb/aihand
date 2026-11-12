@@ -94,6 +94,12 @@ if CommandLine.arguments.contains("--composer-probe") {
 if CommandLine.arguments.contains("--overlay-probe") {
     exit(OverlayProbe.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--tooltip-host") {
+    TooltipHost.run()
+}
+if CommandLine.arguments.contains("--tooltip-freeze-probe") {
+    exit(TooltipFreezeProbe.run() ? 0 : 1)
+}
 if CommandLine.arguments.contains("--panel-probe") {
     exit(SessionsPanelProbe.run() ? 0 : 1)
 }
