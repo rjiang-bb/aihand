@@ -41,8 +41,9 @@ final class AnnotationHintTests: XCTestCase {
         XCTAssertTrue(keys.contains("Right-drag"), "right-drag video entry remains")
         XCTAssertEqual(
             AnnotationHintPanel.drawingParts.first { $0.0 == "Esc" }?.1,
-            "clear & exit"
+            "copy & exit"
         )
+        XCTAssertFalse(keys.contains("⌘⇧C"), "Esc replaced the ⌘⇧C copy shortcut")
         XCTAssertEqual(
             AnnotationHintPanel.drawingParts.first { $0.0 == "Enter" }?.1,
             "comment & send"

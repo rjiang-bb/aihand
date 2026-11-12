@@ -793,27 +793,29 @@ struct ChatTranscriptView: NSViewRepresentable {
         font: 14.5px/1.55 var(--sans);
         color: var(--muted);
       }
-      .msg.live-activity .live-strong {
-        color: var(--text);
-        opacity: 0.72;
+      /* Cursor-style "thinking" shimmer: muted text with a soft highlight band sweeping across. */
+      .msg.live-activity .live-label {
+        color: var(--muted);
+        background: linear-gradient(100deg,
+          var(--muted) 0%, var(--muted) 38%, var(--text) 50%, var(--muted) 62%, var(--muted) 100%);
+        background-size: 260% 100%;
+        background-position: 130% 0;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+        animation: live-shimmer 2.2s ease-in-out infinite;
       }
-      .msg.live-activity .live-spinner {
-        flex: none;
-        width: 12px;
-        height: 12px;
-        border: 1.5px solid rgba(255,255,255,0.22);
-        border-top-color: var(--muted);
-        border-radius: 50%;
-        animation: live-spin 0.7s linear infinite;
+      .msg.live-activity .live-strong { color: inherit; }
+      .msg.live-activity .live-label .diff-add,
+      .msg.live-activity .live-label .diff-del {
+        -webkit-text-fill-color: currentColor;
       }
-      @media (prefers-color-scheme: light) {
-        .msg.live-activity .live-spinner {
-          border-color: rgba(0,0,0,0.14);
-          border-top-color: var(--muted);
-        }
+      @media (prefers-reduced-motion: reduce) {
+        .msg.live-activity .live-label { animation: none; background-position: 130% 0; }
       }
-      @keyframes live-spin {
-        to { transform: rotate(360deg); }
+      @keyframes live-shimmer {
+        0% { background-position: 130% 0; }
+        70%, 100% { background-position: -30% 0; }
       }
       .msg .media-row {
         display: flex;
@@ -1344,7 +1346,6 @@ struct ChatTranscriptView: NSViewRepresentable {
       html = html.replace(/\\+(\\d+)/g, '<span class="diff-add">+$1</span>');
       html = html.replace(/(^|[\\s])-(\\d+)/g, '$1<span class="diff-del">-$2</span>');
       return '<div class="msg live-activity" role="status" aria-live="polite">'
-        + '<span class="live-spinner" aria-hidden="true"></span>'
         + '<span class="live-label">' + html + '</span>'
         + '</div>';
     }

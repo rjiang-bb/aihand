@@ -12,10 +12,13 @@ enum CommandWRouter {
     static func action(
         previewIsKey: Bool,
         settingsIsKey: Bool,
-        sessionsIsKey: Bool
+        sessionsIsKey: Bool,
+        changesIsKey: Bool = false
     ) -> Action {
         if previewIsKey { return .closePreview }
         if settingsIsKey { return .closeSettings }
+        // Worktree Changes window: close it, never archive the selected session behind it.
+        if changesIsKey { return .closeKeyWindow }
         if sessionsIsKey { return .archiveSession }
         return .closeKeyWindow
     }

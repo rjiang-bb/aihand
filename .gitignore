@@ -9,3 +9,6 @@ assets/unused/
 
 # Local MarkdownEngine spike clone (not vendored)
 .spike-markdown-engine/
+
+# Local Notion task board config
+.cursor/start-task.json

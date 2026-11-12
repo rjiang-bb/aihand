@@ -74,6 +74,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         ChatImageActions.setPreviewClosedHandler { [weak self] in
             self?.sessionsPanel.focus()
         }
+        WorktreeChangesWindow.setClosedHandler { [weak self] in
+            self?.sessionsPanel.focus()
+        }
         sessionIconBag = sessionStore.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -470,7 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    /// ⌘⇧C — copy an annotated capture to the clipboard without starting an agent.
+    /// Esc while drawing — copy an annotated capture to the clipboard without starting an agent.
     private func copyScreenshot() {
         guard overlay.isActive, let overlayFrame = overlay.overlayFrame else { return }
         let screen = overlay.activeScreen
@@ -1005,7 +1008,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         switch CommandWRouter.action(
             previewIsKey: ChatImageActions.isPreviewKey,
             settingsIsKey: settings.isKeyWindow,
-            sessionsIsKey: sessionsPanel.isKeyWindow
+            sessionsIsKey: sessionsPanel.isKeyWindow,
+            changesIsKey: WorktreeChangesWindow.isKey
         ) {
         case .closePreview:
             _ = ChatImageActions.closeKeyPreviewIfNeeded()

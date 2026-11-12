@@ -261,25 +261,7 @@ if [[ "$SKIP_NOTARIZE" == false ]]; then
 fi
 
 echo "==> Building the DMG"
-STAGE="$(mktemp -d)"
-cp -R "$APP" "$STAGE/"
-ln -sf /Applications "$STAGE/Applications"
-if ! create-dmg \
-    --volname "$APP_NAME" \
-    --volicon "assets/AppIcon.icns" \
-    --window-pos 200 120 \
-    --window-size 560 360 \
-    --icon-size 112 \
-    --icon "$APP_NAME.app" 150 170 \
-    --hide-extension "$APP_NAME.app" \
-    --app-drop-link 410 170 \
-    --no-internet-enable \
-    "$DMG" "$STAGE" >/dev/null 2>&1; then
-    echo "create-dmg unavailable; falling back to hdiutil"
-    rm -f "$DMG"
-    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
-fi
-rm -rf "$STAGE"
+build_dmg "$APP" "$DMG"
 codesign --force --timestamp --sign "$IDENTITY" "$DMG"
 
 if [[ "$SKIP_NOTARIZE" == false ]]; then

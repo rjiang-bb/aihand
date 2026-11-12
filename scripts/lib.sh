@@ -158,3 +158,71 @@ sparkle_tools() {
     fi
     echo "$dir/bin"
 }
+
+# Build a styled drag-to-install DMG: background art with an arrow from the app to Applications,
+# fixed icon positions, hidden toolbar. Self-contained (hdiutil + Finder AppleScript) — the
+# `create-dmg` formula varies per machine and was silently falling back to a plain image.
+# Layout points must match scripts/make-dmg-background.swift (app 150,170 / Applications 410,170).
+# Usage: build_dmg <App.app> <out.dmg>
+build_dmg() {
+    local app="$1" dmg="$2"
+    local bg="$ROOT/assets/dmg-background.png"
+    local stage rw mnt
+    stage="$(mktemp -d)"
+    rw="$(mktemp -u "${TMPDIR:-/tmp}/aihand-rw.XXXXXX").dmg"
+    mnt="/Volumes/$APP_NAME"
+
+    cp -R "$app" "$stage/"
+    ln -sf /Applications "$stage/Applications"
+    if [[ -f "$bg" ]]; then
+        mkdir "$stage/.background"
+        cp "$bg" "$stage/.background/background.png"
+    fi
+
+    # A stale mount with the same name would make Finder address "AiHand 1".
+    [[ -d "$mnt" ]] && hdiutil detach "$mnt" -force >/dev/null 2>&1 || true
+    rm -f "$dmg"
+    hdiutil create -volname "$APP_NAME" -srcfolder "$stage" -fs HFS+ -format UDRW -ov "$rw" >/dev/null
+    hdiutil attach "$rw" -readwrite -noverify -noautoopen -mountpoint "$mnt" >/dev/null
+
+    # Volume icon.
+    if [[ -f "$ROOT/assets/AppIcon.icns" ]]; then
+        cp "$ROOT/assets/AppIcon.icns" "$mnt/.VolumeIcon.icns"
+        SetFile -c icnC "$mnt/.VolumeIcon.icns" 2>/dev/null || true
+        SetFile -a C "$mnt" 2>/dev/null || true
+    fi
+
+    # Window: 560x360 content (+28pt title bar), icons at the arrow's ends.
+    if ! osascript >/dev/null 2>&1 <<OSA
+tell application "Finder"
+    tell disk "$APP_NAME"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {200, 120, 760, 508}
+        set vo to the icon view options of container window
+        set arrangement of vo to not arranged
+        set icon size of vo to 112
+        set text size of vo to 13
+        if exists file ".background:background.png" then
+            set background picture of vo to file ".background:background.png"
+        end if
+        set position of item "$APP_NAME.app" of container window to {150, 170}
+        set position of item "Applications" of container window to {410, 170}
+        update without registering applications
+        delay 1
+        close
+    end tell
+end tell
+OSA
+    then
+        echo "warning: Finder styling failed (no GUI session / Automation permission?) — DMG will use default layout" >&2
+    fi
+
+    sync
+    sleep 1
+    hdiutil detach "$mnt" >/dev/null 2>&1 || hdiutil detach "$mnt" -force >/dev/null
+    hdiutil convert "$rw" -format UDZO -imagekey zlib-level=9 -ov -o "$dmg" >/dev/null
+    rm -rf "$stage" "$rw"
+}

@@ -177,8 +177,9 @@ final class TranscriptMarkdownTests: XCTestCase {
         let html = ChatTranscriptView.shellHTML
         XCTAssertTrue(html.contains(".msg.status"))
         XCTAssertTrue(html.contains("live-activity"))
-        XCTAssertTrue(html.contains("live-spinner"))
-        XCTAssertTrue(html.contains("live-spin"))
+        XCTAssertFalse(html.contains("<span class=\"live-spinner\""))
+        XCTAssertTrue(html.contains("live-shimmer"))
+        XCTAssertFalse(html.contains("live-spin "))
         XCTAssertTrue(html.contains("Exploring "))
         XCTAssertTrue(html.contains("liveActivityHTML"))
         // In-progress footer matches body text size (not the smaller muted caption).
