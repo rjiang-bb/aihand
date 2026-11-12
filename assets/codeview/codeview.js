@@ -188,7 +188,7 @@
     var head = el('div', 'cv-head');
     head.appendChild(el('span', 'cv-icon', ICON_FILE));
     var p = el('span', 'cv-path');
-    p.textContent = shortPath(opts.path);
+    p.textContent = opts.fullPath ? String(opts.path || '') : shortPath(opts.path);
     p.title = opts.path || '';
     head.appendChild(p);
     if (opts.added || opts.removed) {
@@ -243,10 +243,10 @@
     body.textContent = text;
   }
 
-  function fitHeight(body, editors) {
+  function fitHeight(body, editors, max) {
     var h = 0;
     editors.forEach(function (ed) { h = Math.max(h, ed.getContentHeight()); });
-    body.style.height = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, h)) + 'px';
+    body.style.height = Math.max(MIN_HEIGHT, Math.min(max || MAX_HEIGHT, h)) + 'px';
   }
 
   function savedMode() {
@@ -261,15 +261,20 @@
     var mode = opts.mode || savedMode();
     var f = frame(host, {
       path: opts.path,
+      fullPath: opts.fullPath,
       added: opts.added,
       removed: opts.removed,
-      modes: [{ id: 'inline', label: 'Inline' }, { id: 'side-by-side', label: 'Side-by-side' }]
+      modes: opts.hideModes ? null : [{ id: 'inline', label: 'Inline' }, { id: 'side-by-side', label: 'Side-by-side' }]
     });
-    var handle = { root: f.root, disposed: false, editor: null, models: [], dispose: dispose, setMode: setMode };
+    var maxHeight = opts.maxHeight || MAX_HEIGHT;
+    var handle = {
+      root: f.root, disposed: false, editor: null, models: [],
+      dispose: dispose, setMode: setMode, setMaxHeight: setMaxHeight, refit: null
+    };
     markMode();
 
-    if (opts.tooLarge) {
-      message(f.body, 'Diff too large to show');
+    if (opts.tooLarge || opts.message) {
+      message(f.body, opts.message || 'Diff too large to show');
       return handle;
     }
     f.body.style.height = MIN_HEIGHT + 'px';
@@ -304,8 +309,9 @@
       handle.editor = ed;
       var refit = function () {
         if (handle.disposed) return;
-        fitHeight(f.body, [ed.getOriginalEditor(), ed.getModifiedEditor()]);
+        fitHeight(f.body, [ed.getOriginalEditor(), ed.getModifiedEditor()], maxHeight);
       };
+      handle.refit = refit;
       ed.onDidUpdateDiff(refit);
       ed.getModifiedEditor().onDidContentSizeChange(refit);
       ed.getOriginalEditor().onDidContentSizeChange(refit);
@@ -331,6 +337,11 @@
       try { localStorage.setItem(MODE_KEY, mode); } catch (e) {}
       markMode();
       if (handle.editor) handle.editor.updateOptions({ renderSideBySide: mode === 'side-by-side' });
+    }
+
+    function setMaxHeight(n) {
+      maxHeight = n || MAX_HEIGHT;
+      if (handle.refit) handle.refit();
     }
 
     function dispose() {
@@ -383,6 +394,7 @@
     loadMonaco: loadMonaco,
     createDiff: createDiff,
     createEditor: createEditor,
+    getSavedMode: savedMode,
     languageFor: languageFor
   };
 })();

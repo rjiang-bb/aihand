@@ -23,6 +23,13 @@ final class CommandWRouterTests: XCTestCase {
         )
     }
 
+    func testChangesWindowClosesInsteadOfArchiving() {
+        XCTAssertEqual(
+            CommandWRouter.action(previewIsKey: false, settingsIsKey: false, sessionsIsKey: true, changesIsKey: true),
+            .closeKeyWindow
+        )
+    }
+
     func testFallbackClosesKeyWindow() {
         XCTAssertEqual(
             CommandWRouter.action(previewIsKey: false, settingsIsKey: false, sessionsIsKey: false),

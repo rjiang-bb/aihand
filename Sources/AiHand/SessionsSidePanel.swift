@@ -1317,6 +1317,8 @@ enum SessionsListMetrics {
     static let gitPicker: CGFloat = 52
     /// Expanded picker row (name + path + pads).
     private static let pickerRow: CGFloat = 50
+    /// “Changes +N −M” button row under the branch header.
+    static let gitChangesRowHeight: CGFloat = 36
     private static let gitPickerRow: CGFloat = 44
     private static let gitPickerAdd: CGFloat = 44
     private static let pickerManage: CGFloat = 36
@@ -1352,11 +1354,13 @@ enum SessionsListMetrics {
 
     static func gitPickerHeight(worktreeCount: Int, expanded: Bool) -> CGFloat {
         guard worktreeCount > 0 else { return 0 }
-        guard expanded else { return gitPicker }
+        // Header + divider + the always-visible “Changes” row.
+        let closed = gitPicker + pickerDivider + gitChangesRowHeight
+        guard expanded else { return closed }
         let rows = CGFloat(max(worktreeCount, 1)) * gitPickerRow
         // Separators between rows, before Add, and before Manage.
         let seps = CGFloat(max(worktreeCount, 1) + 1) * pickerDivider
-        return gitPicker + pickerDivider + rows + seps + gitPickerAdd + pickerManage
+        return closed + pickerDivider + rows + seps + gitPickerAdd + pickerManage
     }
 
     static func panelHeight(
@@ -2042,11 +2046,11 @@ private struct WorkspacePicker: View {
                     pinned.toggle()
                 }
             } label: {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Image(systemName: currentRef?.connectionID == nil ? "folder.fill" : "network")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 18, height: 22)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title)
                             .font(.system(size: 14, weight: .semibold))
@@ -2069,8 +2073,8 @@ private struct WorkspacePicker: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
                 .softHoverInnerBorder(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous),
-                    inset: 3
+                    isOpen ? SoftChromeCardEdge.topOfCard : SoftChromeCardEdge.fullCard,
+                    inset: 2
                 )
             }
             .buttonStyle(.pointerPlain)
@@ -2083,7 +2087,7 @@ private struct WorkspacePicker: View {
                     .padding(.horizontal, 12)
 
                 if refs.isEmpty {
-                    WorkspacePickerActionRow(title: "Add folders…", fg: fg, onSelect: onManage)
+                    WorkspacePickerActionRow(title: "Add folders…", fg: fg, hugsBottom: true, onSelect: onManage)
                 } else {
                     ForEach(Array(refs.enumerated()), id: \.element.id) { index, ref in
                         WorkspacePickerRow(
@@ -2106,11 +2110,11 @@ private struct WorkspacePicker: View {
                     Rectangle()
                         .fill(Color.primary.opacity(0.07))
                         .frame(height: 1)
-                    WorkspacePickerActionRow(title: "Manage folders…", fg: fg, onSelect: onManage)
+                    WorkspacePickerActionRow(title: "Manage folders…", fg: fg, hugsBottom: true, onSelect: onManage)
                 }
             }
         }
-        .background(WorkspacePickerBackground(cornerRadius: 22))
+        .background(WorkspacePickerBackground(cornerRadius: SoftChrome.pickerCornerRadius))
         .animation(.easeOut(duration: 0.14), value: isOpen)
     }
 }
@@ -2118,10 +2122,10 @@ private struct WorkspacePicker: View {
 private struct WorkspacePickerActionRow: View {
     let title: String
     let fg: Color
+    var hugsBottom: Bool = false
     var onSelect: () -> Void
 
     @State private var hovering = false
-    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button(action: onSelect) {
@@ -2131,24 +2135,7 @@ private struct WorkspacePickerActionRow: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.primary.opacity(hovering ? 0.08 : 0))
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                )
-                .overlay {
-                    if hovering {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .inset(by: 2)
-                            .strokeBorder(
-                                SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
-                                lineWidth: 1.25
-                            )
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                    }
-                }
+                .pickerRowHoverChrome(hugsBottom ? .bottomOfCard : .square, hovering: hovering)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.pointerPlain)
@@ -2205,22 +2192,18 @@ private struct GitWorktreePicker: View {
             Button {
                 pinned.toggle()
             } label: {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 18, height: 22)
                     Text(branchTitle)
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(fg)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 4)
-                    // Working-tree changes only — same idea as the editor “Changes” badge.
-                    // (SSH probes skip diffs, so this stays empty remotely.)
-                    if let diff = current?.workingDiff, !diff.isEmpty {
-                        GitDiffLinesView(diff: diff)
-                    }
+                    // Line counts for the selected worktree live on the “Changes” row below.
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(fg.opacity(0.45))
@@ -2229,13 +2212,26 @@ private struct GitWorktreePicker: View {
                 .padding(.vertical, 11)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
-                .softHoverInnerBorder(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous),
-                    inset: 3
-                )
+                .softHoverInnerBorder(SoftChromeCardEdge.topOfCard, inset: 2)
             }
             .buttonStyle(.pointerPlain)
             .focusable(false)
+
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+                .padding(.horizontal, 12)
+            GitChangesRow(
+                diff: current?.workingDiff ?? GitDiffStat(),
+                fg: fg,
+                hugsBottom: !isOpen
+            ) {
+                WorktreeChangesWindow.show(
+                    path: current?.path ?? currentPath,
+                    branch: branchTitle,
+                    connection: connection
+                )
+            }
 
             if isOpen {
                 Rectangle()
@@ -2278,10 +2274,10 @@ private struct GitWorktreePicker: View {
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
                     .frame(height: 1)
-                WorkspacePickerActionRow(title: "Manage worktrees…", fg: fg, onSelect: onManage)
+                WorkspacePickerActionRow(title: "Manage worktrees…", fg: fg, hugsBottom: true, onSelect: onManage)
             }
         }
-        .background(WorkspacePickerBackground(cornerRadius: 22))
+        .background(WorkspacePickerBackground(cornerRadius: SoftChrome.pickerCornerRadius))
         .animation(.easeOut(duration: 0.14), value: isOpen)
     }
 
@@ -2391,6 +2387,43 @@ private struct GitWorktreeAddRow: View {
     }
 }
 
+/// “Changes +N −M” button under the branch header — opens the read-only diff window.
+private struct GitChangesRow: View {
+    let diff: GitDiffStat
+    let fg: Color
+    /// When the picker is collapsed this row is the card bottom — round those corners only.
+    var hugsBottom: Bool = false
+    var onOpen: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: onOpen) {
+            // Same 18pt icon column + 8pt gap as the branch / folder headers.
+            HStack(spacing: 8) {
+                Image(systemName: "plus.forwardslash.minus")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(fg.opacity(0.55))
+                    .frame(width: 18, height: 22)
+                Text("Changes")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(fg)
+                Spacer(minLength: 4)
+                if !diff.isEmpty {
+                    GitDiffLinesView(diff: diff)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: SessionsListMetrics.gitChangesRowHeight, maxHeight: SessionsListMetrics.gitChangesRowHeight, alignment: .leading)
+            .pickerRowHoverChrome(hugsBottom ? .bottomOfCard : .square, hovering: hovering)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pointerPlain)
+        .focusable(false)
+        .onHover { hovering = $0 }
+    }
+}
+
 private struct GitWorktreeRow: View {
     let entry: GitWorktreeEntry
     let shortcutIndex: Int
@@ -2401,7 +2434,6 @@ private struct GitWorktreeRow: View {
     var onRemove: () -> Void
 
     @State private var hovering = false
-    @Environment(\.colorScheme) private var colorScheme
 
     private var canRemove: Bool {
         !entry.isPrimary && entry.workingDiff.isEmpty
@@ -2427,7 +2459,8 @@ private struct GitWorktreeRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
-                if !entry.displayedDiff.isEmpty {
+                // The selected worktree’s counts sit on the “Changes” row instead.
+                if !isCurrent, !entry.displayedDiff.isEmpty {
                     GitDiffLinesView(diff: entry.displayedDiff)
                 }
                 if isCurrent {
@@ -2445,24 +2478,7 @@ private struct GitWorktreeRow: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(hovering || isCurrent ? 0.08 : 0))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-            )
-            .overlay {
-                if hovering {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .inset(by: 2)
-                        .strokeBorder(
-                            SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
-                            lineWidth: 1.25
-                        )
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                }
-            }
+            .pickerRowHoverChrome(.square, hovering: hovering, selected: isCurrent)
             .contentShape(Rectangle())
         }
         .buttonStyle(.pointerPlain)
@@ -2492,7 +2508,6 @@ private struct WorkspacePickerRow: View {
     var onSelect: () -> Void
 
     @State private var hovering = false
-    @Environment(\.colorScheme) private var colorScheme
 
     private var name: String {
         (path as NSString).lastPathComponent
@@ -2541,24 +2556,7 @@ private struct WorkspacePickerRow: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.primary.opacity(hovering || isCurrent ? 0.08 : 0))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 2)
-            )
-            .overlay {
-                if hovering {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .inset(by: 2)
-                        .strokeBorder(
-                            SoftChrome.hoverInnerBorder(dark: colorScheme == .dark),
-                            lineWidth: 1.25
-                        )
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 2)
-                }
-            }
+            .pickerRowHoverChrome(.square, hovering: hovering, selected: isCurrent)
             .contentShape(Rectangle())
         }
         .buttonStyle(.pointerPlain)

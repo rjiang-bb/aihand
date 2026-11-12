@@ -63,7 +63,6 @@ final class OverlayController {
     private var sendHotKey: UInt32?
     private var undoHotKey: UInt32?
     private var saveHotKey: UInt32?
-    private var copyHotKey: UInt32?
     private var toolHotKeys: [UInt32] = []
     private let annotationHints = AnnotationHintPanel()
     /// Hint/tools sit raised while the hand picker is visible; dock to the bottom once it fades.
@@ -96,7 +95,7 @@ final class OverlayController {
     var onRequestSend: (() -> Void)?
     /// ⌘⇧S while drawing — save an annotated screenshot to the AiHand folder.
     var onRequestSave: (() -> Void)?
-    /// ⌘⇧C while drawing — copy an annotated screenshot to the clipboard.
+    /// Esc while drawing with ink — copy an annotated screenshot to the clipboard (replaces ⌘⇧C).
     var onRequestCopy: (() -> Void)?
     var onInkCleared: (() -> Void)?
     /// Fired after undoing a finished stroke (layer removed from the overlay).
@@ -1189,6 +1188,11 @@ final class OverlayController {
                     }
                     return
                 }
+                // Esc with a drawing on screen copies the annotated capture (it clears + exits when done).
+                if self.hasAnnotationInk, let copy = self.onRequestCopy {
+                    copy()
+                    return
+                }
                 self.clearInk()
                 self.exit()
             }
@@ -1296,14 +1300,6 @@ final class OverlayController {
                     self?.onRequestSave?()
                 }
             }
-            if copyHotKey == nil {
-                copyHotKey = HotKeyCenter.shared.register(
-                    keyCode: UInt32(kVK_ANSI_C),
-                    modifiers: UInt32(cmdKey | shiftKey)
-                ) { [weak self] in
-                    self?.onRequestCopy?()
-                }
-            }
             if toolHotKeys.isEmpty {
                 let toolKeys: [(DrawTool, Int)] = [
                     (.freehand, kVK_ANSI_F),
@@ -1360,10 +1356,6 @@ final class OverlayController {
         if let id = saveHotKey {
             HotKeyCenter.shared.unregister(id)
             saveHotKey = nil
-        }
-        if let id = copyHotKey {
-            HotKeyCenter.shared.unregister(id)
-            copyHotKey = nil
         }
         for id in toolHotKeys {
             HotKeyCenter.shared.unregister(id)

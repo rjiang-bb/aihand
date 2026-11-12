@@ -242,7 +242,7 @@ enum GitWorkspace {
         return Int(trimmed) ?? 0
     }
 
-    private static func untrackedInsertionCount(at fileURL: URL) -> Int {
+    static func untrackedInsertionCount(at fileURL: URL) -> Int {
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return 1 }
         defer { try? handle.close() }
         let chunkSize = 64 * 1024
@@ -423,6 +423,28 @@ enum GitWorkspace {
         var ok: Bool
         var stdout: String
         var error: String?
+    }
+
+    /// Exact stdout bytes (no trimming) — file contents and `-z` listings. nil on a non-zero exit.
+    static func rawGit(_ args: [String], in directory: String, connection: SSHConnection? = nil) -> Data? {
+        if let connection {
+            var remoteArgs = ["git", "-C", directory]
+            remoteArgs.append(contentsOf: args)
+            let result = SSHClient.run(connection, remoteCommand: remoteArgs)
+            return result.ok ? Data(result.stdout.utf8) : nil
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", directory] + args
+        process.standardInput = FileHandle.nullDevice
+        let out = Pipe()
+        process.standardOutput = out
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        // Drain before waiting — large diffs overflow the pipe buffer otherwise.
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return process.terminationStatus == 0 ? data : nil
     }
 
     @discardableResult
