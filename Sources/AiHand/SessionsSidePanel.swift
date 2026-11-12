@@ -1313,8 +1313,8 @@ enum SessionsListMetrics {
     static let chromeVertical: CGFloat = 68 + 14
     /// Workspace picker closed: 13+13 pad + ~34pt title/path stack.
     static let picker: CGFloat = 60
-    /// Branch / worktree picker closed height.
-    static let gitPicker: CGFloat = 52
+    /// Branch / worktree picker header height: 22pt icon row + 11+11 vertical padding.
+    static let gitPicker: CGFloat = 44
     /// Expanded picker row (name + path + pads).
     private static let pickerRow: CGFloat = 50
     /// “Changes +N −M” button row under the branch header.

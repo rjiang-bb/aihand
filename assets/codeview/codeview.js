@@ -171,6 +171,9 @@
     + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.3"/>'
     + '<path fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" d="M3.5 10.5V3.8A1.3 1.3 0 0 1 4.8 2.5h6.7"/></svg>';
 
+  var ICON_CHECK = '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="none" stroke="currentColor" '
+    + 'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" d="M3.5 8.5l3 3 6-7"/></svg>';
+
   function el(tag, cls, html) {
     var n = document.createElement(tag);
     if (cls) n.className = cls;
@@ -220,6 +223,16 @@
       e.stopPropagation();
       var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.copyText;
       if (h) h.postMessage({ text: opts.path || '' });
+      // Checkmark feedback, then back to the copy glyph.
+      clearTimeout(copy.__t);
+      copy.innerHTML = ICON_CHECK;
+      copy.classList.add('done');
+      copy.setAttribute('data-tip', 'Copied');
+      copy.__t = setTimeout(function () {
+        copy.innerHTML = ICON_COPY;
+        copy.classList.remove('done');
+        copy.setAttribute('data-tip', 'Copy path');
+      }, 1300);
     });
     head.appendChild(copy);
     return { head: head, seg: seg };
@@ -269,12 +282,17 @@
     var maxHeight = opts.maxHeight || MAX_HEIGHT;
     var handle = {
       root: f.root, disposed: false, editor: null, models: [],
-      dispose: dispose, setMode: setMode, setMaxHeight: setMaxHeight, refit: null
+      dispose: dispose, setMode: setMode, setMaxHeight: setMaxHeight, refit: null, ready: null
     };
+    // Resolves once the first diff is laid out (or immediately for message-only bodies) so callers
+    // can mount many diffs one at a time without freezing the page.
+    var readyDone;
+    handle.ready = new Promise(function (resolve) { readyDone = resolve; });
     markMode();
 
     if (opts.tooLarge || opts.message) {
       message(f.body, opts.message || 'Diff too large to show');
+      readyDone();
       return handle;
     }
     f.body.style.height = MIN_HEIGHT + 'px';
@@ -295,6 +313,11 @@
       var modified = monaco.editor.createModel(opts.modified || '', lang);
       handle.models = [original, modified];
       var o = baseOptions(opts.lineOffset);
+      // Inline mode draws original + modified numbers in adjacent columns: size each one digit wider
+      // than the longest number so e.g. 261/261 never reads as "261261".
+      var lineCount = function (t) { return String(t || '').split('\n').length; };
+      var maxLine = Math.max(lineCount(opts.original), lineCount(opts.modified)) + (opts.lineOffset || 0);
+      o.lineNumbersMinChars = Math.max(3, String(maxLine).length + 1);
       o.renderSideBySide = mode === 'side-by-side';
       o.useInlineViewWhenSpaceIsLimited = false;
       o.enableSplitViewResizing = false;
@@ -313,6 +336,8 @@
       };
       handle.refit = refit;
       ed.onDidUpdateDiff(refit);
+      ed.onDidUpdateDiff(function () { readyDone(); });
+      setTimeout(readyDone, 2500);
       ed.getModifiedEditor().onDidContentSizeChange(refit);
       ed.getOriginalEditor().onDidContentSizeChange(refit);
       refit();
@@ -320,6 +345,7 @@
       if (handle.disposed) return;
       f.body.classList.remove('cv-loading');
       message(f.body, 'Couldn’t load the diff viewer');
+      readyDone();
     });
 
     function markMode() {
@@ -347,6 +373,7 @@
     function dispose() {
       if (handle.disposed) return;
       handle.disposed = true;
+      readyDone();
       if (handle.editor) handle.editor.dispose();
       handle.models.forEach(function (m) { m.dispose(); });
       handle.editor = null;

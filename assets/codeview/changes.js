@@ -60,6 +60,7 @@
     loadSeq: 0,
     slots: [],
     observer: null,
+    far: null,
     menuOpen: false,
     query: '',
     sideWidth: 0
@@ -256,7 +257,7 @@
     all.type = 'button';
     all.setAttribute('data-all', '1');
     var total = files.length === S.files.length ? '' + files.length : files.length + ' of ' + S.files.length;
-    all.innerHTML = '<span class="name">All files (' + total + ')</span>' + statHTML(a, r);
+    all.innerHTML = '<span class="name">All files</span><span class="badge">' + total + '</span>' + statHTML(a, r);
     all.addEventListener('click', function () { select(null); });
     side.appendChild(all);
     side.appendChild(el('div', 'sep'));
@@ -272,6 +273,8 @@
       b.addEventListener('click', function () { select(f.path); });
       side.appendChild(b);
     });
+    var cur = side.querySelector('.row.sel');
+    if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
   }
 
   function setQuery(value) {
@@ -283,6 +286,52 @@
     if (before !== after || S.selected == null) renderPane();
   }
 
+  /** Order used by the arrow keys: "All files" first, then each visible file. */
+  function navigate(to) {
+    var paths = [null].concat(visibleFiles().map(function (f) { return f.path; }));
+    if (paths.length < 2) return;
+    var i = Math.max(0, paths.indexOf(S.selected));
+    var next;
+    if (to === 'first') next = 1;
+    else if (to === 'last') next = paths.length - 1;
+    else next = Math.max(0, Math.min(paths.length - 1, i + to));
+    select(paths[next]);
+  }
+
+  function focusFilter() {
+    var q = $('fileFilter');
+    q.focus();
+    q.select();
+  }
+
+  function onKey(e) {
+    var q = $('fileFilter');
+    var inField = document.activeElement === q;
+    // ⌘F (or "/" outside the field) jumps to the filter.
+    if ((e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === 'f')
+        || (!inField && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === '/')) {
+      e.preventDefault();
+      if (S.menuOpen) setMenu(false);
+      focusFilter();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === 'Escape') {
+      if (S.menuOpen) { setMenu(false); e.preventDefault(); return; }
+      if (inField) { q.blur(); e.preventDefault(); }
+      return;
+    }
+    if (S.menuOpen) return;
+    // Arrows work from the filter field too (caret keys stay Left/Right).
+    if (e.key === 'ArrowDown') { e.preventDefault(); navigate(1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); navigate(-1); return; }
+    if (inField) return;
+    if (e.key === 'j') { navigate(1); e.preventDefault(); }
+    else if (e.key === 'k') { navigate(-1); e.preventDefault(); }
+    else if (e.key === 'Home') { navigate('first'); e.preventDefault(); }
+    else if (e.key === 'End') { navigate('last'); e.preventDefault(); }
+  }
+
   function select(path) {
     if (S.selected === path) return;
     S.selected = path;
@@ -291,7 +340,34 @@
   }
 
   // ---------- pane ----------
+  // Monaco diffs are heavy: build them one at a time, yielding between each so hover/scroll stay live.
+  var queue = [];
+  var pumping = false;
+  function enqueue(slot) {
+    slot.requested = true;
+    queue.push(slot);
+    pump();
+  }
+  function pump() {
+    if (pumping) return;
+    var slot = queue.shift();
+    if (!slot) return;
+    if (slot.dead) { pump(); return; }
+    pumping = true;
+    var finished = false;
+    var finish = function () {
+      if (finished) return;
+      finished = true;
+      pumping = false;
+      setTimeout(pump, 30);
+    };
+    setTimeout(finish, 6000); // never let one stuck mount stall the queue
+    mount(slot, finish);
+  }
+
   function disposeSlots() {
+    queue = [];
+    if (S.far) { S.far.disconnect(); S.far = null; }
     if (S.observer) { S.observer.disconnect(); S.observer = null; }
     S.slots.forEach(function (s) { if (s.handle) s.handle.dispose(); s.dead = true; });
     S.slots = [];
@@ -318,10 +394,27 @@
         entries.forEach(function (e) {
           if (!e.isIntersecting) return;
           var slot = e.target.__slot;
-          if (slot && !slot.requested) mount(slot);
+          if (slot && !slot.requested) enqueue(slot);
           if (S.observer) S.observer.unobserve(e.target);
         });
-      }, { root: pane, rootMargin: '600px 0px' });
+      }, { root: pane, rootMargin: '250px 0px' });
+      // Far offscreen diffs are torn down (height kept) so only a handful of Monaco editors stay live.
+      S.far = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          var slot = e.target.__slot;
+          if (e.isIntersecting || !slot || !slot.handle) return;
+          var h = e.target.offsetHeight;
+          slot.handle.dispose();
+          slot.handle = null;
+          slot.requested = false;
+          e.target.innerHTML = '';
+          e.target.style.height = h + 'px';
+          var ph = el('div', 'ph');
+          ph.textContent = slot.file.path;
+          e.target.appendChild(ph);
+          if (S.observer) S.observer.observe(e.target);
+        });
+      }, { root: pane, rootMargin: '1800px 0px' });
     }
     list.forEach(function (f) {
       var node = el('div', 'slot');
@@ -333,16 +426,16 @@
       var slot = { file: f, node: node, handle: null, requested: false, dead: false, single: single };
       node.__slot = slot;
       S.slots.push(slot);
-      if (single) mount(slot);
-      else S.observer.observe(node);
+      if (single) enqueue(slot);
+      else { S.observer.observe(node); S.far.observe(node); }
     });
   }
 
-  function mount(slot) {
+  function mount(slot, done) {
     slot.requested = true;
     var key = filterKey(S.filter);
     call('content', { filter: S.filter, file: slot.file }, function (data) {
-      if (slot.dead || key !== filterKey(S.filter) || !data) return;
+      if (slot.dead || key !== filterKey(S.filter) || !data) { done(); return; }
       var opts = {
         path: slot.file.path,
         original: data.original,
@@ -356,7 +449,9 @@
         tooLarge: !!data.tooLarge
       };
       if (data.binary) opts.message = 'Binary file not shown';
+      slot.node.style.height = '';
       slot.handle = window.CodeView.createDiff(slot.node, opts);
+      slot.handle.ready.then(done);
     });
   }
 
@@ -419,9 +514,7 @@
     });
     $('menu').addEventListener('click', function (e) { e.stopPropagation(); });
     document.addEventListener('click', function () { if (S.menuOpen) setMenu(false); });
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape' && S.menuOpen) { setMenu(false); e.preventDefault(); }
-    });
+    document.addEventListener('keydown', onKey);
     document.querySelectorAll('#modeSeg button').forEach(function (b) {
       b.addEventListener('click', function () { setMode(b.getAttribute('data-mode')); });
     });
@@ -429,6 +522,7 @@
     q.addEventListener('input', function () { setQuery(q.value); });
     q.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && q.value) { q.value = ''; setQuery(''); e.preventDefault(); e.stopPropagation(); }
+      if (e.key === 'Enter') { q.blur(); }
     });
     window.addEventListener('resize', function () {
       if (S.sideWidth) applySideWidth(S.sideWidth);

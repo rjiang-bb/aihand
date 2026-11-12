@@ -281,7 +281,7 @@ final class WorktreeChangesWindow: NSObject, NSWindowDelegate, WKNavigationDeleg
           </div>
           <div id="main">
             <div id="side">
-              <div id="filterWrap"><input id="fileFilter" type="text" placeholder="Filter files" spellcheck="false" autocomplete="off" autocapitalize="off"></div>
+              <div id="filterWrap"><svg class="search-ic" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg><input id="fileFilter" type="text" placeholder="Filter files" spellcheck="false" autocomplete="off" autocapitalize="off"><span class="kbd" aria-hidden="true">⌘F</span></div>
               <div id="sideList"></div>
             </div>
             <div id="resizer" role="separator" aria-orientation="vertical" title="Drag to resize"></div>

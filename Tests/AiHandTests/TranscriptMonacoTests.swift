@@ -88,6 +88,16 @@ final class TranscriptMonacoTests: XCTestCase {
         XCTAssertEqual(try eval("document.querySelector('#probe .cv-path').textContent") as? String, "/w/aihand/README.md")
         XCTAssertEqual(try eval("document.querySelector('#probe .cv-seg-btn.on').getAttribute('data-mode')") as? String, "inline")
 
+        // Copy-path button swaps to a checkmark, then restores.
+        let copyGlyph = try eval("document.querySelector('#probe .cv-icon-btn').innerHTML") as? String
+        _ = try eval("document.querySelector('#probe .cv-icon-btn').click(); true")
+        XCTAssertEqual(try eval("document.querySelector('#probe .cv-icon-btn').classList.contains('done')") as? Bool, true)
+        XCTAssertNotEqual(try eval("document.querySelector('#probe .cv-icon-btn').innerHTML") as? String, copyGlyph)
+        try wait("copy glyph restores") {
+            ((try? self.eval("document.querySelector('#probe .cv-icon-btn').classList.contains('done')")) as? Bool) == false
+        }
+        XCTAssertEqual(try eval("document.querySelector('#probe .cv-icon-btn').innerHTML") as? String, copyGlyph)
+
         _ = try eval("window.__probe.setMode('side-by-side'); true")
         try wait("side-by-side renders original pane") {
             ((try? self.eval("document.querySelectorAll('#probe .editor.original .view-lines').length")) as? Int ?? 0) > 0
@@ -95,6 +105,31 @@ final class TranscriptMonacoTests: XCTestCase {
         }
         _ = try eval("window.__probe.dispose(); true")
         XCTAssertEqual(try eval("window.monaco.editor.getModels().length") as? Int, 0)
+    }
+
+    func testInlineLineNumberColumnsLeaveAGap() throws {
+        _ = try eval("""
+        (function(){
+          var host = document.createElement('div');
+          host.id = 'gap';
+          host.style.width = '600px';
+          document.body.appendChild(host);
+          var o = ''; for (var i = 1; i <= 400; i++) o += 'line ' + i + '\\n';
+          window.__gap = CodeView.createDiff(host, {
+            path: 'a.txt', original: o, modified: o.replace('line 200\\n', 'line 200 changed\\n'), mode: 'inline'
+          });
+          return true;
+        })()
+        """)
+        try wait("diff editor") {
+            ((try? self.eval("!!document.querySelector('#gap .monaco-diff-editor .view-lines')")) as? Bool) == true
+        }
+        // 3-digit numbers → columns are at least 4 chars wide (one digit of breathing room).
+        XCTAssertEqual(
+            try eval("window.__gap.editor.getModifiedEditor().getOption(window.monaco.editor.EditorOption.lineNumbersMinChars)") as? Int,
+            4
+        )
+        _ = try eval("window.__gap.dispose(); true")
     }
 
     func testEditRowExpandsIntoFileDiffPlaceholder() throws {

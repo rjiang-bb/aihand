@@ -169,10 +169,35 @@ button { font: inherit; color: inherit; }
 #resizer:hover::after, #resizer.drag::after { background: var(--accent); width: 2px; left: 2px; }
 body.resizing { cursor: col-resize; }
 body.resizing * { user-select: none !important; -webkit-user-select: none !important; }
-#filterWrap { flex: none; padding: 8px 8px 4px; }
+#filterWrap { flex: none; padding: 8px 8px 4px; position: relative; }
+#filterWrap .search-ic {
+  position: absolute;
+  left: 18px;
+  top: 50%;
+  margin-top: 2px;
+  transform: translateY(-50%);
+  width: 13px;
+  height: 13px;
+  color: var(--muted);
+  pointer-events: none;
+}
+#filterWrap:focus-within .search-ic { color: var(--text); }
+#filterWrap .kbd {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  margin-top: 2px;
+  transform: translateY(-50%);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  pointer-events: none;
+}
+/* Hide the hint once there is text to filter by. */
+#fileFilter:not(:placeholder-shown) ~ .kbd { display: none; }
 #fileFilter {
   width: 100%;
-  padding: 5px 9px;
+  padding: 5px 40px 5px 29px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg2);
@@ -185,7 +210,7 @@ body.resizing * { user-select: none !important; -webkit-user-select: none !impor
 }
 #fileFilter:focus { border-color: var(--accent); }
 #fileFilter::placeholder { color: var(--muted); }
-#sideList { flex: 1; min-height: 0; overflow: auto; padding: 6px; }
+#sideList { flex: 1; min-height: 0; overflow: auto; padding: 6px; contain: layout paint style; }
 .row {
   display: flex;
   align-items: center;
@@ -213,9 +238,26 @@ body.resizing * { user-select: none !important; -webkit-user-select: none !impor
 .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .dir { color: var(--muted); margin-left: 6px; font-size: 11.5px; }
 .row.all { font-weight: 600; margin-bottom: 4px; }
+.row.all .name { flex: none; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--sel);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.row.all .stat { margin-left: auto; }
 .sep { height: 1px; background: var(--border); margin: 4px 4px 6px; }
 
-#pane { flex: 1; min-width: 0; overflow: auto; padding: 12px; }
+#pane { flex: 1; min-width: 0; overflow: auto; padding: 12px; contain: layout paint style; }
 .slot { margin-bottom: 12px; }
 .slot .ph {
   border: 1px solid var(--border);

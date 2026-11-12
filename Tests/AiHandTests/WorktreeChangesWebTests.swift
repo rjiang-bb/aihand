@@ -113,6 +113,43 @@ final class WorktreeChangesWebTests: XCTestCase {
         XCTAssertEqual(bridge.widths.last, 270)
     }
 
+    func testKeyboardNavigationAndFilterShortcuts() throws {
+        try wait("file rows") { self.count("#side .row[data-path]") == 3 }
+        func key(_ k: String, meta: Bool = false) throws {
+            _ = try eval("(document.activeElement || document).dispatchEvent(new KeyboardEvent('keydown', { key: '\(k)', metaKey: \(meta), bubbles: true, cancelable: true })); true")
+        }
+        func selected() -> String? {
+            (try? eval("var r = document.querySelector('#side .row.sel'); r ? (r.getAttribute('data-path') || '*all') : null")) as? String
+        }
+        XCTAssertEqual(selected(), "*all")
+        try key("ArrowDown")
+        XCTAssertEqual(selected(), "a.txt")
+        try wait("single diff") { self.count("#pane .slot") == 1 }
+        try key("j")
+        XCTAssertEqual(selected(), "b.txt")
+        try key("End")
+        XCTAssertEqual(selected(), "c.txt")
+        try key("ArrowDown")
+        XCTAssertEqual(selected(), "c.txt", "stops at the last file")
+        try key("Home")
+        XCTAssertEqual(selected(), "a.txt")
+        try key("ArrowUp")
+        XCTAssertEqual(selected(), "*all")
+        try wait("stacked again") { self.count("#pane .slot") == 3 }
+        try key("k")
+        XCTAssertEqual(selected(), "*all")
+
+        // ⌘F and "/" focus the filter; arrows still move the selection from inside it.
+        try key("f", meta: true)
+        XCTAssertEqual(try eval("document.activeElement.id") as? String, "fileFilter")
+        try key("ArrowDown")
+        XCTAssertEqual(selected(), "a.txt")
+        try key("Escape")
+        XCTAssertEqual(try eval("document.activeElement.id === 'fileFilter'") as? Bool, false)
+        try key("/")
+        XCTAssertEqual(try eval("document.activeElement.id") as? String, "fileFilter")
+    }
+
     func testFileFilterBarNarrowsSidebarAndPane() throws {
         try wait("file rows") { self.count("#side .row[data-path]") == 3 }
         func type(_ text: String) throws {
@@ -120,7 +157,7 @@ final class WorktreeChangesWebTests: XCTestCase {
         }
         try type("b.t")
         try wait("one row") { self.count("#side .row[data-path]") == 1 }
-        XCTAssertEqual(try eval("document.querySelector('#side .row.all').textContent.includes('1 of 3')") as? Bool, true)
+        XCTAssertEqual(try eval("document.querySelector('#side .row.all .badge').textContent === '1 of 3'") as? Bool, true)
         XCTAssertEqual(count("#pane .slot"), 1)
 
         try type("zzz")
@@ -138,7 +175,7 @@ final class WorktreeChangesWebTests: XCTestCase {
         // Default filter is Uncommitted: a, b, c in the sidebar (+ the "All files" row).
         try wait("file rows") { self.count("#side .row[data-path]") == 3 }
         XCTAssertEqual(try eval("document.querySelector('#filterBtn').textContent.includes('Uncommitted')") as? Bool, true)
-        XCTAssertEqual(try eval("document.querySelector('#side .row.all').textContent.includes('All files (3)')") as? Bool, true)
+        XCTAssertEqual(try eval("document.querySelector('#side .row.all .badge').textContent === '3'") as? Bool, true)
         XCTAssertEqual(count("#pane .slot"), 3)
 
         // Click one file → only that file's diff is shown.
