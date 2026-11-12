@@ -5,6 +5,34 @@ struct AgentSkill: Identifiable, Equatable, Hashable {
     let name: String
     let description: String
     let directoryName: String
+    /// AiHand-provided slash command (not a scanned `SKILL.md`). Built-ins win on name collisions.
+    var isBuiltIn: Bool = false
+    /// SF Symbol for chips / suggestion rows; nil → default skill sparkles.
+    var symbolName: String? = nil
+}
+
+/// Composer slash commands that aren't discovered from skill folders.
+enum BuiltInSkills {
+    static let plan = AgentSkill(
+        name: "plan",
+        description: "Generate an implementation plan",
+        directoryName: "plan",
+        isBuiltIn: true,
+        symbolName: "list.bullet.clipboard"
+    )
+
+    /// Order here is the order they appear at the top of `/` suggestions.
+    static let all: [AgentSkill] = [plan]
+
+    static func skill(named name: String) -> AgentSkill? {
+        let key = name.lowercased()
+        return all.first { $0.name.lowercased() == key }
+    }
+
+    /// Chip / autocomplete icon for a skill name (built-in custom, else nil).
+    static func symbolName(forSkillNamed name: String) -> String? {
+        skill(named: name)?.symbolName
+    }
 }
 
 enum SkillCatalog {
@@ -42,21 +70,30 @@ enum SkillCatalog {
                 return hit.skills
             }
         }
-        let list: [AgentSkill]
+        let scanned: [AgentSkill]
         if let connectionID {
             // Missing connection must not fall through to local scan of a remote path.
             if let connection = Preferences.sshConnection(id: connectionID) {
-                list = scanRemote(connection: connection, workspace: workspace, cli: cli)
+                scanned = scanRemote(connection: connection, workspace: workspace, cli: cli)
             } else {
-                list = []
+                scanned = []
             }
         } else {
-            list = scanLocal(workspace: workspace, cli: cli)
+            scanned = scanLocal(workspace: workspace, cli: cli)
         }
+        let list = mergeBuiltIns(over: scanned)
         lock.lock()
         cache[key] = (list, Date())
         lock.unlock()
         return list
+    }
+
+    /// Built-ins first; drop any scanned skill whose name collides (case-insensitive).
+    static func mergeBuiltIns(over scanned: [AgentSkill]) -> [AgentSkill] {
+        let builtIns = BuiltInSkills.all
+        let reserved = Set(builtIns.map { $0.name.lowercased() })
+        let rest = scanned.filter { !reserved.contains($0.name.lowercased()) }
+        return builtIns + rest
     }
 
     static func invalidate() {

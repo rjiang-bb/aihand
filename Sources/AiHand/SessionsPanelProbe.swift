@@ -388,6 +388,7 @@ enum SessionsPanelProbe {
         expect("annotate: panel is visible", box.isVisible)
         expect("annotate: open state reported", openStates == [true], "\(openStates)")
         expect("annotate: becomes key", box.probeIsKey)
+        expect("annotate: prompt owns first responder (caret)", box.probePromptIsFirstResponder)
 
         func boxKey(_ code: Int, _ chars: String, _ flags: NSEvent.ModifierFlags = []) {
             guard let e = NSEvent.keyEvent(

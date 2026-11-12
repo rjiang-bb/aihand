@@ -15,6 +15,10 @@ struct SessionChatView: View {
     var onPanelDragEnded: (() -> Void)? = nil
     /// Prefill composer once (e.g. selection → new session), then cleared.
     var composerSeed: Binding<String?>? = nil
+    /// Attach media once for this session (annotation / video → chat), then cleared.
+    var composerAttach: Binding<PendingComposerAttach?>? = nil
+    /// Bumped when attachments are staged while this chat may already be open.
+    var composerAttachEpoch: Int = 0
     var onAddSelectionToNewSession: ((String) -> Void)? = nil
 
     @Environment(\.colorScheme) private var colorScheme
@@ -54,6 +58,7 @@ struct SessionChatView: View {
             ChatTranscriptView(
                 messages: session.messages,
                 sessionID: session.id,
+                liveActivity: session.liveActivity,
                 onAddSelectionToChat: { appendSelectionToDraft($0) },
                 onAddSelectionToNewSession: { onAddSelectionToNewSession?($0) }
             )
@@ -95,17 +100,27 @@ struct SessionChatView: View {
             session.syncModelFromSettings()
             wireSelectionHotkeys()
             let seeded = consumeComposerSeedIfNeeded()
-            focusComposer(placeCaretAtEnd: seeded)
+            let attached = consumeComposerAttachmentsIfNeeded()
+            focusComposer(placeCaretAtEnd: seeded || attached)
         }
         .onChange(of: session.id) { _ in
             session.syncModelFromSettings()
             session.editingFollowUpID = nil
             clearAttachments()
             let seeded = consumeComposerSeedIfNeeded()
+            let attached = consumeComposerAttachmentsIfNeeded()
             if !seeded {
                 draft = ""
             }
-            focusComposer(placeCaretAtEnd: seeded)
+            focusComposer(placeCaretAtEnd: seeded || attached)
+        }
+        .onChange(of: composerAttachEpoch) { _ in
+            // Same session already open (e.g. Draw from chat → ⌘↩): attach + focus without remounting.
+            let seeded = consumeComposerSeedIfNeeded()
+            let attached = consumeComposerAttachmentsIfNeeded()
+            if seeded || attached {
+                focusComposer(placeCaretAtEnd: seeded || attached)
+            }
         }
         .onChange(of: session.editingFollowUpID) { id in
             // Panel Esc / manager cancel clears the id without going through cancelQueueEdit.
@@ -117,7 +132,7 @@ struct SessionChatView: View {
         .onDisappear {
             ChatSelectionHotkeys.onAddToChat = nil
             ChatSelectionHotkeys.onAddToNewSession = nil
-            ChatSelectionHotkeys.pendingText = ""
+            ChatSelectionHotkeys.clearPending()
         }
         .onReceive(NotificationCenter.default.publisher(for: ChatSelectionHotkeys.addToChatNotification)) { note in
             if let text = note.userInfo?["text"] as? String {
@@ -174,6 +189,26 @@ struct SessionChatView: View {
         // Ensure a trailing newline so the caret can sit on the line after the quote.
         draft = seed.hasSuffix("\n") ? seed : seed + "\n"
         composerSeed.wrappedValue = nil
+        return true
+    }
+
+    @discardableResult
+    private func consumeComposerAttachmentsIfNeeded() -> Bool {
+        guard let composerAttach,
+              let pending = composerAttach.wrappedValue,
+              pending.sessionID == session.id,
+              !pending.paths.isEmpty else { return false }
+        composerAttach.wrappedValue = nil
+        let existing = Set(attachments.map(\.path))
+        let items = pending.paths
+            .filter { FileManager.default.fileExists(atPath: $0) && !existing.contains($0) }
+            .map { ComposerAttachment(path: $0, ownsFile: false) }
+        guard !items.isEmpty else {
+            Log.write("composer attach consumed but no files existed for \(pending.paths)")
+            return false
+        }
+        attachments.append(contentsOf: items)
+        Log.write("composer attached \(items.count) file(s) to session \(session.id)")
         return true
     }
 

@@ -307,9 +307,9 @@ struct AgentComposerView: View {
         Button {
             plusMenuOpen.toggle()
         } label: {
-            Image(systemName: "plus.circle.fill")
+            Image(systemName: "plus.circle")
                 .font(.system(size: 22, weight: .regular))
-                .symbolRenderingMode(.hierarchical)
+                .symbolRenderingMode(.monochrome)
                 .foregroundStyle(Color.primary.opacity(0.72))
                 .frame(width: 24, height: 24)
                 .softHoverInnerBorder(Circle(), inset: 1.25)
@@ -326,9 +326,9 @@ struct AgentComposerView: View {
     private var composerActionButtons: some View {
         if kind == .followUp, let onDraw, !isEditingQueued {
             Button(action: onDraw) {
-                Image(systemName: "pencil.tip.crop.circle.fill")
+                Image(systemName: "pencil.tip.crop.circle")
                     .font(.system(size: 26))
-                    .symbolRenderingMode(.hierarchical)
+                    .symbolRenderingMode(.monochrome)
                     .foregroundStyle(Color.primary.opacity(0.85))
                     .softHoverInnerBorder(Circle(), inset: 2.5)
             }
@@ -342,13 +342,10 @@ struct AgentComposerView: View {
                 guard canSend else { return }
                 onConfirmEdit?()
             }) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(
-                        canSend ? Color.white : Color.secondary.opacity(0.55),
-                        canSend ? Color.accentColor : Color.secondary.opacity(0.25)
-                    )
+                Image(systemName: "checkmark.circle")
+                    .font(.system(size: 26, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.45))
                     .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
             }
             .buttonStyle(.pointerPlain)
@@ -358,9 +355,9 @@ struct AgentComposerView: View {
         } else if isWorking, let onStop {
             // Gray stop replaces Send while a turn runs; Enter still queues, ⌘↩ steers.
             Button(action: onStop) {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.hierarchical)
+                Image(systemName: "stop.circle")
+                    .font(.system(size: 26, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
                     .foregroundStyle(Color.secondary.opacity(0.9))
                     .softHoverInnerBorder(Circle(), inset: 2.5)
             }
@@ -373,12 +370,9 @@ struct AgentComposerView: View {
                 onSend()
             }) {
                 Image(systemName: sendButtonSymbol)
-                    .font(.system(size: 26))
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(
-                        canSend ? Color.white : Color.secondary.opacity(0.55),
-                        canSend ? Color.accentColor : Color.secondary.opacity(0.25)
-                    )
+                    .font(.system(size: 26, weight: .regular))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(canSend ? Color.accentColor : Color.secondary.opacity(0.45))
                     .softHoverInnerBorder(Circle(), inset: 2.5, enabled: canSend)
             }
             .buttonStyle(.pointerPlain)
@@ -415,10 +409,10 @@ struct AgentComposerView: View {
             composerPlusMenuRow(
                 symbol: "list.bullet.clipboard",
                 title: "Plan",
-                subtitle: "Generate an implementation plan"
+                subtitle: BuiltInSkills.plan.description
             ) {
                 plusMenuOpen = false
-                insertPlanCommand()
+                insertBuiltInSkill(BuiltInSkills.plan)
             }
 
             if attachments != nil {
@@ -505,14 +499,16 @@ struct AgentComposerView: View {
             )
     }
 
-    private func insertPlanCommand() {
+    /// + menu shortcut for a built-in skill (same chip token as `/` autocomplete).
+    private func insertBuiltInSkill(_ skill: AgentSkill) {
+        let token = ComposerFileChipToken.serializeSkill(skill.name)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            text = "/plan "
-        } else if trimmed.lowercased().hasPrefix("/plan") {
-            // Already planning — just focus.
+        if trimmed.contains(token) {
+            // Already using this built-in — just focus.
+        } else if trimmed.isEmpty {
+            text = token + " "
         } else {
-            text = "/plan " + trimmed
+            text = token + " " + trimmed
         }
         focusPrompt()
         DispatchQueue.main.async {
@@ -886,9 +882,12 @@ struct AgentComposerView: View {
         keyBridge.onCancelEdit = onCancelEdit
         keyBridge.onDismissPlusMenu = { plusMenuOpen = false }
         keyBridge.pasteMedia = { [self] in pasteMediaFromClipboard() }
-        keyBridge.onCommandHeld = { held in
-            if commandHeld != held {
-                commandHeld = held
+        keyBridge.onCommandHeld = { [self] held in
+            // Only flip Steer/Send while the prompt is focused — otherwise ⌘ for
+            // chat copy re-renders this chrome and collapses the transcript selection.
+            let next = held && (focused || keyBridge.focused)
+            if commandHeld != next {
+                commandHeld = next
             }
         }
     }
@@ -1018,9 +1017,22 @@ enum ComposerFieldEditor {
         return true
     }
 
+    /// First `ComposerPromptTextView` under `root` (the prompt is an NSTextView, not an NSTextField).
+    static func promptTextView(in root: NSView?) -> ComposerPromptTextView? {
+        guard let root else { return nil }
+        if let tv = root as? ComposerPromptTextView { return tv }
+        for sub in root.subviews {
+            if let found = promptTextView(in: sub) { return found }
+        }
+        return nil
+    }
+
     static func editableTextView() -> NSTextView? {
         if let registeredPrompt, registeredPrompt.window != nil {
             return registeredPrompt
+        }
+        if let prompt = promptTextView(in: NSApp.keyWindow?.contentView) {
+            return prompt
         }
         let window = NSApp.keyWindow
         let responder = window?.firstResponder
@@ -1140,9 +1152,9 @@ enum ComposerFieldEditor {
 enum ComposerSendButtonIcon {
     static func systemName(isFollowUp: Bool, commandHeld: Bool, promptFocused: Bool) -> String {
         if isFollowUp, commandHeld, promptFocused {
-            return "steeringwheel.circle.fill"
+            return "steeringwheel.circle"
         }
-        return "arrow.up.circle.fill"
+        return "arrow.up.circle"
     }
 }
 
@@ -1589,8 +1601,9 @@ private struct ComposerAttachmentThumb: View {
                                 .aspectRatio(contentMode: .fill)
                         } else {
                             Color.primary.opacity(0.08)
-                            Image(systemName: attachment.isVideo ? "video.fill" : "photo")
+                            Image(systemName: attachment.isVideo ? "video" : "photo")
                                 .font(.system(size: 16, weight: .medium))
+                                .symbolRenderingMode(.monochrome)
                                 .foregroundStyle(Color.primary.opacity(0.45))
                         }
                     }
@@ -1602,10 +1615,10 @@ private struct ComposerAttachmentThumb: View {
                     )
 
                     if attachment.isVideo {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 18))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, Color.black.opacity(0.45))
+                        Image(systemName: "play.circle")
+                            .font(.system(size: 18, weight: .regular))
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(Color.primary.opacity(0.85))
                     }
                 }
             }

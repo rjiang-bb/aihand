@@ -57,7 +57,9 @@ final class InputTap {
             (1 << CGEventType.otherMouseUp.rawValue) |
             (1 << CGEventType.leftMouseDragged.rawValue) |
             (1 << CGEventType.rightMouseDragged.rawValue) |
-            (1 << CGEventType.otherMouseDragged.rawValue)
+            (1 << CGEventType.otherMouseDragged.rawValue) |
+            // Drives DrawingPointerPark; swallowed only while the cursor is parked.
+            (1 << CGEventType.mouseMoved.rawValue)
 
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let tap = CGEvent.tapCreate(
@@ -142,11 +144,18 @@ final class InputTap {
             return Unmanaged.passUnretained(event)
         }
 
+        let isMotion = type == .mouseMoved || type == .leftMouseDragged
+            || type == .rightMouseDragged || type == .otherMouseDragged
+        if isMotion && DrawingPointerPark.isParked {
+            DrawingPointerPark.track(event)
+        }
+
         let key = interactKey
         switch type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             if !key.isEmpty && (event.flags.contains(key) || CGEventSource.flagsState(.hidSystemState).contains(key)) {
                 lock.withLock { _interactPress = true }
+                Self.releaseParkForRealPress(event)
                 DispatchQueue.main.async { [weak self] in self?.onInteractDown?() }
             }
         default:
@@ -163,8 +172,10 @@ final class InputTap {
 
         switch type {
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            passingThrough = passThroughRects.contains { $0.contains(event.location) }
+            let hit = DrawingPointerPark.isParked ? DrawingPointerPark.quartzPointerLocation : event.location
+            passingThrough = passThroughRects.contains { $0.contains(hit) }
             if passingThrough {
+                Self.releaseParkForRealPress(event)
                 let location = event.location
                 DispatchQueue.main.async { [weak self] in self?.onPassThroughPress?(location) }
             }
@@ -193,16 +204,30 @@ final class InputTap {
             return nil
         case .leftMouseDragged, .otherMouseDragged:
             DispatchQueue.main.async { [weak self] in self?.onLeftDragged?() }
+            // Parked: the hand follows deltas; the app under the parked cursor must see nothing.
+            if DrawingPointerPark.isParked { return nil }
             // Rewrite to mouseMoved so the cursor keeps tracking while we consume the click.
             event.type = .mouseMoved
             return Unmanaged.passUnretained(event)
         case .rightMouseDragged:
             DispatchQueue.main.async { [weak self] in self?.onRightDragged?() }
-            // Same as left: swallowing the drag freezes cursor position (and the hand).
+            if DrawingPointerPark.isParked { return nil }
             event.type = .mouseMoved
             return Unmanaged.passUnretained(event)
+        case .mouseMoved:
+            // Keeps hover/tooltips in the app under the parked cursor. Keys are never touched.
+            return DrawingPointerPark.isParked ? nil : Unmanaged.passUnretained(event)
         default:
             return Unmanaged.passUnretained(event)
         }
+    }
+
+    /// A press that must land for real (menu bar, our chrome, interact key): bring the real
+    /// cursor to the hand first so the click hits what the hand is over.
+    private static func releaseParkForRealPress(_ event: CGEvent) {
+        guard DrawingPointerPark.isParked else { return }
+        let target = DrawingPointerPark.quartzPointerLocation
+        DrawingPointerPark.unpark(warpToLogical: true)
+        event.location = target
     }
 }

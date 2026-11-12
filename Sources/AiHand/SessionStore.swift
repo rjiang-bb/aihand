@@ -15,6 +15,8 @@ enum AgentMessageKind: String, Codable, Equatable {
     case assistant
     case tool
     case system
+    /// Cursor-style chip: "Worked for 23s", "Thought 2s".
+    case status
 }
 
 struct AgentMessage: Identifiable, Equatable, Codable {
@@ -26,6 +28,8 @@ struct AgentMessage: Identifiable, Equatable, Codable {
     /// True when this user turn interrupted an in-flight run (⌘↩ / steer).
     var steered: Bool
     var createdAt: Date
+    /// File-edit tool row with a before/after sidecar in `EditSnapshotStore`.
+    var editSnapshot: Bool = false
 
     /// First attachment — kept for call sites that only need one path.
     var imagePath: String? {
@@ -50,7 +54,8 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         imagePath: String? = nil,
         imagePaths: [String] = [],
         steered: Bool = false,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        editSnapshot: Bool = false
     ) {
         self.id = id
         self.kind = kind
@@ -64,10 +69,11 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         }
         self.steered = steered
         self.createdAt = createdAt
+        self.editSnapshot = editSnapshot
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, text, imagePath, imagePaths, steered, createdAt
+        case id, kind, text, imagePath, imagePaths, steered, createdAt, editSnapshot
     }
 
     init(from decoder: Decoder) throws {
@@ -77,6 +83,7 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         text = try c.decode(String.self, forKey: .text)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         steered = try c.decodeIfPresent(Bool.self, forKey: .steered) ?? false
+        editSnapshot = try c.decodeIfPresent(Bool.self, forKey: .editSnapshot) ?? false
         if let paths = try c.decodeIfPresent([String].self, forKey: .imagePaths), !paths.isEmpty {
             imagePaths = paths
         } else if let one = try c.decodeIfPresent(String.self, forKey: .imagePath) {
@@ -94,6 +101,9 @@ struct AgentMessage: Identifiable, Equatable, Codable {
         try c.encode(createdAt, forKey: .createdAt)
         if steered {
             try c.encode(true, forKey: .steered)
+        }
+        if editSnapshot {
+            try c.encode(true, forKey: .editSnapshot)
         }
         if imagePaths.count == 1 {
             try c.encode(imagePaths[0], forKey: .imagePath)
@@ -151,6 +161,8 @@ final class AgentSession: ObservableObject, Identifiable {
     @Published var preview: String
     @Published var chatId: String?
     @Published var errorMessage: String?
+    /// Ephemeral in-transcript footer while working ("Exploring…", "Planning next moves").
+    @Published var liveActivity: String? = nil
     /// Pending follow-ups; not persisted across relaunch.
     @Published var queuedFollowUps: [QueuedFollowUp] = []
     /// Queue item loaded into the composer for edit; that item and everything after it are held.
@@ -736,6 +748,7 @@ final class SessionStore: ObservableObject {
         for message in session.messages {
             for path in message.imagePaths { paths.insert(path) }
         }
+        EditSnapshotStore.removeAll(sessionID: session.id)
         let fm = FileManager.default
         for path in paths {
             guard fm.fileExists(atPath: path) else { continue }

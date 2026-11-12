@@ -14,6 +14,20 @@ final class TranscriptMarkdownTests: XCTestCase {
         ctx = JSContext()
         var jsError: String?
         ctx.exceptionHandler = { _, e in jsError = e?.toString() }
+        // marked is injected into shellHTML before `esc`; load it so configureMarked can bind.
+        let markedStart = try XCTUnwrap(
+            html.range(of: "marked v15"),
+            "shellHTML must embed vendored marked.min.js"
+        )
+        // Walk back to the opening `/**` comment of the UMD bundle.
+        let pre = html[..<markedStart.lowerBound]
+        let commentOpen = try XCTUnwrap(pre.range(of: "/**", options: .backwards))
+        let markedEnd = try XCTUnwrap(html.range(of: "</script>", range: markedStart.upperBound..<html.endIndex))
+        let markedJS = String(html[commentOpen.lowerBound..<markedEnd.lowerBound])
+        ctx.evaluateScript(markedJS)
+        XCTAssertNil(jsError, "marked failed to load: \(jsError ?? "")")
+        XCTAssertNotNil(ctx.objectForKeyedSubscript("marked"), "marked global missing after load")
+        jsError = nil
         ctx.evaluateScript(js)
         XCTAssertNil(jsError, "transcript JS failed to load: \(jsError ?? "")")
     }
@@ -25,7 +39,31 @@ final class TranscriptMarkdownTests: XCTestCase {
     func testEmptyInput() { XCTAssertEqual(md(""), "") }
 
     func testEscapesHTML() {
-        XCTAssertFalse(md("<script>alert(1)</script>").contains("<script>"))
+        let out = md("<script>alert(1)</script>")
+        XCTAssertFalse(out.contains("<script>"), out)
+        XCTAssertTrue(out.contains("&lt;script&gt;"), out)
+    }
+
+    func testInlineHTMLIsEscapedNotRendered() {
+        let out = md("hi <b>bold</b> there")
+        XCTAssertFalse(out.contains("<b>bold</b>"), out)
+        XCTAssertTrue(out.contains("&lt;b&gt;"), out)
+        XCTAssertTrue(out.contains("hi "), out)
+    }
+
+    func testFootnotesNotRendered() {
+        let out = md("See note[^1].\n\n[^1]: hidden detail")
+        XCTAssertFalse(out.contains("footnotes"), out)
+        XCTAssertFalse(out.contains("footnote-ref"), out)
+        // Footnote marker stays literal / non-linked prose — not a ref UI.
+        XCTAssertFalse(out.contains("href=\"#fn"), out)
+    }
+
+    func testStrikethroughAndTaskList() {
+        let strike = md("~~gone~~")
+        XCTAssertTrue(strike.contains("<del>"), strike)
+        let task = md("- [ ] todo\n- [x] done")
+        XCTAssertTrue(task.contains("type=\"checkbox\""), task)
     }
 
     func testInlineFormatting() {
@@ -83,6 +121,37 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertTrue(md("> quoted").contains("<blockquote"))
     }
 
+    func testGFMTableRendersHTMLTable() {
+        let src = """
+        | Path | Role |
+        |------|------|
+        | `src/app/` | Expo Router |
+        | src/game/ | Match logic |
+        """
+        let out = md(src)
+        XCTAssertTrue(out.contains("<table>"), out)
+        XCTAssertTrue(out.contains("<thead>"), out)
+        XCTAssertTrue(out.contains("<th"), out)
+        XCTAssertTrue(out.contains("<td"), out)
+        XCTAssertTrue(out.contains("<code>src/app/</code>"), out)
+        XCTAssertTrue(out.contains("Match logic"), out)
+        XCTAssertFalse(out.contains("|------|"), "separator must not leak as text: \(out)")
+    }
+
+    func testGFMTableAlignment() {
+        let out = md("| A | B |\n|:---|---:|\n| L | R |")
+        // marked emits HTML align=; CSS maps it to text-align.
+        XCTAssertTrue(out.contains("align=\"left\""), out)
+        XCTAssertTrue(out.contains("align=\"right\""), out)
+        let css = ChatTranscriptView.shellHTML
+        XCTAssertTrue(css.contains("th[align=\"left\"]") || css.contains("th[align=left]"), css)
+    }
+
+    func testPipeLineWithoutSeparatorIsNotATable() {
+        let out = md("| not a table |")
+        XCTAssertFalse(out.contains("<table>"), out)
+    }
+
     func testCRLFNormalized() {
         XCTAssertEqual(md("- a\r\n- b").components(separatedBy: "<li>").count - 1, 2)
     }
@@ -93,5 +162,129 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertTrue(html.contains("steer-icon"))
         XCTAssertFalse(html.contains("steer-badge"))
         XCTAssertFalse(html.contains("+ 'Steered</div>'"), "no visible Steered label")
+    }
+
+    func testSelectionToolbarButtonsHaveNoNativeTooltips() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("data-action=\"chat\""))
+        XCTAssertTrue(html.contains("data-action=\"new\""))
+        // Labels already show shortcuts — native `title` tooltips are redundant.
+        XCTAssertFalse(html.contains("title=\"Add to chat"))
+        XCTAssertFalse(html.contains("title=\"Add to new session"))
+    }
+
+    func testStatusChipAndLiveActivityMarkup() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains(".msg.status"))
+        XCTAssertTrue(html.contains("live-activity"))
+        XCTAssertTrue(html.contains("live-spinner"))
+        XCTAssertTrue(html.contains("live-spin"))
+        XCTAssertTrue(html.contains("Exploring "))
+        XCTAssertTrue(html.contains("liveActivityHTML"))
+        // In-progress footer matches body text size (not the smaller muted caption).
+        XCTAssertTrue(html.contains(".msg.live-activity") && html.contains("14.5px"))
+        // Status / tool chips are not selectable text — arrow cursor, not I-beam.
+        XCTAssertTrue(html.contains(".msg.status,\n      .msg.live-activity") || html.contains("cursor: default"))
+        XCTAssertTrue(html.contains(".msg.status") && html.contains("cursor: default"))
+    }
+
+    func testToolDisclosureChevronHiddenUntilHoverOrExpanded() {
+        let html = ChatTranscriptView.shellHTML
+        // Idle: chevron invisible; hover or open keeps it visible.
+        XCTAssertTrue(html.contains(".msg.tool-group .chev"))
+        XCTAssertTrue(html.contains("opacity: 0;"))
+        XCTAssertTrue(html.contains(".msg.tool-group .tool-summary:hover .chev"))
+        XCTAssertTrue(html.contains(".msg.tool-group.expanded .chev"))
+        XCTAssertTrue(html.contains("opacity: 0.9;"))
+    }
+
+    func testTranscriptUsesMonochromeOutlineGlyphsNotEmoji() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("function outlineGlyph("))
+        XCTAssertTrue(html.contains("stroke=\"currentColor\""))
+        XCTAssertFalse(html.contains("✏️"))
+        XCTAssertFalse(html.contains("📄"))
+        XCTAssertFalse(html.contains("💭"))
+        XCTAssertTrue(html.contains("outlineGlyph('edit')"))
+        XCTAssertTrue(html.contains("outlineGlyph('think')"))
+    }
+
+    func testWorkedChipNestsThoughtAndToolsUnderDisclosure() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("worked-group"))
+        XCTAssertTrue(html.contains("workedGroupHTML"))
+        XCTAssertTrue(html.contains("isWorkedChip"))
+        XCTAssertTrue(html.contains("isThoughtChip"))
+        // Same hover/expanded chevron treatment as tool groups.
+        XCTAssertTrue(html.contains(".msg.worked-group .tool-summary:hover .chev"))
+        XCTAssertTrue(html.contains(".msg.worked-group.expanded .chev"))
+    }
+
+    func testEditedFilesDisclosureCollapsedByDefault() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("edits-group"))
+        XCTAssertTrue(html.contains("editsGroupHTML"))
+        XCTAssertTrue(html.contains("diff-add"))
+        XCTAssertTrue(html.contains("diff-del"))
+        XCTAssertTrue(html.contains("inProgress ? 'Editing' : 'Edited'"))
+        XCTAssertTrue(html.contains(".msg.edits-group .tool-summary:hover .chev"))
+        // Live footer colors +/- the same way.
+        XCTAssertTrue(html.contains("diff-add"))
+        XCTAssertTrue(html.contains("liveActivityHTML"))
+        // Default is collapsed — expanded only when __expandedGroups remembers it.
+        XCTAssertTrue(html.contains("!!window.__expandedGroups[groupId]"))
+    }
+
+    func testEditRowGlyphsAreVerticallyCentered() {
+        let html = ChatTranscriptView.shellHTML
+        let block = try! XCTUnwrap(html.range(of: ".msg.edits-group .tool-detail {"))
+        let rule = html[block.upperBound...].prefix(120)
+        XCTAssertTrue(rule.contains("align-items: center;"), String(rule))
+        XCTAssertFalse(html.contains("align-items: flex-start;\n        flex-wrap: wrap;"))
+    }
+
+    func testFileDiffRowsWireCodeViewAndSnapshotBridge() {
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("<script src=\"codeview/codeview.js\"></script>"))
+        XCTAssertTrue(html.contains("href=\"codeview/codeview.css\""))
+        XCTAssertTrue(html.contains("tool-detail has-diff"))
+        XCTAssertTrue(html.contains("it.item.editSnapshot"))
+        XCTAssertTrue(html.contains("window.__expandedDiffs"))
+        XCTAssertTrue(html.contains("messageHandlers.loadEditSnapshot"))
+        XCTAssertTrue(html.contains("window.receiveEditSnapshot = function"))
+        XCTAssertTrue(html.contains("window.CodeView.createDiff"))
+        // One live diff; re-parented across re-renders instead of rebuilt.
+        XCTAssertTrue(html.contains("ph.appendChild(live.node)"))
+        XCTAssertTrue(html.contains("disposeLiveDiff"))
+    }
+
+    func testCodeViewModuleExposesDiffAndEditorWithSharedChrome() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("assets/codeview/codeview.js")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        let js = JSContext()!
+        var err: String?
+        js.exceptionHandler = { _, e in err = e?.toString() }
+        js.evaluateScript("var window = this;")
+        js.evaluateScript(src)
+        XCTAssertNil(err)
+        XCTAssertEqual(js.evaluateScript("typeof CodeView.createDiff")?.toString(), "function")
+        XCTAssertEqual(js.evaluateScript("typeof CodeView.createEditor")?.toString(), "function")
+        let lang = js.evaluateScript("""
+        CodeView.languageFor({ languages: { getLanguages: function() { return [
+          { id: 'markdown', extensions: ['.md'] },
+          { id: 'dockerfile', extensions: [], filenames: ['Dockerfile'] }
+        ]; } } }, '/w/aihand/README.md') + ',' +
+        CodeView.languageFor({ languages: { getLanguages: function() { return [
+          { id: 'dockerfile', extensions: [], filenames: ['Dockerfile'] }
+        ]; } } }, '/w/Dockerfile') + ',' +
+        CodeView.languageFor({ languages: { getLanguages: function() { return []; } } }, '/w/x.zzz')
+        """)?.toString()
+        XCTAssertEqual(lang, "markdown,dockerfile,plaintext")
+        // Inline / side-by-side switch lives on the diff editor (renderSideBySide).
+        XCTAssertTrue(src.contains("renderSideBySide"))
+        XCTAssertTrue(src.contains("hideUnchangedRegions"))
+        XCTAssertTrue(src.contains("useInlineViewWhenSpaceIsLimited = false"))
     }
 }

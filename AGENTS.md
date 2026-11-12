@@ -1,5 +1,20 @@
 # Agent notes
 
+## Restart after every turn
+
+After finishing each agent turn that changed the app (or when in doubt), **automatically `/restart`** — rebuild and relaunch via the `restart` skill (`./scripts/run-debug.sh` from the repo root, unrestricted shell). Do not wait for the user to ask.
+
+- Run it at the end of the turn, after tests/probes for that change have passed (or failed and you’ve fixed them).
+- Skip only for pure read-only answers with no file edits, or when the user explicitly says not to relaunch.
+- Confirm briefly that AiHand relaunched; do not dump the full build log unless it failed.
+
+## Fix build warnings
+
+When building the app (`./scripts/run-debug.sh`, `swift build`, `swift test`), read the compiler output for **warnings**, not just errors.
+
+- If any warnings appear, fix them (don't suppress or ignore), then **build again** and confirm the build is warning-free.
+- Repeat until a clean build. Only warnings that originate in vendored/third-party code you can't change may be left, and call them out briefly.
+
 ## Sessions panel placement
 
 When the chat pane closes, the sessions list must slide so its **right edge lines up with where the chat window’s right edge was**.
@@ -34,6 +49,7 @@ Holding **⌘** shows per-row `⌘1`…`⌘9` labels and a hints footer (`⌘1�
 
 - Own the shortcut in `SessionsSidePanel`’s key monitor when the panel is key, in `AnnotatePromptPanel` while commenting, and keep the app menu item “Cycle Agent Model” (`AppDelegate`) as the fallback — menu key equivalents are more reliable than local monitors with ⌘ held.
 - Capture screen ↔ window while drawing is **⌘B** (not ⌘/) so model cycling stays free in the comment box.
+- While drawing (annotate box closed), **⌘D** toggles drawing ↔ video mode (`OverlayController.toggleDrawVideoMode`). Sessions-panel ⌘D still starts Draw when the overlay is inactive.
 - Do **not** also consume ⌘/ in `SessionChatView` (double-cycle skips favorites).
 - Do **not** call `closeChat()` from `windowDidResignKey`. Menu key equivalents and the favorite picker resign key briefly; collapsing clears `selectedID` and makes ⌘/ a no-op. Use Esc / the chat close control to dismiss chat.
 
@@ -70,6 +86,25 @@ Do **not** let the Archive Session menu key equivalent archive while a preview o
 ## Open session survives relaunch
 
 The last open chat per workspace is written to `Preferences.openChatByWorkspace` on every select/close (not only on clean quit). On launch, `SessionsSidePanel` restores `selectedID` when that session still exists so force-quit doesn’t leave the list with nothing selected.
+
+## UI icons
+
+All UI chrome uses **monochrome outline** icons — same family as the sessions header (`gearshape`, `xmark`, chevrons).
+
+- Prefer SF Symbols **without** `.fill` (e.g. `plus.circle`, `arrow.up.circle`, `pencil`, `keyboard`). Color via `foregroundStyle` / `currentColor`, not multi-color emoji.
+- Transcript / WKWebView rows: inline SVG strokes with `stroke="currentColor"` (see `outlineGlyph` in `ChatTranscriptView`) — never ✏️📄💭 or other emoji glyphs.
+- Do **not** introduce new filled circle badges (`*.circle.fill`) or hierarchical multi-tone plates unless matching an existing SoftChrome control that already needs an accent fill for state (and even then prefer outline + `foregroundStyle`).
+- Keep weight/size consistent with neighbors (composer actions ~22–26pt, list/header ~12–14pt, transcript glyphs ~12px).
+
+## In-chat file diffs (CodeView / Monaco)
+
+Edited file rows in the transcript expand into a Monaco diff (VS Code's editor core, vendored at `assets/monaco`).
+
+- All code surfaces go through `assets/codeview/codeview.js` (`CodeView.createDiff` / `CodeView.createEditor`) so diffs and the future file editor share one header, theme, and options. Don't call `monaco.editor.*` directly from the transcript.
+- Assets are served by `AssetSchemeHandler` (`aihand-asset://app/...`); the transcript shell uses that as its base URL so Monaco and its worker are same-origin. Monaco loads lazily on first expand.
+- Before/after text lives in sidecar files (`EditSnapshotStore`, `Application Support/AiHand/EditSnapshots/<session>/<message>.json`); `AgentMessage.editSnapshot` is only a flag. Keep large text out of the per-token `renderMessages` payload — fetch via the `loadEditSnapshot` handler.
+- One live diff at a time; its DOM node is re-parented across re-renders (not rebuilt).
+- `TranscriptMonacoTests` runs the real shell in a WKWebView (with a rAF shim — the XCTest host has no display link).
 
 ## Hover tooltips
 
@@ -147,3 +182,4 @@ Earlier roots win on name collisions — personal / shared before that CLI’s p
 - `./scripts/composer-probe.sh` — composer real-keystroke harness (see above).
 - `./scripts/panel-probe.sh [placement height hints keys paging dismiss]` — sessions-panel harness (DEBUG-only, `SessionsPanelProbe.swift`): list/chat edge placement, list height, ⌘-hold hints, ⌘1–9 / ⌘↑↓ / ⌘W / ⌘/ / Esc, plus the annotate comment box (⌘/ cycling, Return submits, Esc cancels). Needs a GUI session; run it after touching `SessionsSidePanel`.
 - `./scripts/overlay-probe.sh` — overlay/drawing end-to-end (`OverlayProbe.swift`): real HID mouse events → freehand/rectangle/arrow/text, undo/clear, toolbar click, click-swallowing, Esc. Needs Accessibility and **moves the real cursor** (hands off); prints SKIPPED if the event tap can't install.
+- `./scripts/tooltip-freeze-probe.sh` — drawing keeps another app's hover tooltip (`TooltipFreezeProbe.swift`): spawns a `--tooltip-host` child process with a native `toolTip` button, hovers until the tip window shows, enters drawing, sends HID-style relative moves, and asserts the host saw no moves/exits, its tip is still up, the cursor stayed parked, and exit warps the cursor to the hand. Needs Accessibility; moves the real cursor briefly. Run after touching `DrawingPointerPark` / `InputTap`.

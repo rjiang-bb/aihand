@@ -107,6 +107,72 @@ final class SkillCatalogTests: SandboxedTestCase {
         XCTAssertEqual(SkillCatalog.matches(query: "", in: s).count, 8)
     }
 
+    func testBuiltInPlanIsMergedAndListedForEveryCLI() {
+        for cli in AgentCLIKind.allCases {
+            let found = SkillCatalog.skills(connectionID: nil, cli: cli, forceRefresh: true)
+            let plan = found.first { $0.name == "plan" }
+            XCTAssertNotNil(plan, "missing built-in plan for \(cli)")
+            XCTAssertEqual(plan?.isBuiltIn, true)
+            XCTAssertEqual(plan?.description, BuiltInSkills.plan.description)
+            XCTAssertEqual(found.first?.name, "plan", "built-ins lead the catalog for \(cli)")
+        }
+    }
+
+    func testBuiltInPlanWinsOverDiskSkill() throws {
+        let home = try XCTUnwrap(SkillCatalog.homeDirectoryOverride)
+        try write(".cursor/skills/plan/SKILL.md", """
+        ---
+        name: plan
+        description: disk plan skill that must lose
+        ---
+        """, under: home)
+        let found = SkillCatalog.skills(connectionID: nil, cli: .cursor, forceRefresh: true)
+        let plans = found.filter { $0.name.lowercased() == "plan" }
+        XCTAssertEqual(plans.count, 1)
+        XCTAssertTrue(plans[0].isBuiltIn)
+        XCTAssertEqual(plans[0].description, BuiltInSkills.plan.description)
+        XCTAssertFalse(plans[0].description.contains("disk plan"))
+    }
+
+    func testMergeBuiltInsDropsCollidingScannedNames() {
+        let scanned = [
+            AgentSkill(name: "plan", description: "from disk", directoryName: "plan"),
+            AgentSkill(name: "Plan", description: "cased disk", directoryName: "Plan"),
+            AgentSkill(name: "other", description: "keep", directoryName: "other"),
+        ]
+        let merged = SkillCatalog.mergeBuiltIns(over: scanned)
+        XCTAssertEqual(merged.filter { $0.name.lowercased() == "plan" }.count, 1)
+        XCTAssertTrue(merged[0].isBuiltIn)
+        XCTAssertNotNil(merged.first { $0.name == "other" })
+    }
+
+    @MainActor
+    func testApplyBuiltInInsertsSkillChip() {
+        var text = "/pl"
+        let ac = SkillAutocompleteController()
+        ac.apply(BuiltInSkills.plan, to: &text)
+        XCTAssertEqual(text, "⟦skill:plan⟧ ")
+    }
+
+    func testBuiltInPlanChipUsesClipboardSymbol() {
+        XCTAssertEqual(BuiltInSkills.symbolName(forSkillNamed: "plan"), "list.bullet.clipboard")
+        let chip = ComposerSkillChipAttachment(name: "plan", darkChrome: true)
+        XCTAssertEqual(chip.symbolName, "list.bullet.clipboard")
+        let folder = ComposerSkillChipAttachment(name: "other", darkChrome: true)
+        XCTAssertEqual(folder.symbolName, "sparkles")
+    }
+
+    @MainActor
+    func testApplyFolderSkillStillInsertsChip() {
+        var text = "/demo"
+        let ac = SkillAutocompleteController()
+        ac.apply(
+            AgentSkill(name: "demo", description: "x", directoryName: "demo"),
+            to: &text
+        )
+        XCTAssertTrue(text.contains("⟦skill:demo⟧"), text)
+    }
+
     func testWorkspaceSkillsAreDiscoveredFromFrontmatter() throws {
         let ws = tempDir.appendingPathComponent("proj", isDirectory: true)
         try write(".cursor/skills/zz-demo-skill/SKILL.md", """

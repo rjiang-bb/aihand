@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 
 /// Bottom-center shortcut strip shown while the pointer is active for annotating.
 final class AnnotationHintPanel {
@@ -8,6 +9,8 @@ final class AnnotationHintPanel {
     }
 
     private var panel: Panel?
+    /// When true, the strip sits where the hand picker was; when false, it clears the picker.
+    private var docked = false
 
     var frame: CGRect { panel?.frame ?? .zero }
 
@@ -18,27 +21,37 @@ final class AnnotationHintPanel {
             ("⌘⇧S", "save screenshot"),
             ("⌘⇧C", "copy"),
             ("⌘B", "screen / window"),
-            ("Enter", "comment"),
-            ("⌘↩", "send to agent"),
+            ("Enter", "comment & send"),
+            ("⌘↩", "attach to chat"),
+            ("⌘D", "video"),
             ("Right-drag", "video"),
-            ("Esc", "exit"),
+            ("Esc", "clear & exit"),
         ]
     }
 
+    /// Keyboard-armed video mode: waiting for a drag to pick the region.
+    static let videoArmedParts: [(String, String)] = [
+        ("Drag", "select region"),
+        ("⌘D", "drawing"),
+        ("Esc", "cancel"),
+    ]
+
     static let videoSelectingParts: [(String, String)] = [
         ("Release", "start recording"),
+        ("⌘D", "drawing"),
         ("Esc", "cancel"),
     ]
 
     static let videoRecordingParts: [(String, String)] = [
         ("⌘S", "save + comment"),
         ("⌘⇧S", "save video"),
-        ("⌘↩", "send to agent"),
+        ("⌘↩", "attach to chat"),
         ("Esc", "discard"),
     ]
 
-    func show(on screen: NSScreen, parts: [(String, String)] = drawingParts) {
+    func show(on screen: NSScreen, parts: [(String, String)] = drawingParts, docked: Bool = false) {
         hide()
+        self.docked = docked
         let p = Panel(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 40),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -111,6 +124,7 @@ final class AnnotationHintPanel {
     func hide() {
         guard let p = panel else { return }
         panel = nil
+        docked = false
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.2
             p.animator().alphaValue = 0
@@ -119,17 +133,34 @@ final class AnnotationHintPanel {
         })
     }
 
-    func reposition(on screen: NSScreen) {
+    func reposition(on screen: NSScreen, docked: Bool? = nil, animated: Bool = false) {
         guard let p = panel else { return }
-        place(p, on: screen)
+        if let docked { self.docked = docked }
+        place(p, on: screen, animated: animated)
     }
 
-    /// Sit above the hand toolbar and the ink/color tray that opens over it.
-    private func place(_ p: NSPanel, on screen: NSScreen) {
+    /// Raised clears the hand toolbar; docked takes the toolbar's bottom slot after it fades.
+    private func place(_ p: NSPanel, on screen: NSScreen, animated: Bool = false) {
         let visible = screen.visibleFrame
-        p.setFrameOrigin(CGPoint(
+        let frame = NSRect(
             x: visible.midX - p.frame.width / 2,
-            y: visible.minY + 128
-        ))
+            y: AnnotationChromeLayout.hintOriginY(visibleMinY: visible.minY, docked: docked),
+            width: p.frame.width,
+            height: p.frame.height
+        )
+        Self.move(p, to: frame, animated: animated)
+    }
+
+    static func move(_ p: NSPanel, to frame: NSRect, animated: Bool) {
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = AnnotationChromeLayout.slideDuration
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                ctx.allowsImplicitAnimation = true
+                p.animator().setFrame(frame, display: true)
+            }
+        } else {
+            p.setFrame(frame, display: false)
+        }
     }
 }

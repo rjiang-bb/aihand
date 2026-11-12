@@ -41,6 +41,38 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
         XCTAssertTrue(t[6].contains("Sources"), t[6])
     }
 
+    func testEditCompletionRewritesLabelWithDiffStats() throws {
+        let s = try run([
+            #"{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/VideoDestinationPicker.swift"}}}}"#,
+            #"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/VideoDestinationPicker.swift"},"result":{"success":{"path":"/w/Sources/VideoDestinationPicker.swift","linesAdded":85,"linesRemoved":22}}}}}"#,
+            #"{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/SoftChrome.swift"}}}}"#,
+            #"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/Sources/SoftChrome.swift"},"result":{"success":{"path":"/w/Sources/SoftChrome.swift","linesAdded":5,"linesRemoved":0}}}}}"#,
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"c"}"#,
+        ])
+        let t = tools(s)
+        XCTAssertEqual(t.count, 2, "\(t)")
+        XCTAssertEqual(t[0], "Edited Sources/VideoDestinationPicker.swift +85 -22")
+        XCTAssertEqual(t[1], "Edited Sources/SoftChrome.swift +5")
+        let sum = TurnEditCopy.summarize(toolTexts: t)
+        XCTAssertEqual(sum?.fileCount, 2)
+        XCTAssertEqual(sum?.added, 90)
+        XCTAssertEqual(sum?.removed, 22)
+    }
+
+    func testEditCompletionStoresDiffSnapshot() throws {
+        let s = try run([
+            #"{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/README.md"}}}}"#,
+            ##"{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/README.md","strReplace":{"oldText":"Hi","newText":"Hello"}},"result":{"success":{"path":"/w/README.md","linesAdded":1,"linesRemoved":1,"afterFullFileContent":"# Title\nHello\n"}}}}}"##,
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"c"}"#,
+        ])
+        let edit = try XCTUnwrap(s.messages.first { $0.kind == .tool })
+        waitUntil("snapshot flag") { s.messages.first { $0.id == edit.id }?.editSnapshot == true }
+        let snap = try XCTUnwrap(EditSnapshotStore.read(sessionID: s.id, messageID: edit.id))
+        XCTAssertEqual(snap.path, "/w/README.md")
+        XCTAssertEqual(snap.original, "# Title\nHi\n")
+        XCTAssertEqual(snap.modified, "# Title\nHello\n")
+    }
+
     func testCursorLongShellCommandIsClippedToOneLine() throws {
         let long = String(repeating: "x", count: 200)
         let s = try run([
@@ -71,7 +103,67 @@ final class FakeAgentStreamTests: FakeAgentTestCase {
             #"{"type":"assistant","timestamp_ms":2,"message":{"content":[{"type":"text","text":"after"}]}}"#,
             #"{"type":"result","is_error":false,"result":"after","session_id":"c"}"#,
         ])
-        XCTAssertEqual(s.messages.filter { $0.kind != .user }.map(\.kind), [.assistant, .tool, .assistant])
+        let kinds = s.messages.filter { $0.kind != .user && $0.kind != .status }.map(\.kind)
+        XCTAssertEqual(kinds, [.assistant, .tool, .assistant])
+        XCTAssertTrue(s.messages.contains { $0.kind == .status && $0.text.hasPrefix("Worked for") })
+        XCTAssertNil(s.liveActivity)
+    }
+
+    func testSuccessfulResultEmitsWorkedForStatusChip() throws {
+        let s = try run([
+            #"{"type":"assistant","timestamp_ms":1,"message":{"content":[{"type":"text","text":"ok"}]}}"#,
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"c"}"#,
+        ])
+        let chips = s.messages.filter { $0.kind == .status }.map(\.text)
+        XCTAssertEqual(chips.count, 1, "\(chips)")
+        XCTAssertTrue(chips[0].hasPrefix("Worked for"), chips[0])
+        // Chip sits right after the user turn.
+        XCTAssertEqual(s.messages[1].kind, .status)
+    }
+
+    func testCodexReasoningEmitsThoughtChip() throws {
+        let s = try run([
+            #"{"type":"thread.started","thread_id":"t1"}"#,
+            #"{"type":"turn.started"}"#,
+            #"{"type":"item.started","item":{"type":"reasoning"}}"#,
+            #"{"type":"item.completed","item":{"type":"reasoning"}}"#,
+            #"{"type":"item.completed","item":{"type":"agent_message","text":"done"}}"#,
+            #"{"type":"turn.completed"}"#,
+        ])
+        let status = s.messages.filter { $0.kind == .status }.map(\.text)
+        XCTAssertTrue(status.contains { $0.hasPrefix("Thought") }, "\(status)")
+        XCTAssertTrue(status.contains { $0.hasPrefix("Worked for") }, "\(status)")
+        XCTAssertNil(s.liveActivity)
+    }
+
+    func testToolCallsSetExploringLiveActivityThenClearOnResult() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("go")
+        waitUntil("tool landed") { s.messages.contains { $0.kind == .tool } }
+        XCTAssertEqual(s.liveActivity, "Exploring 1 file")
+        waitUntil("run ends") { s.status != .working }
+        XCTAssertNil(s.liveActivity)
+        XCTAssertTrue(s.messages.contains { $0.kind == .status && $0.text.hasPrefix("Worked for") })
+    }
+
+    func testInProgressEditsSetEditingLiveActivity() throws {
+        try? FileManager.default.removeItem(at: fakeDir.appendingPathComponent("lines.txt"))
+        let exe = fakeDir.appendingPathComponent("fake-agent")
+        let body = """
+        #!/bin/bash
+        echo '{"type":"system","session_id":"c"}'
+        echo '{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/a.swift"}}}}'
+        echo '{"type":"tool_call","subtype":"completed","tool_call":{"editToolCall":{"args":{"path":"/w/a.swift"},"result":{"success":{"path":"/w/a.swift","linesAdded":79,"linesRemoved":0}}}}}'
+        echo '{"type":"tool_call","subtype":"started","tool_call":{"editToolCall":{"args":{"path":"/w/b.swift"}}}}'
+        sleep 1.5
+        echo '{"type":"result","is_error":false,"result":"ok","session_id":"c"}'
+        """
+        try body.write(to: exe, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe.path)
+        let s = try send("go")
+        waitUntil("editing live activity") { s.liveActivity == "Editing 2 files +79" }
+        waitUntil("run ends") { s.status != .working }
+        XCTAssertNil(s.liveActivity)
     }
 
     func testGarbageAndBlankLinesAreIgnored() throws {
