@@ -763,6 +763,15 @@ struct ChatTranscriptView: NSViewRepresentable {
         font-size: 13px;
         color: var(--text);
       }
+      .msg.status,
+      .msg.live-activity,
+      .msg.tool-group,
+      .msg.worked-group,
+      .msg.edits-group {
+        cursor: default;
+        -webkit-user-select: none;
+        user-select: none;
+      }
       .msg.status {
         align-self: flex-start;
         margin: 2px 0 6px;

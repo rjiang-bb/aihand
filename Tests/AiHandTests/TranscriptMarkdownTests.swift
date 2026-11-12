@@ -183,6 +183,9 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertTrue(html.contains("liveActivityHTML"))
         // In-progress footer matches body text size (not the smaller muted caption).
         XCTAssertTrue(html.contains(".msg.live-activity") && html.contains("14.5px"))
+        // Status / tool chips are not selectable text — arrow cursor, not I-beam.
+        XCTAssertTrue(html.contains(".msg.status,\n      .msg.live-activity") || html.contains("cursor: default"))
+        XCTAssertTrue(html.contains(".msg.status") && html.contains("cursor: default"))
     }
 
     func testToolDisclosureChevronHiddenUntilHoverOrExpanded() {
