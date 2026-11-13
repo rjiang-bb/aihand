@@ -263,6 +263,7 @@ final class WorktreeChangesWindow: NSObject, NSWindowDelegate, WKNavigationDeleg
         <meta charset="utf-8">
         <meta name="color-scheme" content="dark light">
         <link rel="stylesheet" href="codeview/codeview.css?v=\(v)">
+        <link rel="stylesheet" href="codeview/markdown.css?v=\(v)">
         <link rel="stylesheet" href="codeview/changes.css?v=\(v)">
         </head>
         <body>
@@ -288,6 +289,8 @@ final class WorktreeChangesWindow: NSObject, NSWindowDelegate, WKNavigationDeleg
             <div id="pane"></div>
           </div>
         </div>
+        <script src="codeview/marked.min.js?v=\(v)"></script>
+        <script src="codeview/markdown.js?v=\(v)"></script>
         <script src="codeview/codeview.js?v=\(v)"></script>
         <script src="codeview/changes.js?v=\(v)"></script>
         </body>

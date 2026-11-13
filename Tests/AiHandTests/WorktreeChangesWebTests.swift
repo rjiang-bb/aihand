@@ -183,9 +183,11 @@ final class WorktreeChangesWebTests: XCTestCase {
         try wait("single slot") { self.count("#pane .slot") == 1 }
         try wait("diff mounted") { self.count("#pane .monaco-diff-editor") == 1 }
         XCTAssertEqual(try eval("document.querySelector('#pane .cv-path').textContent") as? String, "a.txt")
-        // No commit / push affordances anywhere; the per-file header has no mode toggle (global one only).
+        // No commit / push affordances anywhere; non-markdown files have no per-file mode/Preview chrome
+        // (Inline/Side-by-side lives on the window bar; Preview only appears for .md paths).
         XCTAssertEqual(try eval("document.body.textContent.includes('Commit & Push')") as? Bool, false)
         XCTAssertEqual(count("#pane .cv-seg-btn"), 0)
+        XCTAssertEqual(count("#pane .cv-preview-btn"), 0)
         // Editors are read-only.
         XCTAssertEqual(
             try eval("""
@@ -248,5 +250,19 @@ final class WorktreeChangesWebTests: XCTestCase {
             ((try? self.eval("document.querySelector('#side .row[data-path]') && document.querySelector('#side .row[data-path]').getAttribute('data-path')")) as? String) == "d.txt"
         }
         XCTAssertEqual(try eval("document.querySelector('#filterBtn').textContent.includes('second')") as? Bool, true)
+    }
+
+    func testMarkdownFileShowsPreviewToggleUsingSharedRenderer() throws {
+        WorktreeDiffFixture.write("# Hello\n\nworld\n", "note.md", in: repo)
+        _ = try eval("window.Changes.refresh(); true")
+        try wait("md row") { self.count("#side .row[data-path=\"note.md\"]") == 1 }
+        _ = try eval("document.querySelector('#side .row[data-path=\"note.md\"]').click(); true")
+        try wait("diff mounted") { self.count("#pane .monaco-diff-editor") == 1 }
+        XCTAssertEqual(count("#pane .cv-preview-btn"), 1)
+        _ = try eval("document.querySelector('#pane .cv-preview-btn').click(); true")
+        try wait("preview") {
+            ((try? self.eval("document.querySelector('#pane .cv-body.cv-preview .cv-md h1') && document.querySelector('#pane .cv-body.cv-preview .cv-md h1').textContent")) as? String) == "Hello"
+        }
+        XCTAssertEqual(try eval("typeof window.AiHandMarkdown.toHTML") as? String, "function")
     }
 }

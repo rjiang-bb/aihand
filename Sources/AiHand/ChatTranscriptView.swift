@@ -449,28 +449,9 @@ struct ChatTranscriptView: NSViewRepresentable {
         }
     }
 
-    /// Loads vendored marked (assets/marked.min.js → app Resources).
-    private static func markedJavaScript() -> String {
-        if let url = Bundle.main.url(forResource: "marked.min", withExtension: "js"),
-           let s = try? String(contentsOf: url, encoding: .utf8), !s.isEmpty {
-            return s
-        }
-        // `swift test` / SPM: resolve from this source file → repo assets/.
-        let repoAssets = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent() // AiHand
-            .deletingLastPathComponent() // Sources
-            .deletingLastPathComponent() // repo
-            .appendingPathComponent("assets/marked.min.js")
-        if let s = try? String(contentsOf: repoAssets, encoding: .utf8), !s.isEmpty {
-            return s
-        }
-        return "/* marked.min.js missing */"
-    }
-
-    /// Built once (marked + template); safe to read from any thread after first access.
-    static let shellHTML: String = {
-        shellHTMLTemplate.replacingOccurrences(of: "/*__MARKED__*/", with: markedJavaScript())
-    }()
+    /// Built once; safe to read from any thread after first access.
+    /// Markdown rendering is shared with CodeView Preview via codeview/markdown.js (+ marked).
+    static let shellHTML: String = shellHTMLTemplate
 
     private static let shellHTMLTemplate = """
     <!DOCTYPE html>
@@ -479,6 +460,7 @@ struct ChatTranscriptView: NSViewRepresentable {
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="codeview/codeview.css">
+    <link rel="stylesheet" href="codeview/markdown.css">
     <style>
       :root {
         color-scheme: light dark;
@@ -544,16 +526,25 @@ struct ChatTranscriptView: NSViewRepresentable {
       }
       .msg.user .steer-row {
         display: flex;
+        /* Icon sits on the first text line — not centered against wrapped blocks. */
         align-items: flex-start;
         gap: 7px;
       }
       .msg.user .steer-row > .steer-icon {
-        width: 12px;
-        height: 12px;
         flex: none;
-        margin-top: 0.28em;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 12px;
+        /* Match body line-height so the glyph is vertically middle on line 1. */
+        height: 1.55em;
         opacity: 0.72;
         color: var(--text);
+      }
+      .msg.user .steer-row > .steer-icon svg {
+        width: 12px;
+        height: 12px;
+        display: block;
       }
       .msg.user .steer-row > .steer-body {
         flex: 1;
@@ -873,201 +864,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         border-width: 8px 0 8px 12px;
         border-color: transparent transparent transparent #fff;
       }
-      .md {
-        overflow-wrap: anywhere;
-        word-break: break-word;
-      }
-      .md > *:first-child { margin-top: 0; }
-      .md > *:last-child { margin-bottom: 0; }
-      .md p { margin: 0.55em 0; }
-      .md h1, .md h2, .md h3, .md h4 {
-        margin: 0.9em 0 0.35em;
-        font-weight: 650;
-        line-height: 1.3;
-      }
-      .md h1 { font-size: 1.25em; }
-      .md h2 { font-size: 1.12em; }
-      .md h3 { font-size: 1.05em; }
-      .md ul, .md ol {
-        margin: 0.45em 0;
-        padding-left: 1.35em;
-      }
-      .md ol { list-style-type: decimal; list-style-position: outside; }
-      .md ul { list-style-type: disc; list-style-position: outside; }
-      .md ul ul { list-style-type: circle; }
-      .md ul ul ul { list-style-type: square; }
-      .md li { margin: 0.2em 0; }
-      .md li + li { margin-top: 0.15em; }
-      .md li > ul, .md li > ol { margin: 0.15em 0; }
-      .md a {
-        color: var(--link);
-        cursor: pointer;
-        text-decoration: none;
-        /* Bare autolinks are one long token — break inside the bubble, not past it. */
-        overflow-wrap: anywhere;
-        word-break: break-word;
-      }
-      .md code {
-        font-family: var(--mono);
-        font-size: 0.9em;
-        color: var(--text);
-        background: var(--code-bg);
-        padding: 0.12em 0.35em;
-        border-radius: 4px;
-      }
-      .md .code-block {
-        position: relative;
-        margin: 0.7em 0;
-      }
-      .md .code-block pre {
-        background: var(--pre-bg);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 10px 40px 10px 12px;
-        margin: 0;
-        overflow-x: hidden;
-        white-space: pre-wrap;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-        color: var(--text);
-      }
-      .md .code-block pre code {
-        background: none;
-        padding: 0;
-        font-size: 13px;
-        line-height: 1.45;
-        color: var(--text);
-        white-space: inherit;
-        overflow-wrap: inherit;
-        word-break: inherit;
-      }
-      .md .code-copy {
-        appearance: none;
-        position: absolute;
-        top: 8px;
-        right: 8px;
-        z-index: 1;
-        width: 26px;
-        height: 26px;
-        padding: 0;
-        margin: 0;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid var(--border);
-        border-radius: 7px;
-        background: var(--pre-bg);
-        color: var(--muted);
-        cursor: pointer;
-        -webkit-user-select: none;
-        user-select: none;
-      }
-      .md .code-block.single .code-copy {
-        top: 50%;
-        transform: translateY(-50%);
-      }
-      .md .code-copy:hover {
-        color: var(--text);
-        border-color: var(--text);
-      }
-      .md .code-copy svg {
-        width: 13px;
-        height: 13px;
-        display: block;
-      }
-      .md .code-copy .icon-check { display: none; }
-      .md .code-copy.copied .icon-copy { display: none; }
-      .md .code-copy.copied .icon-check { display: block; }
-      .md .code-copy.copied {
-        color: #34c759;
-        border-color: rgba(52, 199, 89, 0.45);
-      }
-      /* Custom tip — native `title` is slow and system-styled. */
-      .md .code-copy[data-tip]::after {
-        content: attr(data-tip);
-        position: absolute;
-        right: 0;
-        bottom: calc(100% + 6px);
-        padding: 4px 8px;
-        border-radius: 6px;
-        background: rgba(20, 20, 22, 0.96);
-        color: #f2f2f7;
-        font: 600 11px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-        letter-spacing: -0.01em;
-        white-space: nowrap;
-        pointer-events: none;
-        opacity: 0;
-        transform: translateY(2px);
-        transition: opacity 0.12s ease, transform 0.12s ease;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        z-index: 2;
-      }
-      .md .code-copy[data-tip]:hover::after,
-      .md .code-copy[data-tip]:focus-visible::after {
-        opacity: 1;
-        transform: translateY(0);
-      }
-      .md .code-copy.copied[data-tip]::after {
-        content: "Copied";
-        opacity: 1;
-        transform: translateY(0);
-      }
-      .md .code-block.single .code-copy[data-tip]::after {
-        /* Vertically centered button — keep the tip above the chip, not over code. */
-        bottom: calc(50% + 18px);
-      }
-      .md blockquote {
-        margin: 0.6em 0;
-        padding: 0.2em 0 0.2em 0.85em;
-        border-left: 3px solid var(--border);
-        color: var(--muted);
-      }
-      .md hr {
-        border: none;
-        border-top: 1px solid var(--border);
-        margin: 1em 0;
-      }
-      .md table {
-        border-collapse: collapse;
-        width: 100%;
-        margin: 0.7em 0;
-        font-size: 13.5px;
-        overflow: hidden;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-      }
-      .md th, .md td {
-        border: 1px solid var(--border);
-        padding: 6px 10px;
-        text-align: left;
-        vertical-align: top;
-      }
-      .md th {
-        background: var(--card);
-        font-weight: 600;
-      }
-      .md tr:nth-child(even) td {
-        background: color-mix(in srgb, var(--card) 55%, transparent);
-      }
-      .md th[align="left"], .md td[align="left"] { text-align: left; }
-      .md th[align="right"], .md td[align="right"] { text-align: right; }
-      .md th[align="center"], .md td[align="center"] { text-align: center; }
-      .md del {
-        text-decoration: line-through;
-        opacity: 0.85;
-      }
-      .md img {
-        max-width: min(280px, 100%);
-        max-height: 180px;
-        border-radius: 8px;
-        display: block;
-        margin: 0.4em 0;
-      }
-      .md li input[type="checkbox"] {
-        margin-right: 0.4em;
-        vertical-align: middle;
-      }
+      /* Markdown styles live in codeview/markdown.css (shared with CodeView Preview). */
       .empty {
         color: var(--muted);
         text-align: center;
@@ -1172,105 +969,23 @@ struct ChatTranscriptView: NSViewRepresentable {
         <span class="keys" aria-hidden="true"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>L</kbd></span>
       </button>
     </div>
-    <script>
-    /*__MARKED__*/
-    </script>
+    <script src="codeview/marked.min.js"></script>
+    <script src="codeview/markdown.js"></script>
     <script src="codeview/codeview.js"></script>
     <script>
     function esc(s) {
-      return String(s)
-        .replace(/&/g,'&amp;')
-        .replace(/</g,'&lt;')
-        .replace(/>/g,'&gt;')
-        .replace(/"/g,'&quot;');
+      return (window.AiHandMarkdown && window.AiHandMarkdown.esc)
+        ? window.AiHandMarkdown.esc(s)
+        : String(s)
+          .replace(/&/g,'&amp;')
+          .replace(/</g,'&lt;')
+          .replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;');
     }
-
-    var CODE_COPY_BTN =
-      '<button type="button" class="code-copy" data-tip="Copy to clipboard" aria-label="Copy to clipboard">'
-      + '<svg class="icon-copy" viewBox="0 0 16 16" aria-hidden="true">'
-      + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/>'
-      + '<path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" '
-      + 'd="M3.5 10.5V3.8A1.3 1.3 0 0 1 4.8 2.5h6.7"/>'
-      + '</svg>'
-      + '<svg class="icon-check" viewBox="0 0 16 16" aria-hidden="true">'
-      + '<path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" '
-      + 'stroke-linejoin="round" d="M3.5 8.5 6.5 11.5 12.5 4.5"/>'
-      + '</svg>'
-      + '</button>';
-
-    // CommonMark + GFM via marked. Footnotes stay off; raw HTML is escaped (not rendered).
-    var __markedParse = null;
-    (function configureMarked() {
-      if (typeof marked === 'undefined') return;
-      var api = (marked && marked.parse) ? marked : (marked.marked || marked);
-      if (!api || (!api.parse && typeof api !== 'function')) return;
-      var Renderer = api.Renderer || marked.Renderer;
-      var renderer = Renderer ? new Renderer() : null;
-      if (renderer) {
-        // Escape raw HTML tokens so tags show as text (XSS-safe; intentional).
-        renderer.html = function(token) {
-          var text = (token && token.text != null) ? String(token.text) : String(token || '');
-          return esc(text);
-        };
-        renderer.code = function(token) {
-          var text = (token && token.text != null) ? String(token.text) : String(token || '');
-          var lang = (token && token.lang) ? String(token.lang) : '';
-          var lines = text.split('\\n');
-          var single = lines.length <= 1 || (lines.length === 2 && lines[1] === '');
-          var cls = lang ? (' class="language-' + esc(lang) + '"') : '';
-          return '<div class="code-block' + (single ? ' single' : '') + '">'
-            + CODE_COPY_BTN
-            + '<pre><code' + cls + ' data-enhanced="1">' + esc(text) + '</code></pre></div>\\n';
-        };
-      }
-      if (api.use) {
-        try {
-          api.use({
-            gfm: true,
-            breaks: false,
-            pedantic: false,
-            renderer: renderer || undefined
-          });
-        } catch (e) {
-          if (renderer && api.use) {
-            try { api.use({ renderer: renderer }); } catch (e2) {}
-          }
-        }
-      } else if (api.setOptions && renderer) {
-        try { api.setOptions({ renderer: renderer, gfm: true, breaks: false }); } catch (e3) {}
-      }
-      __markedParse = function(md) {
-        if (api.parse) return api.parse(md, { async: false });
-        if (typeof api === 'function') return api(md);
-        return esc(md);
-      };
-    })();
-
+    // Alias kept for renderMessages (shared implementation in codeview/markdown.js).
     function markdownToHTML(md) {
-      if (!md) return '';
-      if (!__markedParse) {
-        // marked failed to load — show escaped plain text rather than a blank bubble.
-        return '<p>' + esc(String(md)).replace(/\\n/g, '<br>') + '</p>';
-      }
-      var html = __markedParse(String(md));
-      // Footnotes are not enabled; strip if a build ever emits them.
-      html = String(html)
-        .replace(/<section class="footnotes"[\\s\\S]*?<\\/section>/gi, '')
-        .replace(/<sup class="footnote-ref">[\\s\\S]*?<\\/sup>/gi, '');
-      return enhanceCodeBlocks(html);
-    }
-
-    function enhanceCodeBlocks(html) {
-      return String(html).replace(/<pre><code([^>]*)>([\\s\\S]*?)<\\/code><\\/pre>/g, function(_, attrs, body) {
-        if (attrs.indexOf('data-enhanced') !== -1) return '<pre><code' + attrs + '>' + body + '</code></pre>';
-        // Skip blocks our renderer already wrapped.
-        // (heuristic: if we just matched a bare pre/code, wrap it)
-        var lines = body.split('\\n');
-        var single = lines.length <= 1 || (lines.length === 2 && lines[1] === '');
-        return '<div class="code-block' + (single ? ' single' : '') + '">'
-          + CODE_COPY_BTN
-          + '<pre><code' + attrs + '>' + body + '</code></pre></div>';
-      });
+      return (window.AiHandMarkdown && window.AiHandMarkdown.toHTML)
+        ? window.AiHandMarkdown.toHTML(md) : '';
     }
     // Monochrome outline SVGs (match SF Symbol chrome — no emoji).
     function outlineGlyph(kind) {
@@ -1745,12 +1460,13 @@ struct ChatTranscriptView: NSViewRepresentable {
           body += esc(m.text || '');
         }
         if (kind === 'user' && m.steered) {
-          const icon = '<svg class="steer-icon" viewBox="0 0 16 16" aria-hidden="true">'
+          const icon = '<span class="steer-icon" aria-hidden="true">'
+            + '<svg viewBox="0 0 16 16">'
             + '<circle cx="8" cy="8" r="6.1" fill="none" stroke="currentColor" stroke-width="1.5"/>'
             + '<circle cx="8" cy="8" r="1.55" fill="currentColor"/>'
             + '<path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" '
             + 'd="M8 2.7v2.9M4.05 10.35l2.45-1.45M11.95 10.35l-2.45-1.45"/>'
-            + '</svg>';
+            + '</svg></span>';
           body = '<div class="steer-row" title="Steered">' + icon
             + '<div class="steer-body">' + body + '</div></div>';
         }
@@ -1802,24 +1518,9 @@ struct ChatTranscriptView: NSViewRepresentable {
       }
       root.querySelectorAll('img.shot[data-key]').forEach(bindMediaOpen);
       root.querySelectorAll('.video-shot[data-key]').forEach(bindMediaOpen);
-      root.querySelectorAll('.code-block .code-copy').forEach(function(btn) {
-        btn.addEventListener('click', function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          var block = btn.closest('.code-block');
-          var code = block && block.querySelector('pre code');
-          var text = code ? String(code.textContent || '') : '';
-          if (window.webkit && window.webkit.messageHandlers.copyText) {
-            window.webkit.messageHandlers.copyText.postMessage({ text: text });
-          }
-          btn.classList.add('copied');
-          if (btn._copyTimer) clearTimeout(btn._copyTimer);
-          btn._copyTimer = setTimeout(function() {
-            btn.classList.remove('copied');
-            btn._copyTimer = null;
-          }, 1200);
-        });
-      });
+      if (window.AiHandMarkdown && window.AiHandMarkdown.bindCodeCopy) {
+        window.AiHandMarkdown.bindCodeCopy(root);
+      }
       if (forceScroll || nearBottom) {
         const goBottom = function() { window.scrollTo(0, document.body.scrollHeight); };
         goBottom();

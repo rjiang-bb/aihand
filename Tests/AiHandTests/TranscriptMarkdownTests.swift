@@ -2,38 +2,46 @@ import XCTest
 import JavaScriptCore
 @testable import AiHand
 
-/// Runs the transcript's real `markdownToHTML` (extracted from the shell HTML) in JavaScriptCore.
+/// Runs the shared CodeView/transcript `AiHandMarkdown.toHTML` in JavaScriptCore.
 final class TranscriptMarkdownTests: XCTestCase {
     private var ctx: JSContext!
 
+    private static var repoRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    }
+
     override func setUpWithError() throws {
-        let html = ChatTranscriptView.shellHTML
-        let start = try XCTUnwrap(html.range(of: "function esc("))
-        let end = try XCTUnwrap(html.range(of: "function toolGlyph("))
-        let js = String(html[start.lowerBound..<end.lowerBound])
         ctx = JSContext()
         var jsError: String?
         ctx.exceptionHandler = { _, e in jsError = e?.toString() }
-        // marked is injected into shellHTML before `esc`; load it so configureMarked can bind.
-        let markedStart = try XCTUnwrap(
-            html.range(of: "marked v15"),
-            "shellHTML must embed vendored marked.min.js"
+        ctx.evaluateScript("var window = this;")
+        let marked = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("assets/codeview/marked.min.js"),
+            encoding: .utf8
         )
-        // Walk back to the opening `/**` comment of the UMD bundle.
-        let pre = html[..<markedStart.lowerBound]
-        let commentOpen = try XCTUnwrap(pre.range(of: "/**", options: .backwards))
-        let markedEnd = try XCTUnwrap(html.range(of: "</script>", range: markedStart.upperBound..<html.endIndex))
-        let markedJS = String(html[commentOpen.lowerBound..<markedEnd.lowerBound])
-        ctx.evaluateScript(markedJS)
+        ctx.evaluateScript(marked)
         XCTAssertNil(jsError, "marked failed to load: \(jsError ?? "")")
         XCTAssertNotNil(ctx.objectForKeyedSubscript("marked"), "marked global missing after load")
         jsError = nil
-        ctx.evaluateScript(js)
-        XCTAssertNil(jsError, "transcript JS failed to load: \(jsError ?? "")")
+        let mdJS = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("assets/codeview/markdown.js"),
+            encoding: .utf8
+        )
+        ctx.evaluateScript(mdJS)
+        XCTAssertNil(jsError, "markdown.js failed to load: \(jsError ?? "")")
+        XCTAssertNotNil(ctx.objectForKeyedSubscript("AiHandMarkdown"))
+        // Shell must load the shared renderer (not an inlined copy).
+        let html = ChatTranscriptView.shellHTML
+        XCTAssertTrue(html.contains("codeview/marked.min.js"))
+        XCTAssertTrue(html.contains("codeview/markdown.js"))
+        XCTAssertTrue(html.contains("href=\"codeview/markdown.css\""))
     }
 
     private func md(_ s: String) -> String {
-        ctx.objectForKeyedSubscript("markdownToHTML").call(withArguments: [s])?.toString() ?? ""
+        ctx.objectForKeyedSubscript("AiHandMarkdown")
+            .objectForKeyedSubscript("toHTML")
+            .call(withArguments: [s])?.toString() ?? ""
     }
 
     func testEmptyInput() { XCTAssertEqual(md(""), "") }
@@ -138,12 +146,15 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertFalse(out.contains("|------|"), "separator must not leak as text: \(out)")
     }
 
-    func testGFMTableAlignment() {
+    func testGFMTableAlignment() throws {
         let out = md("| A | B |\n|:---|---:|\n| L | R |")
         // marked emits HTML align=; CSS maps it to text-align.
         XCTAssertTrue(out.contains("align=\"left\""), out)
         XCTAssertTrue(out.contains("align=\"right\""), out)
-        let css = ChatTranscriptView.shellHTML
+        let css = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("assets/codeview/markdown.css"),
+            encoding: .utf8
+        )
         XCTAssertTrue(css.contains("th[align=\"left\"]") || css.contains("th[align=left]"), css)
     }
 
@@ -250,9 +261,12 @@ final class TranscriptMarkdownTests: XCTestCase {
         }
         XCTAssertTrue(html.contains(".msg.edits-group .tool-detail .glyph {"))
         XCTAssertTrue(html.contains("height: 1.45em;"))
-        // Steer prompts already use the same first-line treatment.
+        // Steer prompts: same first-line treatment; glyph centered in a line-height box.
         XCTAssertTrue(html.contains(".msg.user .steer-row {"))
         XCTAssertTrue(html.contains("align-items: flex-start;"))
+        XCTAssertTrue(html.contains(".msg.user .steer-row > .steer-icon {"))
+        XCTAssertTrue(html.contains("height: 1.55em;"))
+        XCTAssertFalse(html.contains("margin-top: 0.28em;"), "no fudge margin — center via line box")
     }
 
     func testFileDiffRowsWireCodeViewAndSnapshotBridge() {
@@ -271,18 +285,18 @@ final class TranscriptMarkdownTests: XCTestCase {
     }
 
     func testCodeViewModuleExposesDiffAndEditorWithSharedChrome() throws {
-        let url = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("assets/codeview/codeview.js")
+        let url = Self.repoRoot.appendingPathComponent("assets/codeview/codeview.js")
         let src = try String(contentsOf: url, encoding: .utf8)
         let js = JSContext()!
         var err: String?
         js.exceptionHandler = { _, e in err = e?.toString() }
-        js.evaluateScript("var window = this;")
+        js.evaluateScript("var window = this; var document = { baseURI: 'aihand-asset://app/', createElement: function(){ return {}; }, head: { appendChild: function(){} }, getElementById: function(){ return null; } };")
         js.evaluateScript(src)
         XCTAssertNil(err)
         XCTAssertEqual(js.evaluateScript("typeof CodeView.createDiff")?.toString(), "function")
         XCTAssertEqual(js.evaluateScript("typeof CodeView.createEditor")?.toString(), "function")
+        XCTAssertEqual(js.evaluateScript("typeof CodeView.loadMarkdown")?.toString(), "function")
+        XCTAssertEqual(js.evaluateScript("typeof CodeView.isMarkdownPath")?.toString(), "function")
         let lang = js.evaluateScript("""
         CodeView.languageFor({ languages: { getLanguages: function() { return [
           { id: 'markdown', extensions: ['.md'] },
@@ -294,9 +308,30 @@ final class TranscriptMarkdownTests: XCTestCase {
         CodeView.languageFor({ languages: { getLanguages: function() { return []; } } }, '/w/x.zzz')
         """)?.toString()
         XCTAssertEqual(lang, "markdown,dockerfile,plaintext")
+        XCTAssertEqual(js.evaluateScript("CodeView.isMarkdownPath('docs/README.md') + ''")?.toString(), "true")
+        XCTAssertEqual(js.evaluateScript("CodeView.isMarkdownPath('Sources/Foo.swift') + ''")?.toString(), "false")
         // Inline / side-by-side switch lives on the diff editor (renderSideBySide).
         XCTAssertTrue(src.contains("renderSideBySide"))
         XCTAssertTrue(src.contains("hideUnchangedRegions"))
         XCTAssertTrue(src.contains("useInlineViewWhenSpaceIsLimited = false"))
+        // Markdown Preview toggle in the shared chrome.
+        XCTAssertTrue(src.contains("cv-preview-btn"))
+        XCTAssertTrue(src.contains("setPreview"))
+        XCTAssertTrue(src.contains("Preview"))
+    }
+
+    func testSharedMarkdownModuleMatchesTranscriptRenderer() throws {
+        let mdJS = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("assets/codeview/markdown.js"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(mdJS.contains("AiHandMarkdown"))
+        XCTAssertTrue(mdJS.contains("isMarkdownPath"))
+        let css = try String(
+            contentsOf: Self.repoRoot.appendingPathComponent("assets/codeview/markdown.css"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(css.contains(".md .code-copy"))
+        XCTAssertTrue(css.contains(".cv-body.cv-preview"))
     }
 }

@@ -140,6 +140,9 @@ final class AssetSchemeHandlerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: loader.path))
         XCTAssertEqual(AssetSchemeHandler.mimeType(for: loader), "text/javascript")
         XCTAssertNotNil(handler.fileURL(for: URL(string: "aihand-asset://app/codeview/codeview.js")!))
+        XCTAssertNotNil(handler.fileURL(for: URL(string: "aihand-asset://app/codeview/markdown.js")!))
+        XCTAssertNotNil(handler.fileURL(for: URL(string: "aihand-asset://app/codeview/markdown.css")!))
+        XCTAssertNotNil(handler.fileURL(for: URL(string: "aihand-asset://app/codeview/marked.min.js")!))
         XCTAssertNotNil(handler.fileURL(for: URL(string: "aihand-asset://app/monaco/vs/editor/editor.main.css")!))
     }
 

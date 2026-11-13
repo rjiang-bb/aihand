@@ -87,6 +87,20 @@ final class TranscriptMonacoTests: XCTestCase {
         XCTAssertEqual(try eval("window.monaco.editor.getModels()[1].getLanguageId()") as? String, "markdown")
         XCTAssertEqual(try eval("document.querySelector('#probe .cv-path').textContent") as? String, "/w/aihand/README.md")
         XCTAssertEqual(try eval("document.querySelector('#probe .cv-seg-btn.on').getAttribute('data-mode')") as? String, "inline")
+        // Markdown files get a Preview toggle that uses the shared transcript renderer.
+        XCTAssertEqual(try eval("!!document.querySelector('#probe .cv-preview-btn')") as? Bool, true)
+        XCTAssertEqual(try eval("typeof window.AiHandMarkdown.toHTML") as? String, "function")
+        _ = try eval("document.querySelector('#probe .cv-preview-btn').click(); true")
+        try wait("markdown preview") {
+            ((try? self.eval("document.querySelector('#probe .cv-body').classList.contains('cv-preview') && !!document.querySelector('#probe .cv-md h1')")) as? Bool) == true
+        }
+        XCTAssertEqual(try eval("document.querySelector('#probe .cv-preview-btn').classList.contains('on')") as? Bool, true)
+        XCTAssertEqual(try eval("document.querySelector('#probe .cv-md h1').textContent") as? String, "AiHand")
+        // Toggle back to the diff.
+        _ = try eval("document.querySelector('#probe .cv-preview-btn').click(); true")
+        try wait("diff restored") {
+            ((try? self.eval("!document.querySelector('#probe .cv-body').classList.contains('cv-preview') && !!document.querySelector('#probe .monaco-diff-editor')")) as? Bool) == true
+        }
 
         // Copy-path button swaps to a checkmark, then restores.
         let copyGlyph = try eval("document.querySelector('#probe .cv-icon-btn').innerHTML") as? String

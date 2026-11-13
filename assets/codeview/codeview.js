@@ -124,6 +124,57 @@
     return 'plaintext';
   }
 
+  function isMarkdownPath(path) {
+    if (window.AiHandMarkdown && window.AiHandMarkdown.isMarkdownPath) {
+      return window.AiHandMarkdown.isMarkdownPath(path);
+    }
+    var name = String(path || '').split(/[/\\]/).pop() || '';
+    return /\.(md|markdown|mdown|mkd|mdx)$/i.test(name);
+  }
+
+  var mdLoading = null;
+  function ensureMarkdownCSS() {
+    if (document.getElementById('cv-markdown-css')) return;
+    var link = document.createElement('link');
+    link.id = 'cv-markdown-css';
+    link.rel = 'stylesheet';
+    link.href = new URL('codeview/markdown.css', document.baseURI).href;
+    document.head.appendChild(link);
+  }
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = new URL(src, document.baseURI).href;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('Failed to load ' + src)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function loadMarkdown() {
+    if (window.AiHandMarkdown && window.AiHandMarkdown.toHTML) {
+      ensureMarkdownCSS();
+      return Promise.resolve(window.AiHandMarkdown);
+    }
+    if (mdLoading) return mdLoading;
+    ensureMarkdownCSS();
+    mdLoading = (window.marked
+      ? Promise.resolve()
+      : loadScript('codeview/marked.min.js')
+    ).then(function () {
+      if (window.AiHandMarkdown && window.AiHandMarkdown.toHTML) return window.AiHandMarkdown;
+      return loadScript('codeview/markdown.js').then(function () { return window.AiHandMarkdown; });
+    }).then(function (api) {
+      if (!api || !api.toHTML) throw new Error('markdown renderer missing');
+      return api;
+    }).catch(function (err) {
+      mdLoading = null;
+      throw err;
+    });
+    return mdLoading;
+  }
+
   function baseOptions(lineOffset) {
     var offset = lineOffset || 0;
     var opts = {
@@ -214,6 +265,17 @@
       });
       head.appendChild(seg);
     }
+    var previewBtn = null;
+    if (opts.previewable) {
+      previewBtn = el('button', 'cv-seg-btn cv-preview-btn');
+      previewBtn.type = 'button';
+      previewBtn.textContent = 'Preview';
+      previewBtn.setAttribute('aria-pressed', 'false');
+      previewBtn.setAttribute('data-tip', 'Preview markdown');
+      var previewWrap = el('div', 'cv-seg');
+      previewWrap.appendChild(previewBtn);
+      head.appendChild(previewWrap);
+    }
     var copy = el('button', 'cv-icon-btn', ICON_COPY);
     copy.type = 'button';
     copy.setAttribute('aria-label', 'Copy path');
@@ -235,7 +297,7 @@
       }, 1300);
     });
     head.appendChild(copy);
-    return { head: head, seg: seg };
+    return { head: head, seg: seg, previewBtn: previewBtn };
   }
 
   function frame(host, opts) {
@@ -248,7 +310,7 @@
     host.appendChild(root);
     // Clicks inside the viewer must not toggle the transcript rows around it.
     root.addEventListener('click', function (e) { e.stopPropagation(); });
-    return { root: root, body: body, seg: header.seg };
+    return { root: root, body: body, seg: header.seg, previewBtn: header.previewBtn };
   }
 
   function message(body, text) {
@@ -268,33 +330,47 @@
 
   /**
    * Diff viewer. opts: { path, original, modified, lineOffset, mode, added, removed, tooLarge }.
-   * Returns a handle with dispose() / setMode(mode).
+   * Returns a handle with dispose() / setMode(mode) / setPreview(on).
    */
   function createDiff(host, opts) {
     var mode = opts.mode || savedMode();
+    var previewable = opts.previewable != null ? !!opts.previewable : isMarkdownPath(opts.path);
+    var previewing = !!opts.preview;
     var f = frame(host, {
       path: opts.path,
       fullPath: opts.fullPath,
       added: opts.added,
       removed: opts.removed,
-      modes: opts.hideModes ? null : [{ id: 'inline', label: 'Inline' }, { id: 'side-by-side', label: 'Side-by-side' }]
+      modes: opts.hideModes ? null : [{ id: 'inline', label: 'Inline' }, { id: 'side-by-side', label: 'Side-by-side' }],
+      previewable: previewable
     });
     var maxHeight = opts.maxHeight || MAX_HEIGHT;
+    var monacoHost = null;
+    var previewHost = null;
     var handle = {
       root: f.root, disposed: false, editor: null, models: [],
-      dispose: dispose, setMode: setMode, setMaxHeight: setMaxHeight, refit: null, ready: null
+      dispose: dispose, setMode: setMode, setPreview: setPreview, setMaxHeight: setMaxHeight,
+      refit: null, ready: null, previewing: function () { return previewing; }
     };
     // Resolves once the first diff is laid out (or immediately for message-only bodies) so callers
     // can mount many diffs one at a time without freezing the page.
     var readyDone;
     handle.ready = new Promise(function (resolve) { readyDone = resolve; });
     markMode();
+    markPreview();
 
     if (opts.tooLarge || opts.message) {
       message(f.body, opts.message || 'Diff too large to show');
       readyDone();
       return handle;
     }
+
+    monacoHost = el('div', 'cv-monaco');
+    previewHost = el('div', 'cv-md md');
+    previewHost.hidden = true;
+    f.body.appendChild(monacoHost);
+    f.body.appendChild(previewHost);
+    monacoHost.style.height = MIN_HEIGHT + 'px';
     f.body.style.height = MIN_HEIGHT + 'px';
     f.body.classList.add('cv-loading');
 
@@ -302,6 +378,13 @@
       f.seg.addEventListener('click', function (e) {
         var b = e.target.closest('.cv-seg-btn');
         if (b) setMode(b.getAttribute('data-mode'));
+      });
+    }
+    if (f.previewBtn) {
+      f.previewBtn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        setPreview(!previewing);
       });
     }
 
@@ -327,12 +410,13 @@
       o.renderMarginRevertIcon = false;
       o.ignoreTrimWhitespace = false;
       o.hideUnchangedRegions = { enabled: true, contextLineCount: 3, minimumLineCount: 4, revealLineCount: 20 };
-      var ed = monaco.editor.createDiffEditor(f.body, o);
+      var ed = monaco.editor.createDiffEditor(monacoHost, o);
       ed.setModel({ original: original, modified: modified });
       handle.editor = ed;
       var refit = function () {
-        if (handle.disposed) return;
-        fitHeight(f.body, [ed.getOriginalEditor(), ed.getModifiedEditor()], maxHeight);
+        if (handle.disposed || previewing) return;
+        fitHeight(monacoHost, [ed.getOriginalEditor(), ed.getModifiedEditor()], maxHeight);
+        f.body.style.height = monacoHost.style.height;
       };
       handle.refit = refit;
       ed.onDidUpdateDiff(refit);
@@ -340,7 +424,8 @@
       setTimeout(readyDone, 2500);
       ed.getModifiedEditor().onDidContentSizeChange(refit);
       ed.getOriginalEditor().onDidContentSizeChange(refit);
-      refit();
+      if (previewing) applyPreview(true);
+      else refit();
     }, function () {
       if (handle.disposed) return;
       f.body.classList.remove('cv-loading');
@@ -355,10 +440,71 @@
         b.classList.toggle('on', on);
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
+      if (f.seg) f.seg.hidden = !!previewing;
+    }
+
+    function markPreview() {
+      if (!f.previewBtn) return;
+      f.previewBtn.classList.toggle('on', previewing);
+      f.previewBtn.setAttribute('aria-pressed', previewing ? 'true' : 'false');
+    }
+
+    function previewSource() {
+      // Prefer the current (modified) side; for pure deletes preview what was removed.
+      if (typeof opts.modified === 'string') {
+        if (opts.modified === '' && opts.original) return String(opts.original);
+        return opts.modified;
+      }
+      return String(opts.original || '');
+    }
+
+    function fitPreview() {
+      if (!previewHost || handle.disposed) return;
+      previewHost.style.height = 'auto';
+      previewHost.style.overflow = 'visible';
+      var h = Math.max(MIN_HEIGHT, Math.min(maxHeight, previewHost.scrollHeight + 4));
+      f.body.style.height = h + 'px';
+      f.body.style.overflow = 'auto';
+      previewHost.style.height = '';
+    }
+
+    function applyPreview(on) {
+      previewing = !!on;
+      markPreview();
+      markMode();
+      f.body.classList.toggle('cv-preview', previewing);
+      if (monacoHost) monacoHost.hidden = previewing;
+      if (previewHost) previewHost.hidden = !previewing;
+      if (!previewing) {
+        f.body.style.overflow = '';
+        if (handle.refit) handle.refit();
+        return;
+      }
+      f.body.classList.add('cv-loading');
+      loadMarkdown().then(function (md) {
+        if (handle.disposed || !previewing) return;
+        f.body.classList.remove('cv-loading');
+        previewHost.innerHTML = md.toHTML(previewSource());
+        md.bindCodeCopy(previewHost);
+        fitPreview();
+        readyDone();
+      }, function () {
+        if (handle.disposed || !previewing) return;
+        f.body.classList.remove('cv-loading');
+        previewHost.textContent = 'Couldn’t load the markdown preview';
+        fitPreview();
+        readyDone();
+      });
+    }
+
+    function setPreview(on) {
+      if (!previewable) return;
+      applyPreview(!!on);
     }
 
     function setMode(next) {
       if (next !== 'inline' && next !== 'side-by-side') return;
+      if (previewing) setPreview(false);
       mode = next;
       try { localStorage.setItem(MODE_KEY, mode); } catch (e) {}
       markMode();
@@ -367,7 +513,8 @@
 
     function setMaxHeight(n) {
       maxHeight = n || MAX_HEIGHT;
-      if (handle.refit) handle.refit();
+      if (previewing) fitPreview();
+      else if (handle.refit) handle.refit();
     }
 
     function dispose() {
@@ -419,9 +566,11 @@
 
   window.CodeView = {
     loadMonaco: loadMonaco,
+    loadMarkdown: loadMarkdown,
     createDiff: createDiff,
     createEditor: createEditor,
     getSavedMode: savedMode,
-    languageFor: languageFor
+    languageFor: languageFor,
+    isMarkdownPath: isMarkdownPath
   };
 })();
