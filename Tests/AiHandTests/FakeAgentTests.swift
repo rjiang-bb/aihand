@@ -294,6 +294,25 @@ final class FakeAgentFollowUpTests: FakeAgentTestCase {
         XCTAssertEqual(s.messages.filter { $0.kind == .user }.last?.steered, false, "queued sends aren't steers")
     }
 
+    func testQueuedFollowUpWithMediaDoesNotSteer() throws {
+        use(.cursor, mode: "slow")
+        let s = try send("first")
+        waitUntil("working with a live runner") { self.calls == 1 && s.status == .working }
+        let img = try write("queued-media.png")
+        manager.followUp(sessionID: s.id, text: "with pic", submit: .queue, imagePaths: [img.path])
+        XCTAssertEqual(s.queuedFollowUps.map(\.text), ["with pic"])
+        XCTAssertEqual(s.queuedFollowUps.first?.imagePaths, [img.path])
+        XCTAssertEqual(calls, 1, "Enter+media while working must queue, not steer")
+        setMode("ok")
+        waitUntil("queue drained") { self.calls == 2 && s.status == .finished && s.queuedFollowUps.isEmpty }
+        let a = args(2)
+        XCTAssertEqual(a[a.firstIndex(of: "--image")! + 1], img.path)
+        XCTAssertTrue(a.last?.hasPrefix("with pic") == true)
+        let drained = try XCTUnwrap(s.messages.last { $0.kind == .user })
+        XCTAssertEqual(drained.steered, false, "drained queue item is not a steer")
+        XCTAssertEqual(drained.imagePaths, [img.path])
+    }
+
     func testQueuedFollowUpCanBeRemoved() throws {
         use(.cursor, mode: "slow")
         let s = try send("first")

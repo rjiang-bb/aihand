@@ -1095,9 +1095,9 @@ final class AgentSessionManager {
         let runner = runner(for: session)
 
         let busy = session.status == .working && runner.isRunning
-        // Queue is text-only — media follow-ups always send now.
-        if busy, submit == .queue, paths.isEmpty {
-            session.queuedFollowUps.append(QueuedFollowUp(text: prompt))
+        // Enter → .queue never steers, even with media. Only .sendNow (⌘↩ / Steer) interrupts.
+        if busy, submit == .queue {
+            session.queuedFollowUps.append(QueuedFollowUp(text: prompt, imagePaths: paths))
             return
         }
 
@@ -1210,6 +1210,6 @@ final class AgentSessionManager {
         }
 
         let next = session.queuedFollowUps.removeFirst()
-        followUp(sessionID: sessionID, text: next.text, submit: .sendNow)
+        followUp(sessionID: sessionID, text: next.text, submit: .sendNow, imagePaths: next.imagePaths)
     }
 }

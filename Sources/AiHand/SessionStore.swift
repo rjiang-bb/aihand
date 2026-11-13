@@ -118,17 +118,20 @@ struct AgentMessage: Identifiable, Equatable, Codable {
 struct QueuedFollowUp: Identifiable, Equatable {
     let id: UUID
     var text: String
+    /// Pasted / attached media to send when this item drains (Enter can queue these too).
+    var imagePaths: [String]
 
-    init(id: UUID = UUID(), text: String) {
+    init(id: UUID = UUID(), text: String, imagePaths: [String] = []) {
         self.id = id
         self.text = text
+        self.imagePaths = imagePaths
     }
 }
 
 enum FollowUpSubmit: Equatable {
-    /// Wait until the current turn finishes, then run (Enter while working).
+    /// Wait until the current turn finishes, then run (Enter while working — never steers).
     case queue
-    /// Interrupt and send now / steer (⌘↩ or send button while working).
+    /// Interrupt and send now / steer (⌘↩ or explicit Steer only).
     case sendNow
 }
 

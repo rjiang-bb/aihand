@@ -492,9 +492,8 @@ struct SessionChatView: View {
 
         draft = ""
         attachments = []
-        // Idle turns treat both as send-now; queue only applies while working (text-only).
-        let resolved: FollowUpSubmit = (isWorking && mode == .queue && mediaPaths.isEmpty && filePaths.isEmpty)
-            ? .queue : .sendNow
+        // Idle: both modes send now. Working: Enter → queue (incl. media/files); ⌘↩ → steer.
+        let resolved: FollowUpSubmit = (isWorking && mode == .queue) ? .queue : .sendNow
         onSend(prompt, resolved, mediaPaths)
         // Field editor can write the old string back after we clear; force empty.
         DispatchQueue.main.async {
@@ -522,7 +521,7 @@ struct SessionChatView: View {
             DispatchQueue.main.async { draft = "" }
         }
         session.queuedFollowUps.removeAll { $0.id == item.id }
-        onSend(item.text, .sendNow, [])
+        onSend(item.text, .sendNow, item.imagePaths)
     }
 }
 

@@ -744,7 +744,9 @@ struct AgentComposerView: View {
             onConfirmEdit?()
             return
         }
-        if isWorking, let onQueue, !hasAttachments {
+        // Enter while working always queues — never steers. Steer is ⌘↩ / Steer only.
+        if isWorking, let onQueue {
+            guard canSend else { return }
             onQueue()
         } else {
             guard canSend else { return }

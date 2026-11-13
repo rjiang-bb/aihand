@@ -619,6 +619,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 0;
         font-family: var(--mono);
         font-size: 12.5px;
+        line-height: 1.45;
         color: var(--muted);
       }
       .msg.tool-group.expanded .tool-details,
@@ -627,7 +628,8 @@ struct ChatTranscriptView: NSViewRepresentable {
       .msg.worked-group .tool-detail {
         display: flex;
         gap: 6px;
-        align-items: center;
+        /* Icon sits on the first text line — not centered against wrapped blocks. */
+        align-items: flex-start;
         padding: 2px 0;
       }
       .msg.tool-group .tool-detail .glyph,
@@ -637,7 +639,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         align-items: center;
         justify-content: center;
         width: 12px;
-        height: 12px;
+        height: 1.45em;
         opacity: 0.72;
         color: var(--muted);
       }
@@ -705,13 +707,15 @@ struct ChatTranscriptView: NSViewRepresentable {
         padding: 0;
         font-family: var(--mono);
         font-size: 12.5px;
+        line-height: 1.45;
         color: var(--muted);
       }
       .msg.edits-group.expanded .tool-details { display: block; }
       .msg.edits-group .tool-detail {
         display: flex;
         gap: 6px;
-        align-items: center;
+        /* Icon sits on the first text line — not centered against wrapped blocks. */
+        align-items: flex-start;
         flex-wrap: wrap;
         padding: 2px 0;
       }
@@ -733,7 +737,7 @@ struct ChatTranscriptView: NSViewRepresentable {
         align-items: center;
         justify-content: center;
         width: 12px;
-        height: 12px;
+        height: 1.45em;
         opacity: 0.72;
         color: var(--muted);
       }
@@ -741,6 +745,10 @@ struct ChatTranscriptView: NSViewRepresentable {
         width: 12px;
         height: 12px;
         display: block;
+      }
+      .msg.edits-group .tool-detail .chev {
+        height: 1.45em;
+        align-items: center;
       }
       .msg.edits-group .tool-detail .tool-body {
         white-space: pre-wrap;

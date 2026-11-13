@@ -236,12 +236,23 @@ final class TranscriptMarkdownTests: XCTestCase {
         XCTAssertTrue(html.contains("!!window.__expandedGroups[groupId]"))
     }
 
-    func testEditRowGlyphsAreVerticallyCentered() {
+    func testTranscriptIconRowsAlignGlyphToFirstTextLine() {
         let html = ChatTranscriptView.shellHTML
-        let block = try! XCTUnwrap(html.range(of: ".msg.edits-group .tool-detail {"))
-        let rule = html[block.upperBound...].prefix(120)
-        XCTAssertTrue(rule.contains("align-items: center;"), String(rule))
-        XCTAssertFalse(html.contains("align-items: flex-start;\n        flex-wrap: wrap;"))
+        // Editing / tool / thought rows: icon centers on line 1, not the whole wrapped block.
+        for selector in [
+            ".msg.edits-group .tool-detail {",
+            ".msg.tool-group .tool-detail,",
+            ".msg.worked-group .tool-detail {",
+        ] {
+            let block = try! XCTUnwrap(html.range(of: selector), selector)
+            let rule = html[block.upperBound...].prefix(220)
+            XCTAssertTrue(rule.contains("align-items: flex-start;"), "\(selector) → \(rule)")
+        }
+        XCTAssertTrue(html.contains(".msg.edits-group .tool-detail .glyph {"))
+        XCTAssertTrue(html.contains("height: 1.45em;"))
+        // Steer prompts already use the same first-line treatment.
+        XCTAssertTrue(html.contains(".msg.user .steer-row {"))
+        XCTAssertTrue(html.contains("align-items: flex-start;"))
     }
 
     func testFileDiffRowsWireCodeViewAndSnapshotBridge() {
