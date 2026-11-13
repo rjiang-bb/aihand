@@ -73,6 +73,41 @@ final class SessionsOpenChatPersistenceTests: SandboxedTestCase {
         XCTAssertFalse(SessionsOpenChatPersistence.isIncompleteScopeKey("local|/tmp/x|"))
     }
 
+    func testRecordLeaveKeepsMemoryWhenSelectionAlreadyCleared() {
+        let chatA = UUID()
+        let chatB = UUID()
+        let keyA = SessionsOpenChatPersistence.scopeKey(
+            path: "/tmp/repo-a", connectionID: nil, branch: "A"
+        )
+        let keyB = SessionsOpenChatPersistence.scopeKey(
+            path: "/tmp/repo-b", connectionID: nil, branch: "B"
+        )
+        var map = [keyA: chatA]
+
+        // Leaving A with selection still set to the same id — no map change.
+        XCTAssertFalse(
+            SessionsOpenChatPersistence.recordLeave(
+                previousKey: keyA, selectedID: chatA, into: &map
+            ),
+            "unchanged id is a no-op"
+        )
+        XCTAssertEqual(map[keyA], chatA)
+
+        // List filter raced ahead and cleared selection before scopeDidChange —
+        // must not wipe A's memory (that broke restore when returning A→B→A).
+        XCTAssertFalse(SessionsOpenChatPersistence.recordLeave(
+            previousKey: keyA, selectedID: nil, into: &map
+        ))
+        XCTAssertEqual(map[keyA], chatA)
+
+        // Enter B with a chat, leave B, return to A — A's id is still there.
+        XCTAssertTrue(SessionsOpenChatPersistence.recordLeave(
+            previousKey: keyB, selectedID: chatB, into: &map
+        ))
+        XCTAssertEqual(map[keyB], chatB)
+        XCTAssertEqual(map[keyA], chatA, "returning to A must still find the remembered chat")
+    }
+
     func testSameGitBranchEmptyMatchesLegacy() {
         XCTAssertTrue(SessionStore.sameGitBranch("", "main"))
         XCTAssertTrue(SessionStore.sameGitBranch("main", ""))

@@ -575,12 +575,14 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             return
         }
 
-        if !previousKey.isEmpty, !SessionsOpenChatPersistence.isIncompleteScopeKey(previousKey) {
-            if let id = selection.selectedID {
-                openChatByWorkspace[previousKey] = id
-            } else {
-                openChatByWorkspace.removeValue(forKey: previousKey)
-            }
+        // Persist the chat we are leaving. If the sessions-list filter already cleared
+        // `selectedID` (it races ahead of this sink), keep whatever we last stored for
+        // previousKey — never wipe memory just because selection is already nil.
+        if SessionsOpenChatPersistence.recordLeave(
+            previousKey: previousKey,
+            selectedID: selection.selectedID,
+            into: &openChatByWorkspace
+        ) {
             persistOpenChatsToPreferences()
         }
         trackedScopeKey = nextKey
@@ -1320,6 +1322,24 @@ enum SessionsOpenChatPersistence {
         parts(of: key).path.isEmpty
     }
 
+    /// Write the open chat for the scope we are leaving.
+    /// - Returns `true` when `map` changed (caller should persist).
+    /// - If `selectedID` is nil, leaves existing memory alone — the sessions list often
+    ///   deselects out-of-scope rows before `scopeDidChange` runs; wiping here made
+    ///   A→B→A forget the chat that was open on A.
+    @discardableResult
+    static func recordLeave(
+        previousKey: String,
+        selectedID: UUID?,
+        into map: inout [String: UUID]
+    ) -> Bool {
+        guard !previousKey.isEmpty, !isIncompleteScopeKey(previousKey) else { return false }
+        guard let id = selectedID else { return false }
+        if map[previousKey] == id { return false }
+        map[previousKey] = id
+        return true
+    }
+
     static func decode(_ raw: [String: String]) -> [String: UUID] {
         var loaded: [String: UUID] = [:]
         for (key, value) in raw {
@@ -1931,7 +1951,8 @@ private struct SessionsSidePanelView: View {
                             Preferences.selectAgentWorktree(path, root: root)
                             store.refreshGitInfo()
                         },
-                        onRemoved: { _, root, wasCurrent in
+                        onRemoved: { path, root, wasCurrent in
+                            Preferences.forgetWorktreePath(path, root: root)
                             if wasCurrent {
                                 Preferences.selectAgentWorktree(root, root: root)
                             }

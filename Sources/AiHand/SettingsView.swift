@@ -1735,6 +1735,7 @@ private struct WorkspaceWorktreesBlock: View {
                     statusIsError = true
                     statusMessage = error
                 } else {
+                    Preferences.forgetWorktreePath(entry.path, root: root)
                     if switchingAway {
                         Preferences.selectAgentWorktree(root, root: root)
                     }

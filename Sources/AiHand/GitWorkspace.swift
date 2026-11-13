@@ -208,6 +208,18 @@ enum GitWorkspace {
         return nil
     }
 
+    /// Absolute common git dir (`rev-parse --git-common-dir`) — same for a root and its linked worktrees.
+    static func gitCommonDir(in path: String, connection: SSHConnection? = nil) -> String? {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let raw = runGit(["rev-parse", "--git-common-dir"], in: trimmed, connection: connection)?.stdout,
+              !raw.isEmpty else { return nil }
+        if raw.hasPrefix("/") {
+            return SessionStore.normalizedWorkspace(raw)
+        }
+        return SessionStore.normalizedWorkspace((trimmed as NSString).appendingPathComponent(raw))
+    }
+
     static func workingDiffStat(in path: String, connection: SSHConnection? = nil) -> GitDiffStat {
         var stat = parseNumstat(runGit(["diff", "HEAD", "--numstat"], in: path, connection: connection)?.stdout)
         if let connection {

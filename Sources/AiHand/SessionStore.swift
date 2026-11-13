@@ -551,10 +551,15 @@ final class SessionStore: ObservableObject {
         }
         // Clear branch before path so open-chat scope keys never briefly pair the
         // new worktree path with the previous branch name.
-        if rootChanged || currentChanged {
+        // Only drop `gitRepo` when the registered root/machine changes — clearing it
+        // on every linked-worktree switch made the branch picker blink away (and stay
+        // gone if the follow-up probe raced or hit a deleted remembered path).
+        if rootChanged {
             gitRepo = nil
             currentGitBranch = ""
             restartGitPollingIfNeeded()
+        } else if currentChanged {
+            currentGitBranch = ""
         }
         if rootChanged {
             workspaceRoot = nextRoot

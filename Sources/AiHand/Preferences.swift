@@ -919,22 +919,30 @@ enum Preferences {
         if let ref = agentWorkspaceRefs.first(where: {
             $0.connectionID == connectionID && ($0.path == path || path.hasPrefix($0.path + "/"))
         }) {
-            // Set root + connection first so worktree memory keys the right machine.
-            defaults.set(ref.id.uuidString, forKey: "agentWorkspaceRootID")
-            defaults.set(ref.path, forKey: "agentWorkspaceRoot")
-            if path == ref.path {
-                let active = rememberedWorktree(forRootID: ref.id) ?? ref.path
-                defaults.set(active, forKey: "agentWorkspace")
-            } else {
-                rememberWorktree(path, forRootID: ref.id)
-                defaults.set(path, forKey: "agentWorkspace")
-            }
-            touchAgentWorkspaceLastUsed(ref.id)
-            NotificationCenter.default.post(name: changed, object: nil)
+            applyWorkspaceSelection(path: path, root: ref)
             return
         }
         if let ref = agentWorkspaceRefs.first(where: { $0.path == path }) {
             selectAgentWorkspaceRef(ref.id)
+            return
+        }
+        // Linked worktrees are usually siblings (`repo` + `repo-branch`), not nested under
+        // the registered root — match via git common-dir so reveal/session switch doesn't
+        // register the worktree as its own workspace (deleting it then kills the picker).
+        if connectionID == nil,
+           let ref = localRefSharingGitCommonDir(with: path) {
+            applyWorkspaceSelection(path: path, root: ref)
+            return
+        }
+        // Missing local path: snap back to a root that still remembers it (deleted worktree).
+        if connectionID == nil, !FileManager.default.fileExists(atPath: path) {
+            if let ref = agentWorkspaceRefs.first(where: {
+                $0.connectionID == nil
+                    && rememberedWorktree(forRootID: $0.id).map { SessionStore.sameWorkspace($0, path) } == true
+            }) {
+                clearRememberedWorktree(forRootID: ref.id)
+                selectAgentWorkspaceRef(ref.id)
+            }
             return
         }
         // Unknown path: auto-register only for local machines.
@@ -944,6 +952,35 @@ enum Preferences {
         }
         defaults.set(path, forKey: "agentWorkspace")
         NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    /// Activate `path` under an already-registered root (root itself or a linked worktree).
+    private static func applyWorkspaceSelection(path: String, root ref: AgentWorkspaceRef) {
+        defaults.set(ref.id.uuidString, forKey: "agentWorkspaceRootID")
+        defaults.set(ref.path, forKey: "agentWorkspaceRoot")
+        if SessionStore.sameWorkspace(path, ref.path) {
+            let active = resolvedRememberedWorktree(forRootID: ref.id, rootPath: ref.path)
+            defaults.set(active, forKey: "agentWorkspace")
+        } else {
+            rememberWorktree(path, forRootID: ref.id)
+            defaults.set(path, forKey: "agentWorkspace")
+        }
+        touchAgentWorkspaceLastUsed(ref.id)
+        NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    /// Registered local folder that shares a git common-dir with `path` (sibling worktree).
+    private static func localRefSharingGitCommonDir(with path: String) -> AgentWorkspaceRef? {
+        guard FileManager.default.fileExists(atPath: path),
+              let common = GitWorkspace.gitCommonDir(in: path, connection: nil) else { return nil }
+        return agentWorkspaceRefs.first { ref in
+            guard ref.connectionID == nil,
+                  FileManager.default.fileExists(atPath: ref.path),
+                  let refCommon = GitWorkspace.gitCommonDir(in: ref.path, connection: nil) else {
+                return false
+            }
+            return refCommon == common
+        }
     }
 
     static func addAgentWorkspace(_ path: String) {
@@ -1000,7 +1037,7 @@ enum Preferences {
         guard let ref = agentWorkspaceRefs.first(where: { $0.id == id }) else { return }
         defaults.set(ref.id.uuidString, forKey: "agentWorkspaceRootID")
         defaults.set(ref.path, forKey: "agentWorkspaceRoot")
-        let active = rememberedWorktree(forRootID: ref.id) ?? ref.path
+        let active = resolvedRememberedWorktree(forRootID: ref.id, rootPath: ref.path)
         defaults.set(active, forKey: "agentWorkspace")
         touchAgentWorkspaceLastUsed(ref.id)
         NotificationCenter.default.post(name: changed, object: nil)
@@ -1052,6 +1089,20 @@ enum Preferences {
         return value.isEmpty ? nil : value
     }
 
+    /// Last worktree for this root, or the root itself when memory points at a deleted folder.
+    private static func resolvedRememberedWorktree(forRootID id: UUID, rootPath: String) -> String {
+        guard let remembered = rememberedWorktree(forRootID: id) else { return rootPath }
+        // Local only — don't SSH just to validate memory.
+        if let ref = agentWorkspaceRefs.first(where: { $0.id == id }), ref.connectionID != nil {
+            return remembered
+        }
+        if FileManager.default.fileExists(atPath: remembered) {
+            return remembered
+        }
+        clearRememberedWorktree(forRootID: id)
+        return rootPath
+    }
+
     private static func rememberWorktree(_ path: String, forRootID id: UUID) {
         var map = defaults.dictionary(forKey: "agentWorktreeByRootID") as? [String: String] ?? [:]
         map[id.uuidString] = path
@@ -1062,6 +1113,19 @@ enum Preferences {
         var map = defaults.dictionary(forKey: "agentWorktreeByRootID") as? [String: String] ?? [:]
         map.removeValue(forKey: id.uuidString)
         defaults.set(map, forKey: "agentWorktreeByRootID")
+    }
+
+    /// Drop worktree memory when that path was removed (picker / Settings delete).
+    static func forgetWorktreePath(_ path: String, root: String) {
+        let rootPath = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        let worktree = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rootPath.isEmpty, !worktree.isEmpty else { return }
+        guard let rootRef = agentWorkspaceRefs.first(where: {
+            $0.path == rootPath && $0.connectionID == currentWorkspaceRef?.connectionID
+        }) ?? agentWorkspaceRefs.first(where: { $0.path == rootPath }) else { return }
+        guard let remembered = rememberedWorktree(forRootID: rootRef.id),
+              SessionStore.sameWorkspace(remembered, worktree) else { return }
+        clearRememberedWorktree(forRootID: rootRef.id)
     }
 
     static var screenshotsFolder: String {
