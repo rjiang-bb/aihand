@@ -108,6 +108,84 @@ final class SessionsOpenChatPersistenceTests: SandboxedTestCase {
         XCTAssertEqual(map[keyA], chatA, "returning to A must still find the remembered chat")
     }
 
+    /// Folder A (chat open) → folder B → back to A must restore A's chat even when the
+    /// sessions list clears selection before each scopeDidChange (the real panel race).
+    func testFolderSwitchAToBToARestoresOpenChatDespiteDeselectRace() {
+        let chatA = UUID()
+        let chatB = UUID()
+        let folderA = "/Users/rui/Code/flyword"
+        let folderB = "/Users/rui/Code/aihand"
+        let keyA = SessionsOpenChatPersistence.scopeKey(
+            path: folderA, connectionID: nil, branch: "main"
+        )
+        let keyB = SessionsOpenChatPersistence.scopeKey(
+            path: folderB, connectionID: nil, branch: "main"
+        )
+        let keyAPending = SessionsOpenChatPersistence.scopeKey(
+            path: folderA, connectionID: nil, branch: ""
+        )
+        let keyBPending = SessionsOpenChatPersistence.scopeKey(
+            path: folderB, connectionID: nil, branch: ""
+        )
+
+        var map: [String: UUID] = [:]
+        var tracked = keyA
+        // Selecting a chat writes memory immediately (openChat → remember).
+        map[keyA] = chatA
+        let valid: Set<UUID> = [chatA, chatB]
+        let stillValid: (UUID) -> Bool = { valid.contains($0) }
+
+        // A → B: list filter clears selection first, then path flips with branch empty.
+        var step = SessionsOpenChatPersistence.applyScopeChange(
+            previousKey: tracked,
+            nextKey: keyBPending,
+            selectedID: nil,
+            map: &map,
+            sessionStillValid: stillValid
+        )
+        XCTAssertEqual(step.action, .waitForBranch)
+        XCTAssertEqual(map[keyA], chatA, "must not wipe A when selection already nil")
+        tracked = step.trackedKey
+
+        // Branch probe lands on B — nothing remembered for B yet.
+        step = SessionsOpenChatPersistence.applyScopeChange(
+            previousKey: tracked,
+            nextKey: keyB,
+            selectedID: nil,
+            map: &map,
+            sessionStillValid: stillValid
+        )
+        XCTAssertEqual(step.action, .clearSelection)
+        tracked = step.trackedKey
+
+        // Open a chat on B.
+        map[keyB] = chatB
+
+        // B → A: same race (selection cleared before scopeDidChange).
+        step = SessionsOpenChatPersistence.applyScopeChange(
+            previousKey: tracked,
+            nextKey: keyAPending,
+            selectedID: nil,
+            map: &map,
+            sessionStillValid: stillValid
+        )
+        XCTAssertEqual(step.action, .waitForBranch)
+        XCTAssertEqual(map[keyB], chatB)
+        XCTAssertEqual(map[keyA], chatA)
+        tracked = step.trackedKey
+
+        // Branch lands on A — restore the chat that was open before we left.
+        step = SessionsOpenChatPersistence.applyScopeChange(
+            previousKey: tracked,
+            nextKey: keyA,
+            selectedID: nil,
+            map: &map,
+            sessionStillValid: stillValid
+        )
+        XCTAssertEqual(step.action, .restore(chatA))
+        XCTAssertEqual(step.trackedKey, keyA)
+    }
+
     func testSameGitBranchEmptyMatchesLegacy() {
         XCTAssertTrue(SessionStore.sameGitBranch("", "main"))
         XCTAssertTrue(SessionStore.sameGitBranch("main", ""))

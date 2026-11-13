@@ -561,44 +561,28 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     /// Leaving scope A remembers its open chat; entering B restores B’s when the branch is known.
     private func scopeDidChange() {
         let nextKey = currentScopeKey()
-        let previousKey = trackedScopeKey
-        guard nextKey != previousKey else { return }
-
-        let previousParts = SessionsOpenChatPersistence.parts(of: previousKey)
-        let nextParts = SessionsOpenChatPersistence.parts(of: nextKey)
-        let pathChanged = previousParts.path != nextParts.path
-            || previousParts.connection != nextParts.connection
-
-        // Same path, branch temporarily empty during a git refresh — keep selection and
-        // the concrete tracked key so a later path change still remembers under branch.
-        if !pathChanged && nextParts.branch.isEmpty && !previousParts.branch.isEmpty {
-            return
-        }
-
-        // Persist the chat we are leaving. If the sessions-list filter already cleared
-        // `selectedID` (it races ahead of this sink), keep whatever we last stored for
-        // previousKey — never wipe memory just because selection is already nil.
-        if SessionsOpenChatPersistence.recordLeave(
-            previousKey: previousKey,
+        let result = SessionsOpenChatPersistence.applyScopeChange(
+            previousKey: trackedScopeKey,
+            nextKey: nextKey,
             selectedID: selection.selectedID,
-            into: &openChatByWorkspace
-        ) {
+            map: &openChatByWorkspace,
+            sessionStillValid: { [weak self] id in
+                self?.openChatSessionStillValid(id) ?? false
+            }
+        )
+        guard result.didChange else { return }
+        if result.mapChanged {
             persistOpenChatsToPreferences()
         }
-        trackedScopeKey = nextKey
-
-        // Path flipped and branch not probed yet — deselect foreign chats; restore after branch lands.
-        if pathChanged && nextParts.branch.isEmpty {
+        trackedScopeKey = result.trackedKey
+        switch result.action {
+        case .hold:
+            break
+        case .waitForBranch, .clearSelection:
             clearSelectionIfOutOfScope()
-            return
-        }
-
-        if let id = openChatByWorkspace[nextKey], openChatSessionStillValid(id) {
+        case .restore(let id):
             restoreOpenChat(for: id)
-            return
         }
-
-        clearSelectionIfOutOfScope()
     }
 
     /// Drop an untouched "New session" when leaving it (switch, Esc close-chat, click away).
@@ -1338,6 +1322,88 @@ enum SessionsOpenChatPersistence {
         if map[previousKey] == id { return false }
         map[previousKey] = id
         return true
+    }
+
+    /// What the sessions panel should do after a workspace/branch scope key changes.
+    enum ScopeAction: Equatable {
+        /// Same path, branch briefly empty during a git refresh — keep selection + tracked key.
+        case hold
+        /// Path changed but branch not probed yet — deselect; restore once branch lands.
+        case waitForBranch
+        case restore(UUID)
+        case clearSelection
+    }
+
+    struct ScopeChangeResult: Equatable {
+        var didChange: Bool
+        var trackedKey: String
+        var mapChanged: Bool
+        var action: ScopeAction
+    }
+
+    /// Pure scope transition used by `SessionsSidePanel.scopeDidChange` (and tests).
+    static func applyScopeChange(
+        previousKey: String,
+        nextKey: String,
+        selectedID: UUID?,
+        map: inout [String: UUID],
+        sessionStillValid: (UUID) -> Bool
+    ) -> ScopeChangeResult {
+        guard nextKey != previousKey else {
+            return ScopeChangeResult(
+                didChange: false,
+                trackedKey: previousKey,
+                mapChanged: false,
+                action: .hold
+            )
+        }
+
+        let previousParts = parts(of: previousKey)
+        let nextParts = parts(of: nextKey)
+        let pathChanged = previousParts.path != nextParts.path
+            || previousParts.connection != nextParts.connection
+
+        // Same path, branch temporarily empty during a git refresh — keep selection and
+        // the concrete tracked key so a later path change still remembers under branch.
+        if !pathChanged && nextParts.branch.isEmpty && !previousParts.branch.isEmpty {
+            return ScopeChangeResult(
+                didChange: false,
+                trackedKey: previousKey,
+                mapChanged: false,
+                action: .hold
+            )
+        }
+
+        let mapChanged = recordLeave(
+            previousKey: previousKey,
+            selectedID: selectedID,
+            into: &map
+        )
+
+        if pathChanged && nextParts.branch.isEmpty {
+            return ScopeChangeResult(
+                didChange: true,
+                trackedKey: nextKey,
+                mapChanged: mapChanged,
+                action: .waitForBranch
+            )
+        }
+
+        if let id = map[nextKey], sessionStillValid(id) {
+            return ScopeChangeResult(
+                didChange: true,
+                trackedKey: nextKey,
+                mapChanged: mapChanged,
+                action: .restore(id)
+            )
+        }
+
+        return ScopeChangeResult(
+            didChange: true,
+            trackedKey: nextKey,
+            mapChanged: mapChanged,
+            action: .clearSelection
+        )
     }
 
     static func decode(_ raw: [String: String]) -> [String: UUID] {
