@@ -546,6 +546,13 @@ final class SessionStore: ObservableObject {
             workspaceFolders = folders
             workspaceRefs = refs
         }
+        // Clear branch before path so open-chat scope keys never briefly pair the
+        // new worktree path with the previous branch name.
+        if rootChanged || currentChanged {
+            gitRepo = nil
+            currentGitBranch = ""
+            restartGitPollingIfNeeded()
+        }
         if rootChanged {
             workspaceRoot = nextRoot
             currentConnectionID = nextConnection
@@ -558,12 +565,6 @@ final class SessionStore: ObservableObject {
                !matchesCurrentScope(session) {
                 selectedSessionID = nil
             }
-        }
-        // Drop stale git UI immediately so switching to a huge SSH repo doesn’t wait on probes.
-        if rootChanged || currentChanged {
-            gitRepo = nil
-            currentGitBranch = ""
-            restartGitPollingIfNeeded()
         }
         scheduleGitRefresh(forRoot: nextRoot.isEmpty ? next : nextRoot, force: rootChanged || currentChanged)
     }

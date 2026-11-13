@@ -40,10 +40,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var lastLaidOutListHeight: CGFloat = 0
     private var hintHideWork: DispatchWorkItem?
-    /// Last open chat per workspace so switching folders (and force-quit relaunches) restore it.
+    /// Last open chat per workspace+branch so switching folders/branches restores it.
     private var openChatByWorkspace: [String: UUID] = [:]
-    /// Workspace key last applied to selection memory (`connection|normalizedPath`).
-    private var trackedWorkspaceKey: String = ""
+    /// Scope key last applied to selection memory (`connection|path|branch`).
+    private var trackedScopeKey: String = ""
 
     /// Must equal the SwiftUI content width (`listColumnWidth` + 14pt padding each side).
     /// At 360 the hosting view silently widened the window to 372, so the layout math
@@ -229,6 +229,9 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             onCloseChat: { [weak self] in
                 self?.closeChat()
             },
+            onDeselectOutOfScope: { [weak self] in
+                self?.deselectOutOfScopeChat()
+            },
             onClose: { [weak self] in
                 self?.hide()
             },
@@ -320,12 +323,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             self.relayoutForSessionCountIfNeeded(animateFrame: false)
         }
         .store(in: &cancellables)
-        trackedWorkspaceKey = workspaceKey(store.currentWorkspace, connectionID: store.currentConnectionID)
+        trackedScopeKey = currentScopeKey()
         restoreOpenChatForCurrentWorkspaceIfNeeded()
-        store.$currentWorkspace
+        // Path and branch both define list scope — remember/restore open chat per pair.
+        Publishers.CombineLatest(store.$currentWorkspace, store.$currentGitBranch)
             .receive(on: RunLoop.main)
-            .sink { [weak self] next in
-                self?.workspaceDidChange(to: next)
+            .sink { [weak self] _, _ in
+                self?.scopeDidChange()
             }
             .store(in: &cancellables)
         // Git worktree list toggles panel height when a repo is detected / refreshed.
@@ -456,14 +460,45 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         persistListPlacement()
     }
 
-    private func workspaceKey(_ path: String, connectionID: UUID? = nil) -> String {
-        let conn = connectionID?.uuidString ?? "local"
-        return "\(conn)|\(SessionStore.normalizedWorkspace(path))"
+    /// Drop an out-of-scope selection (branch/workspace filter) without writing nil
+    /// into the current scope’s open-chat memory — `scopeDidChange` owns that map.
+    private func deselectOutOfScopeChat() {
+        guard selection.selectedID != nil else { return }
+        let expanded = panel.frame
+        discardBlankDraftIfLeaving()
+        selection.selectedID = nil
+        if isVisible {
+            layout(
+                listOriginOverride: CGPoint(
+                    x: expanded.maxX - listWidth,
+                    y: expanded.maxY - listHeight
+                )
+            )
+            persistListPlacement()
+        }
+    }
+
+    /// `connection|normalizedPath|branch` — branch may be empty for non-git folders.
+    private func scopeKey(path: String, connectionID: UUID? = nil, branch: String) -> String {
+        SessionsOpenChatPersistence.scopeKey(
+            path: path,
+            connectionID: connectionID,
+            branch: branch
+        )
+    }
+
+    private func currentScopeKey() -> String {
+        scopeKey(
+            path: store.currentWorkspace,
+            connectionID: store.currentConnectionID,
+            branch: store.currentGitBranch
+        )
     }
 
     private func rememberOpenChatForCurrentWorkspace() {
-        let key = workspaceKey(store.currentWorkspace, connectionID: store.currentConnectionID)
-        guard !key.hasSuffix("|") else { return }
+        let key = currentScopeKey()
+        // Skip incomplete keys (empty path).
+        guard !SessionsOpenChatPersistence.isIncompleteScopeKey(key) else { return }
         if let id = selection.selectedID {
             openChatByWorkspace[key] = id
         } else {
@@ -472,14 +507,11 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         persistOpenChatsToPreferences()
     }
 
-    /// After launch / prefs load — reselect the last open chat for this workspace if it still exists.
+    /// After launch / prefs load — reselect the last open chat for this scope if it still exists.
     private func restoreOpenChatForCurrentWorkspaceIfNeeded() {
-        let key = workspaceKey(store.currentWorkspace, connectionID: store.currentConnectionID)
+        let key = currentScopeKey()
         guard let id = openChatByWorkspace[key],
-              store.allSessions.contains(where: {
-                  $0.id == id && workspaceKey($0.workspace, connectionID: $0.connectionID) == key
-              }) else {
-            // Drop stale ids that no longer resolve.
+              openChatSessionStillValid(id) else {
             if openChatByWorkspace[key] != nil {
                 openChatByWorkspace.removeValue(forKey: key)
                 persistOpenChatsToPreferences()
@@ -490,7 +522,12 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         selection.revealSessionInList(id, sessions: store.sessions)
     }
 
-    /// Re-select a remembered chat after a workspace switch without forcing the panel on-screen.
+    private func openChatSessionStillValid(_ id: UUID) -> Bool {
+        guard let session = store.allSessions.first(where: { $0.id == id }) else { return false }
+        return store.matchesCurrentScope(session)
+    }
+
+    /// Re-select a remembered chat after a scope switch without forcing the panel on-screen.
     private func restoreOpenChat(for id: UUID) {
         if selection.selectedID == id {
             selection.revealSessionInList(id, sessions: store.sessions)
@@ -512,49 +549,54 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Leaving workspace/worktree A remembers its open chat; entering B restores B’s if any.
-    private func workspaceDidChange(to next: String) {
-        let nextKey = workspaceKey(next, connectionID: store.currentConnectionID)
-        let previousKey = trackedWorkspaceKey
+    /// Deselect an out-of-scope chat without writing nil into the *current* scope’s memory
+    /// (the scope we left already stored its id under `trackedScopeKey`).
+    private func clearSelectionIfOutOfScope() {
+        guard let id = selection.selectedID,
+              let session = store.allSessions.first(where: { $0.id == id }),
+              !store.matchesCurrentScope(session) else { return }
+        deselectOutOfScopeChat()
+    }
+
+    /// Leaving scope A remembers its open chat; entering B restores B’s when the branch is known.
+    private func scopeDidChange() {
+        let nextKey = currentScopeKey()
+        let previousKey = trackedScopeKey
         guard nextKey != previousKey else { return }
 
-        if !previousKey.isEmpty {
-            if let id = selection.selectedID,
-               let session = store.allSessions.first(where: { $0.id == id }),
-               workspaceKey(session.workspace, connectionID: session.connectionID) == previousKey {
+        let previousParts = SessionsOpenChatPersistence.parts(of: previousKey)
+        let nextParts = SessionsOpenChatPersistence.parts(of: nextKey)
+        let pathChanged = previousParts.path != nextParts.path
+            || previousParts.connection != nextParts.connection
+
+        // Same path, branch temporarily empty during a git refresh — keep selection and
+        // the concrete tracked key so a later path change still remembers under branch.
+        if !pathChanged && nextParts.branch.isEmpty && !previousParts.branch.isEmpty {
+            return
+        }
+
+        if !previousKey.isEmpty, !SessionsOpenChatPersistence.isIncompleteScopeKey(previousKey) {
+            if let id = selection.selectedID {
                 openChatByWorkspace[previousKey] = id
-            } else if selection.selectedID == nil {
+            } else {
                 openChatByWorkspace.removeValue(forKey: previousKey)
             }
             persistOpenChatsToPreferences()
         }
-        trackedWorkspaceKey = nextKey
+        trackedScopeKey = nextKey
 
-        if let id = openChatByWorkspace[nextKey],
-           store.allSessions.contains(where: {
-               $0.id == id && workspaceKey($0.workspace, connectionID: $0.connectionID) == nextKey
-           }) {
+        // Path flipped and branch not probed yet — deselect foreign chats; restore after branch lands.
+        if pathChanged && nextParts.branch.isEmpty {
+            clearSelectionIfOutOfScope()
+            return
+        }
+
+        if let id = openChatByWorkspace[nextKey], openChatSessionStillValid(id) {
             restoreOpenChat(for: id)
             return
         }
 
-        if let id = selection.selectedID,
-           let session = store.allSessions.first(where: { $0.id == id }),
-           !store.matchesCurrentScope(session) {
-            // Collapse chat for the destination without wiping the remembered id for `previousKey`.
-            let expanded = panel.frame
-            discardBlankDraftIfLeaving()
-            selection.selectedID = nil
-            if isVisible {
-                layout(
-                    listOriginOverride: CGPoint(
-                        x: expanded.maxX - listWidth,
-                        y: expanded.maxY - listHeight
-                    )
-                )
-                persistListPlacement()
-            }
-        }
+        clearSelectionIfOutOfScope()
     }
 
     /// Drop an untouched "New session" when leaving it (switch, Esc close-chat, click away).
@@ -1246,8 +1288,38 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
 
 }
 
-/// Persist / restore the last-open chat id per workspace (survives force-quit).
+/// Persist / restore the last-open chat id per workspace+branch (survives force-quit).
 enum SessionsOpenChatPersistence {
+    struct ScopeParts: Equatable {
+        var connection: String
+        var path: String
+        var branch: String
+    }
+
+    /// `connection|normalizedPath|branch` (branch may be empty for non-git folders).
+    static func scopeKey(path: String, connectionID: UUID?, branch: String) -> String {
+        let conn = connectionID?.uuidString ?? "local"
+        let normalized = SessionStore.normalizedWorkspace(path)
+        let branchPart = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(conn)|\(normalized)|\(branchPart)"
+    }
+
+    static func parts(of key: String) -> ScopeParts {
+        let bits = key.split(separator: "|", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
+        if bits.count >= 3 {
+            return ScopeParts(connection: bits[0], path: bits[1], branch: bits[2])
+        }
+        // Legacy `connection|path` keys (pre-branch) — treat branch as empty.
+        if bits.count == 2 {
+            return ScopeParts(connection: bits[0], path: bits[1], branch: "")
+        }
+        return ScopeParts(connection: bits.first ?? "local", path: "", branch: "")
+    }
+
+    static func isIncompleteScopeKey(_ key: String) -> Bool {
+        parts(of: key).path.isEmpty
+    }
+
     static func decode(_ raw: [String: String]) -> [String: UUID] {
         var loaded: [String: UUID] = [:]
         for (key, value) in raw {
@@ -1580,6 +1652,8 @@ private struct SessionsSidePanelView: View {
     @ObservedObject var selection: SessionsPanelSelection
     var onSelect: (UUID) -> Void
     var onCloseChat: () -> Void
+    /// Clear selection when the open chat leaves the filtered list (branch/workspace), without wiping scope memory.
+    var onDeselectOutOfScope: () -> Void
     var onClose: () -> Void
     var onNew: () -> Void
     var onNewWithDraft: (String) -> Void
@@ -1699,9 +1773,13 @@ private struct SessionsSidePanelView: View {
         .onChange(of: store.sessions.map(\.id)) { ids in
             selection.clampListPage(total: ids.count)
             if let id = selection.selectedID, !ids.contains(id) {
-                // Still alive under another workspace — panel restores on switch-back.
-                if store.allSessions.contains(where: { $0.id == id }) { return }
-                onCloseChat()
+                if store.session(id: id) != nil {
+                    // Still archived under another branch/workspace — deselect only;
+                    // `scopeDidChange` remembers/restores per-scope open chats.
+                    onDeselectOutOfScope()
+                } else {
+                    onCloseChat()
+                }
             }
         }
         .onChange(of: store.currentWorkspace) { _ in

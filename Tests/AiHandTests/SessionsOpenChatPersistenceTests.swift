@@ -6,26 +6,26 @@ final class SessionsOpenChatPersistenceTests: SandboxedTestCase {
         let a = UUID()
         let b = UUID()
         let map = [
-            "local|/Users/rui/Code/aihand": a,
-            "remote|/home/proj": b,
+            "local|/Users/rui/Code/aihand|main": a,
+            "remote|/home/proj|feature": b,
         ]
         let encoded = SessionsOpenChatPersistence.encode(map)
-        XCTAssertEqual(encoded["local|/Users/rui/Code/aihand"], a.uuidString)
+        XCTAssertEqual(encoded["local|/Users/rui/Code/aihand|main"], a.uuidString)
         XCTAssertEqual(SessionsOpenChatPersistence.decode(encoded), map)
     }
 
     func testDecodeSkipsInvalidUUIDs() {
         let id = UUID()
         let decoded = SessionsOpenChatPersistence.decode([
-            "local|/tmp/a": id.uuidString,
-            "local|/tmp/b": "not-a-uuid",
+            "local|/tmp/a|main": id.uuidString,
+            "local|/tmp/b|main": "not-a-uuid",
         ])
-        XCTAssertEqual(decoded, ["local|/tmp/a": id])
+        XCTAssertEqual(decoded, ["local|/tmp/a|main": id])
     }
 
     func testPreferencesSurvivesRelaunchStyleReload() {
         let id = UUID()
-        let key = "local|/Users/rui/Code/aihand"
+        let key = "local|/Users/rui/Code/aihand|main"
         Preferences.openChatByWorkspace = [key: id.uuidString]
         XCTAssertEqual(Preferences.openChatByWorkspace[key], id.uuidString)
         XCTAssertEqual(
@@ -34,5 +34,90 @@ final class SessionsOpenChatPersistenceTests: SandboxedTestCase {
         )
         Preferences.openChatByWorkspace = [:]
         XCTAssertTrue(Preferences.openChatByWorkspace.isEmpty)
+    }
+
+    func testScopeKeyIncludesBranch() {
+        let key = SessionsOpenChatPersistence.scopeKey(
+            path: "/Users/rui/Code/aihand",
+            connectionID: nil,
+            branch: "main"
+        )
+        XCTAssertEqual(key, "local|/Users/rui/Code/aihand|main")
+        let parts = SessionsOpenChatPersistence.parts(of: key)
+        XCTAssertEqual(parts.connection, "local")
+        XCTAssertEqual(parts.path, "/Users/rui/Code/aihand")
+        XCTAssertEqual(parts.branch, "main")
+    }
+
+    func testScopeKeyDistinguishesBranches() {
+        let main = SessionsOpenChatPersistence.scopeKey(
+            path: "/tmp/repo", connectionID: nil, branch: "main"
+        )
+        let feature = SessionsOpenChatPersistence.scopeKey(
+            path: "/tmp/repo", connectionID: nil, branch: "feature"
+        )
+        XCTAssertNotEqual(main, feature)
+    }
+
+    func testLegacyTwoPartKeysParseWithEmptyBranch() {
+        let parts = SessionsOpenChatPersistence.parts(of: "local|/tmp/old")
+        XCTAssertEqual(parts.connection, "local")
+        XCTAssertEqual(parts.path, "/tmp/old")
+        XCTAssertEqual(parts.branch, "")
+    }
+
+    func testIncompleteScopeKey() {
+        XCTAssertTrue(SessionsOpenChatPersistence.isIncompleteScopeKey("local||"))
+        XCTAssertTrue(SessionsOpenChatPersistence.isIncompleteScopeKey("local||main"))
+        XCTAssertFalse(SessionsOpenChatPersistence.isIncompleteScopeKey("local|/tmp/x|main"))
+        XCTAssertFalse(SessionsOpenChatPersistence.isIncompleteScopeKey("local|/tmp/x|"))
+    }
+
+    func testSameGitBranchEmptyMatchesLegacy() {
+        XCTAssertTrue(SessionStore.sameGitBranch("", "main"))
+        XCTAssertTrue(SessionStore.sameGitBranch("main", ""))
+        XCTAssertTrue(SessionStore.sameGitBranch("main", "main"))
+        XCTAssertFalse(SessionStore.sameGitBranch("main", "feature"))
+    }
+
+    func testMatchesCurrentScopeRequiresBranchWhenBothSet() {
+        let store = SessionStore()
+        store.syncFromPreferences(clearSelectionIfNeeded: false)
+        // Drive published state via preferences worktree selection when possible;
+        // here assert the pure helpers used by scope filtering.
+        let onMain = AgentSession(
+            title: "main",
+            prompt: "p",
+            screenshotPath: nil,
+            workspace: "/tmp/repo",
+            gitBranch: "main",
+            connectionID: nil,
+            cliKind: .cursor,
+            status: .finished,
+            blank: true
+        )
+        let onFeature = AgentSession(
+            title: "feature",
+            prompt: "p",
+            screenshotPath: nil,
+            workspace: "/tmp/repo",
+            gitBranch: "feature",
+            connectionID: nil,
+            cliKind: .cursor,
+            status: .finished,
+            blank: true
+        )
+        // Simulate store scope with direct published fields via applying git info path:
+        // use matches after manually setting through apply-equivalent: only public API is
+        // Preferences + sync. Assert helper composition instead.
+        XCTAssertTrue(
+            SessionStore.sameWorkspace(onMain.workspace, "/tmp/repo")
+                && SessionStore.sameGitBranch(onMain.gitBranch, "main")
+        )
+        XCTAssertFalse(
+            SessionStore.sameWorkspace(onFeature.workspace, "/tmp/repo")
+                && SessionStore.sameGitBranch(onFeature.gitBranch, "main")
+        )
+        _ = store
     }
 }

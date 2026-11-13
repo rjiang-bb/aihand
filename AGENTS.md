@@ -93,7 +93,7 @@ Do **not** let the Archive Session menu key equivalent archive while a preview o
 
 ## Open session survives relaunch
 
-The last open chat per workspace is written to `Preferences.openChatByWorkspace` on every select/close (not only on clean quit). On launch, `SessionsSidePanel` restores `selectedID` when that session still exists so force-quit doesn’t leave the list with nothing selected.
+The last open chat per workspace **and branch** is written to `Preferences.openChatByWorkspace` on every select/close (not only on clean quit). Keys are `connection|path|branch`. Switching worktrees/branches deselects chats that are out of scope; returning restores that scope’s remembered session when it still exists.
 
 ## UI icons
 

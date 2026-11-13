@@ -1143,7 +1143,7 @@ enum Preferences {
         }
     }
 
-    /// Last open chat per workspace key (`connection|normalizedPath` → session UUID string).
+    /// Last open chat per scope key (`connection|normalizedPath|branch` → session UUID string).
     /// Written on every select/close so force-quit still restores the open session.
     static var openChatByWorkspace: [String: String] {
         get { defaults.dictionary(forKey: "sessionsOpenChatByWorkspace") as? [String: String] ?? [:] }
