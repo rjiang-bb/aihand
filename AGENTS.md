@@ -34,6 +34,14 @@ The sessions **list card hugs its content** — only as tall as the workspace pi
 - Keep the list top-aligned beside chat; empty space below the list (inside the panel) is fine.
 - Measured height lives in `SessionsListMetrics` / `listContentHeight`; the column frame uses that fixed height even when chat is open.
 
+## Chat pane height
+
+The open chat’s height is **only** the last user drag (`Preferences.sessionsPanelHeight`), floored at the default expanded size.
+
+- Do **not** grow the expanded panel when the sessions list gets longer (more rows, git picker, ⌘ hints). List-only still hugs content; chat stays put until the user drags a resize handle.
+- Do **not** floor expanded height to `listHeight` — that ratchets the saved chat size upward and persists on hide.
+- Keep the sessions `NSHostingView.sizingOptions = []` so SwiftUI intrinsic size cannot override the window frame.
+
 ## ⌘-hold shortcut hints
 
 Holding **⌘** shows per-row `⌘1`…`⌘9` labels and a hints footer (`⌘1–9` / `⌘↑↓` / `⌘W`).

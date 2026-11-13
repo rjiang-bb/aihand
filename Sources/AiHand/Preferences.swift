@@ -929,6 +929,7 @@ enum Preferences {
                 rememberWorktree(path, forRootID: ref.id)
                 defaults.set(path, forKey: "agentWorkspace")
             }
+            touchAgentWorkspaceLastUsed(ref.id)
             NotificationCenter.default.post(name: changed, object: nil)
             return
         }
@@ -1001,7 +1002,25 @@ enum Preferences {
         defaults.set(ref.path, forKey: "agentWorkspaceRoot")
         let active = rememberedWorktree(forRootID: ref.id) ?? ref.path
         defaults.set(active, forKey: "agentWorkspace")
+        touchAgentWorkspaceLastUsed(ref.id)
         NotificationCenter.default.post(name: changed, object: nil)
+    }
+
+    /// Last time each workspace was selected in the sessions picker (MRU).
+    static func agentWorkspaceLastUsedDates() -> [UUID: Date] {
+        let map = defaults.dictionary(forKey: "agentWorkspaceLastUsed") as? [String: Double] ?? [:]
+        var out: [UUID: Date] = [:]
+        for (key, value) in map {
+            guard let id = UUID(uuidString: key) else { continue }
+            out[id] = Date(timeIntervalSince1970: value)
+        }
+        return out
+    }
+
+    static func touchAgentWorkspaceLastUsed(_ id: UUID) {
+        var map = defaults.dictionary(forKey: "agentWorkspaceLastUsed") as? [String: Double] ?? [:]
+        map[id.uuidString] = Date().timeIntervalSince1970
+        defaults.set(map, forKey: "agentWorkspaceLastUsed")
     }
 
     static func selectAgentWorktree(_ path: String, root: String) {
@@ -1016,6 +1035,7 @@ enum Preferences {
         defaults.set(rootRef.id.uuidString, forKey: "agentWorkspaceRootID")
         defaults.set(rootRef.path, forKey: "agentWorkspaceRoot")
         defaults.set(worktree, forKey: "agentWorkspace")
+        touchAgentWorkspaceLastUsed(rootRef.id)
         NotificationCenter.default.post(name: changed, object: nil)
     }
 
@@ -1184,6 +1204,7 @@ enum Preferences {
                     "sshConnections",
                     "agentWorkspace", "agentWorkspaceRoot", "agentWorkspaces", "agentWorktreeByRoot",
                     "agentWorkspaceRefs", "agentWorkspaceRootID", "agentWorktreeByRootID",
+                    "agentWorkspaceLastUsed",
                     "agentFavorites", "currentAgentFavoriteID", "currentAgentFavoriteIDs", "screenshotsFolder",
                     "sessionsPanelWidth", "sessionsPanelHeight", "sessionsPanelOriginX", "sessionsPanelOriginY",
                     "sessionsPanelExpandedOriginX", "sessionsPanelExpandedOriginY",

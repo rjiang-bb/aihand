@@ -389,6 +389,17 @@ final class SessionStore: ObservableObject {
     @Published private(set) var workspaceFolders: [String] = []
     /// Full workspace refs (local + SSH) for the panel picker.
     @Published private(set) var workspaceRefs: [AgentWorkspaceRef] = []
+
+    /// Sessions-panel folder list: most recently used / active first (⌥1–9 matches this order).
+    var workspaceRefsForPicker: [AgentWorkspaceRef] {
+        let refs = workspaceRefs.isEmpty ? Preferences.agentWorkspaceRefs : workspaceRefs
+        return WorkspacePickerOrdering.sorted(
+            refs: refs,
+            sessions: allSessions,
+            lastUsedAt: Preferences.agentWorkspaceLastUsedDates()
+        )
+    }
+
     @Published var selectedSessionID: UUID?
     private var bags: [UUID: AnyCancellable] = [:]
     private var prefsObserver: Any?

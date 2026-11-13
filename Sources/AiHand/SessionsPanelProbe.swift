@@ -227,6 +227,22 @@ enum SessionsPanelProbe {
         expect("height: expanded panel is taller than the bare list (room for chat)", panel.probeFrame.height >= before)
         panel.collapseChat()
         pump(0.4)
+
+        // Chat height is prefs-only — a long list must not stretch the open pane.
+        Preferences.sessionsPanelHeight = Preferences.sessionsPanelDefaultHeight
+        Preferences.sessionsPanelWidth = Preferences.sessionsPanelDefaultWidth
+        freshPanel(sessions: 9)
+        let listOnly = panel.probeFrame.height
+        expect("height: list-only with many rows exceeds default chat",
+               listOnly > Preferences.sessionsPanelDefaultHeight + 20,
+               "list=\(listOnly) default=\(Preferences.sessionsPanelDefaultHeight)")
+        panel.openChat(for: store.sessions[0].id)
+        pump(0.3)
+        expect("height: opening chat keeps saved height (does not grow to list)",
+               near(panel.probeFrame.height, Preferences.sessionsPanelDefaultHeight),
+               "h=\(panel.probeFrame.height) saved=\(Preferences.sessionsPanelDefaultHeight) list=\(listOnly)")
+        panel.collapseChat()
+        pump(0.4)
     }
 
     /// ⌘ held: row labels + hints footer grow out of the bottom; top edge and row positions stay.

@@ -60,12 +60,11 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
             gitPickerExpanded: selection.gitPickerExpanded
         )
     }
-    /// Floor at the default expanded size — users can only grow the chat from here.
-    /// Never shorter than the current list (top-aligned) so rows aren’t clipped.
+    /// Floor at the default expanded size — users grow the chat only by dragging.
+    /// Do **not** floor to `listHeight`: that ratcheted the pane taller as sessions
+    /// were added and then persisted via `sessionsPanelHeight`.
     private var minExpandedWidth: CGFloat { Preferences.sessionsPanelDefaultWidth }
-    private var minExpandedHeight: CGFloat {
-        max(Preferences.sessionsPanelDefaultHeight, listHeight)
-    }
+    private var minExpandedHeight: CGFloat { Preferences.sessionsPanelDefaultHeight }
     private let maxShortcutSlots = 9
 
     fileprivate struct ChatResizeEdges: OptionSet {
@@ -291,6 +290,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let host = NSHostingView(rootView: root)
         host.wantsLayer = true
         host.autoresizingMask = [.width, .height]
+        // Default sizingOptions (min/intrinsic/max) push the window to SwiftUI’s
+        // intrinsic height — that made the chat pane grow with the sessions list.
+        // Panel size is owned by layout() / chat drag only.
+        host.sizingOptions = []
         host.layer?.backgroundColor = NSColor.clear.cgColor
         hosting = host
         panel.contentView = host
@@ -732,11 +735,13 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let maxW = floor(visible.width * 0.5)
         let maxH = floor(visible.height * 0.9)
         if expanded {
-            let minW = min(minExpandedWidth, maxW)
-            let minH = min(minExpandedHeight, maxH)
-            let width = min(max(Preferences.sessionsPanelWidth, minW), maxW)
-            let height = min(max(Preferences.sessionsPanelHeight, minH), maxH)
-            return NSSize(width: width, height: height)
+            // Chat size comes from prefs (last drag). Independent of session count.
+            return SessionsPanelChatSizing.preferredSize(
+                savedWidth: Preferences.sessionsPanelWidth,
+                savedHeight: Preferences.sessionsPanelHeight,
+                maxWidth: maxW,
+                maxHeight: maxH
+            )
         }
         // Sessions list alone stays a fixed size — only the chat pane resizes.
         return NSSize(
@@ -749,9 +754,10 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
         let maxW = max(1, floor(visible.width * 0.5))
         let maxH = max(1, floor(visible.height * 0.9))
         if expanded {
-            let minW = min(minExpandedWidth, maxW)
-            let minH = min(minExpandedHeight, maxH)
-            panel.minSize = NSSize(width: minW, height: minH)
+            panel.minSize = NSSize(
+                width: min(minExpandedWidth, maxW),
+                height: min(minExpandedHeight, maxH)
+            )
             panel.maxSize = NSSize(width: maxW, height: maxH)
         } else {
             let width = min(listWidth, maxW)
@@ -982,9 +988,7 @@ final class SessionsSidePanel: NSObject, NSWindowDelegate {
     }
 
     private func selectWorkspace(at index: Int) {
-        let refs = store.workspaceRefs.isEmpty
-            ? Preferences.agentWorkspaceRefs
-            : store.workspaceRefs
+        let refs = store.workspaceRefsForPicker
         guard refs.indices.contains(index) else { return }
         // Keep the list open while ⌥ is held; only collapse a click-pinned menu.
         if !selection.showWorkspacePicker {
@@ -1282,6 +1286,52 @@ enum SessionsPanelEscape {
     }
 }
 
+/// Workspace folder picker: MRU by last use / session activity; scroll past 5 rows.
+enum WorkspacePickerOrdering {
+    static let maxVisibleRows = 5
+
+    static func sorted(
+        refs: [AgentWorkspaceRef],
+        sessions: [AgentSession],
+        lastUsedAt: [UUID: Date]
+    ) -> [AgentWorkspaceRef] {
+        refs.enumerated()
+            .sorted { a, b in
+                let da = rank(a.element, sessions: sessions, lastUsedAt: lastUsedAt)
+                let db = rank(b.element, sessions: sessions, lastUsedAt: lastUsedAt)
+                if da != db { return da > db }
+                return a.offset < b.offset
+            }
+            .map(\.element)
+    }
+
+    static func rank(
+        _ ref: AgentWorkspaceRef,
+        sessions: [AgentSession],
+        lastUsedAt: [UUID: Date]
+    ) -> Date {
+        let fromSessions = sessions.compactMap { session -> Date? in
+            guard belongs(session, to: ref) else { return nil }
+            let latestMessage = session.messages.map(\.createdAt).max()
+            return [session.createdAt, latestMessage].compactMap { $0 }.max()
+        }.max()
+        let fromUsed = lastUsedAt[ref.id]
+        return [fromSessions, fromUsed].compactMap { $0 }.max() ?? .distantPast
+    }
+
+    static func belongs(_ session: AgentSession, to ref: AgentWorkspaceRef) -> Bool {
+        SessionStore.sameConnection(session.connectionID, ref.connectionID)
+            && workspaceMatches(session.workspace, root: ref.path)
+    }
+
+    static func workspaceMatches(_ workspace: String, root: String) -> Bool {
+        let w = SessionStore.normalizedWorkspace(workspace)
+        let r = SessionStore.normalizedWorkspace(root)
+        guard !r.isEmpty else { return false }
+        return w == r || w.hasPrefix(r + "/")
+    }
+}
+
 enum SessionsListPaging {
     static let pageSize = 10
     /// Show the pager once the list grows past the old hard cap of 9.
@@ -1309,6 +1359,26 @@ enum SessionsListPaging {
 }
 
 /// List panel height grows with session count up to one full page + pagination.
+/// Expanded (chat open) panel size from prefs — independent of sessions-list length.
+enum SessionsPanelChatSizing {
+    static var minWidth: CGFloat { Preferences.sessionsPanelDefaultWidth }
+    static var minHeight: CGFloat { Preferences.sessionsPanelDefaultHeight }
+
+    static func preferredSize(
+        savedWidth: CGFloat,
+        savedHeight: CGFloat,
+        maxWidth: CGFloat,
+        maxHeight: CGFloat
+    ) -> NSSize {
+        let minW = min(minWidth, maxWidth)
+        let minH = min(minHeight, maxHeight)
+        return NSSize(
+            width: min(max(savedWidth, minW), maxWidth),
+            height: min(max(savedHeight, minH), maxHeight)
+        )
+    }
+}
+
 enum SessionsListMetrics {
     static let chromeVertical: CGFloat = 68 + 14
     /// Workspace picker closed: 13+13 pad + ~34pt title/path stack.
@@ -1319,6 +1389,8 @@ enum SessionsListMetrics {
     private static let pickerRow: CGFloat = 50
     /// “Changes +N −M” button row under the branch header.
     static let gitChangesRowHeight: CGFloat = 36
+    /// Expanded worktree list scrolls past this many rows (panel height stays capped).
+    static let gitPickerMaxVisibleRows = 10
     private static let gitPickerRow: CGFloat = 44
     private static let gitPickerAdd: CGFloat = 44
     private static let pickerManage: CGFloat = 36
@@ -1341,15 +1413,30 @@ enum SessionsListMetrics {
         panelHeight(sessionCount: SessionsListPaging.pageSize + 1)
     }
 
+    /// Height of the scrollable workspace rows (+ inter-row dividers), capped at `WorkspacePickerOrdering.maxVisibleRows`.
+    static func pickerFolderListHeight(folderCount: Int) -> CGFloat {
+        let visible = min(max(folderCount, 0), WorkspacePickerOrdering.maxVisibleRows)
+        guard visible > 0 else { return 0 }
+        return CGFloat(visible) * pickerRow + CGFloat(max(0, visible - 1)) * pickerDivider
+    }
+
     static func pickerHeight(folderCount: Int, expanded: Bool) -> CGFloat {
         guard expanded else { return picker }
         if folderCount <= 0 {
             return picker + pickerDivider + pickerManage
         }
-        let rows = CGFloat(folderCount) * pickerRow
+        let visible = min(folderCount, WorkspacePickerOrdering.maxVisibleRows)
+        let rows = CGFloat(visible) * pickerRow
         // Separators between rows + before Manage.
-        let seps = CGFloat(folderCount) * pickerDivider
+        let seps = CGFloat(visible) * pickerDivider
         return picker + seps + rows + pickerManage
+    }
+
+    /// Height of the scrollable worktree rows (+ inter-row dividers), capped at `gitPickerMaxVisibleRows`.
+    static func gitPickerWorktreeListHeight(worktreeCount: Int) -> CGFloat {
+        let visible = min(max(worktreeCount, 0), gitPickerMaxVisibleRows)
+        guard visible > 0 else { return 0 }
+        return CGFloat(visible) * gitPickerRow + CGFloat(max(0, visible - 1)) * pickerDivider
     }
 
     static func gitPickerHeight(worktreeCount: Int, expanded: Bool) -> CGFloat {
@@ -1357,9 +1444,10 @@ enum SessionsListMetrics {
         // Header + divider + the always-visible “Changes” row.
         let closed = gitPicker + pickerDivider + gitChangesRowHeight
         guard expanded else { return closed }
-        let rows = CGFloat(max(worktreeCount, 1)) * gitPickerRow
+        let visible = min(max(worktreeCount, 1), gitPickerMaxVisibleRows)
+        let rows = CGFloat(visible) * gitPickerRow
         // Separators between rows, before Add, and before Manage.
-        let seps = CGFloat(max(worktreeCount, 1) + 1) * pickerDivider
+        let seps = CGFloat(visible + 1) * pickerDivider
         return closed + pickerDivider + rows + seps + gitPickerAdd + pickerManage
     }
 
@@ -1707,7 +1795,7 @@ private struct SessionsSidePanelView: View {
             VStack(spacing: 6) {
                 WorkspacePicker(
                     store: store,
-                    refs: store.workspaceRefs.isEmpty ? Preferences.agentWorkspaceRefs : store.workspaceRefs,
+                    refs: store.workspaceRefsForPicker,
                     currentRootID: Preferences.currentWorkspaceRef?.id,
                     currentPath: store.workspaceRoot.isEmpty ? store.currentWorkspace : store.workspaceRoot,
                     isOpen: selection.workspacePickerExpanded,
@@ -2089,24 +2177,11 @@ private struct WorkspacePicker: View {
                 if refs.isEmpty {
                     WorkspacePickerActionRow(title: "Add folders…", fg: fg, hugsBottom: true, onSelect: onManage)
                 } else {
-                    ForEach(Array(refs.enumerated()), id: \.element.id) { index, ref in
-                        WorkspacePickerRow(
-                            path: ref.path,
-                            hostLabel: ref.connectionID.flatMap { Preferences.sshConnection(id: $0)?.hostname },
-                            shortcutIndex: index + 1,
-                            isCurrent: ref.id == currentRootID
-                                || (currentRootID == nil && SessionStore.sameWorkspace(ref.path, currentPath)),
-                            counts: store.sessionCounts(for: ref.path, connectionID: ref.connectionID),
-                            fg: fg,
-                            onSelect: { onSelect(ref) }
+                    workspaceFolderRows
+                        .frame(
+                            height: SessionsListMetrics.pickerFolderListHeight(folderCount: refs.count),
+                            alignment: .top
                         )
-                        if index < refs.count - 1 {
-                            Rectangle()
-                                .fill(Color.primary.opacity(0.07))
-                                .frame(height: 1)
-                                .padding(.leading, 14)
-                        }
-                    }
                     Rectangle()
                         .fill(Color.primary.opacity(0.07))
                         .frame(height: 1)
@@ -2116,6 +2191,38 @@ private struct WorkspacePicker: View {
         }
         .background(WorkspacePickerBackground(cornerRadius: SoftChrome.pickerCornerRadius))
         .animation(.easeOut(duration: 0.14), value: isOpen)
+    }
+
+    @ViewBuilder
+    private var workspaceFolderRows: some View {
+        let rows = VStack(spacing: 0) {
+            ForEach(Array(refs.enumerated()), id: \.element.id) { index, ref in
+                WorkspacePickerRow(
+                    path: ref.path,
+                    hostLabel: ref.connectionID.flatMap { Preferences.sshConnection(id: $0)?.hostname },
+                    shortcutIndex: index + 1,
+                    isCurrent: ref.id == currentRootID
+                        || (currentRootID == nil && SessionStore.sameWorkspace(ref.path, currentPath)),
+                    counts: store.sessionCounts(for: ref.path, connectionID: ref.connectionID),
+                    fg: fg,
+                    onSelect: { onSelect(ref) }
+                )
+                if index < refs.count - 1 {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(height: 1)
+                        .padding(.leading, 14)
+                }
+            }
+        }
+        if refs.count > WorkspacePickerOrdering.maxVisibleRows {
+            ScrollView {
+                rows
+            }
+            .scrollContentBackground(.hidden)
+        } else {
+            rows
+        }
     }
 }
 
@@ -2239,27 +2346,14 @@ private struct GitWorktreePicker: View {
                     .frame(height: 1)
                     .padding(.horizontal, 12)
 
-                ForEach(Array(repo.worktrees.enumerated()), id: \.element.id) { index, entry in
-                    GitWorktreeRow(
-                        entry: entry,
-                        shortcutIndex: index + 1,
-                        isCurrent: SessionStore.sameWorkspace(entry.path, currentPath),
-                        hasWorkingSession: store.hasWorkingSession(
-                            for: entry.path,
-                            branch: entry.branch,
-                            connectionID: connectionID
+                worktreeRows
+                    .frame(
+                        height: SessionsListMetrics.gitPickerWorktreeListHeight(
+                            worktreeCount: repo.worktrees.count
                         ),
-                        fg: fg,
-                        onSelect: { onSelect(entry) },
-                        onRemove: { removeWorktree(entry) }
+                        alignment: .top
                     )
-                    if index < repo.worktrees.count - 1 {
-                        Rectangle()
-                            .fill(Color.primary.opacity(0.07))
-                            .frame(height: 1)
-                            .padding(.leading, 14)
-                    }
-                }
+
                 Rectangle()
                     .fill(Color.primary.opacity(0.07))
                     .frame(height: 1)
@@ -2279,6 +2373,41 @@ private struct GitWorktreePicker: View {
         }
         .background(WorkspacePickerBackground(cornerRadius: SoftChrome.pickerCornerRadius))
         .animation(.easeOut(duration: 0.14), value: isOpen)
+    }
+
+    @ViewBuilder
+    private var worktreeRows: some View {
+        let rows = VStack(spacing: 0) {
+            ForEach(Array(repo.worktrees.enumerated()), id: \.element.id) { index, entry in
+                GitWorktreeRow(
+                    entry: entry,
+                    shortcutIndex: index + 1,
+                    isCurrent: SessionStore.sameWorkspace(entry.path, currentPath),
+                    hasWorkingSession: store.hasWorkingSession(
+                        for: entry.path,
+                        branch: entry.branch,
+                        connectionID: connectionID
+                    ),
+                    fg: fg,
+                    onSelect: { onSelect(entry) },
+                    onRemove: { removeWorktree(entry) }
+                )
+                if index < repo.worktrees.count - 1 {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.07))
+                        .frame(height: 1)
+                        .padding(.leading, 14)
+                }
+            }
+        }
+        if repo.worktrees.count > SessionsListMetrics.gitPickerMaxVisibleRows {
+            ScrollView {
+                rows
+            }
+            .scrollContentBackground(.hidden)
+        } else {
+            rows
+        }
     }
 
     private func addWorktree() {

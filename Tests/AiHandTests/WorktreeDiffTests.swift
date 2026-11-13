@@ -185,6 +185,23 @@ final class WorktreeDiffTests: XCTestCase {
         XCTAssertGreaterThan(SessionsListMetrics.gitPickerHeight(worktreeCount: 1, expanded: true), closed)
     }
 
+    func testGitPickerHeightCapsAtTenWorktreeRows() {
+        let nine = SessionsListMetrics.gitPickerHeight(worktreeCount: 9, expanded: true)
+        let ten = SessionsListMetrics.gitPickerHeight(worktreeCount: 10, expanded: true)
+        let eleven = SessionsListMetrics.gitPickerHeight(worktreeCount: 11, expanded: true)
+        let twenty = SessionsListMetrics.gitPickerHeight(worktreeCount: 20, expanded: true)
+        XCTAssertLessThan(nine, ten)
+        XCTAssertEqual(ten, eleven)
+        XCTAssertEqual(ten, twenty)
+        XCTAssertEqual(
+            SessionsListMetrics.gitPickerWorktreeListHeight(worktreeCount: 20),
+            SessionsListMetrics.gitPickerWorktreeListHeight(
+                worktreeCount: SessionsListMetrics.gitPickerMaxVisibleRows
+            )
+        )
+        XCTAssertEqual(SessionsListMetrics.gitPickerMaxVisibleRows, 10)
+    }
+
     func testSidebarWidthPersists() {
         let saved = WorktreeChangesWindow.sidebarWidth
         defer { WorktreeChangesWindow.sidebarWidth = saved }
